@@ -1,0 +1,35 @@
+name: Docs merge
+
+on:
+  workflow_call:
+
+permissions: {}
+
+concurrency:
+  group: docs-freshness-merge
+  cancel-in-progress: false
+
+jobs:
+  docs-merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/docs-freshness
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Merge proved docs PRs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DOCS_REPOSITORY: ${{ github.repository }}
+        run: node merge/merge.js
