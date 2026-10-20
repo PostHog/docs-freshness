@@ -86,6 +86,8 @@
   "9cfc1f4b7a4c543938572cee897645a595dbc70b"
  ],
  "[\"pickaxe_candidates\", \"posthog-js\", [[\"-G\", \"(^|[^[:alnum:]_])get_distinct_id[[:space:]]*(<[^>]*>)?[[:space:]]*[(=:]|(\\\\.prototype|this)(\\\\.get_distinct_id|\\\\[[[:space:]]*['\\\"]get_distinct_id['\\\"][[:space:]]*\\\\])[[:space:]]*=\"], [\":(glob)packages/*/src/**\", \"src\"], null, false, \"date\"], []]": [
+  "a66cadac23bc13b7aa6cfbe32a467b531591982a",
+  "22dfa4a4d8c678053c466c5e96f5b46f5743f35c",
   "8a005ca4938c28b3a015fb71083024023aaf4164",
   "c21f14da8332d0d23ed5620bbf5249927accab83",
   "48cca335c0733b78818af10cf2f167759c377a0e",
@@ -246,6 +248,8 @@
  ],
  "[\"pickaxe_candidates\", \"site\", [[\"-G\", \"\\\\$ai_service_tier\", \"--regexp-ignore-case\"], [\"contents/docs\", \"src/pages/docs\"], null, false, \"default\"], []]": [],
  "[\"pickaxe_candidates\", \"site\", [[\"-G\", \"feature\\\\-previews|Feature[[:space:]]+previews|previews|settings/user\\\\-feature\\\\-previews\", \"--regexp-ignore-case\"], [\"contents/docs\", \"src/pages/docs\"], null, false, \"default\"], []]": [
+  "7590364a55311debcb1db6fec7e58c7f775fefb5",
+  "6b26fc1d86bfb9b60adc8347356c0cb2645b038f",
   "428871cae5d6b4ab67a2c01ddfcbe0825975ac99",
   "b069c7a9bfb1d12bc408b694948d30637b144919",
   "a1718379d88d84cf35bc5fc86d0d9b849f779407",

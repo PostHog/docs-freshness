@@ -170,7 +170,7 @@ assert 'Confirm order' not in ui_label_claims(anatomy_prose, 'self-driving/anato
 icon_prefix_audit = audit_page('Click **@ Add context** to attach data.\n', context, 'posthog-ai/example.mdx')
 assert icon_prefix_audit.checked_by_kind['ui-label'] == 1 and not icon_prefix_audit.findings, icon_prefix_audit.findings
 assert 'Follow window' not in findings_of_kind(real_page_audit('session-replay/how-to-watch-recordings.mdx'), 'ui-label')
-assert 'LLM-as-a-judge (UI: llm as a judge)' in findings_of_kind(real_page_audit('ai-evals/index.mdx'), 'ui-label-minor')
+assert 'LLM-as-a-judge (UI: llm as a judge)' in findings_of_kind(audit_page('Click **LLM-as-a-judge**.\n', context, 'ai-evals/example.mdx'), 'ui-label-minor')
 cdp_minor = findings_of_kind(real_page_audit('advanced/cdp.md'), 'ui-label-minor')
 assert any(detail.startswith("Can't find what your looking for") for detail in cdp_minor), cdp_minor
 billing_audit = audit_page('Click **Set billing limit** to cap spend.\n', context, 'billing/example.mdx')
@@ -253,8 +253,16 @@ assert link_typo_audit.findings == [
 assert graded_suggestion('zzzzzzzzzz', {'anchor'}) == ''
 
 
+def suggestions_of_kind(page_audit, kind):
+    return {detail: suggestion for finding_kind, detail, suggestion in page_audit.findings if finding_kind == kind}
+
+
 def real_page_suggestions(page_path, kind):
-    return {detail: suggestion for finding_kind, detail, suggestion in real_page_audit(page_path).findings if finding_kind == kind}
+    return suggestions_of_kind(real_page_audit(page_path), kind)
+
+
+def synthetic_page_suggestions(page_text, page_path, kind):
+    return suggestions_of_kind(audit_page(page_text, context, page_path), kind)
 
 
 def confidence_of(suggestion):
@@ -324,14 +332,14 @@ assert confidence_of(graded_suggestion('step-5-configure-runtime-optional', ['st
 assert confidence_of(graded_suggestion('batch-events', ['events', 'invalid-events'])) == 'candidate'
 
 nonsense_docs_links = (
-    ('product-analytics/privacy.mdx', '/docs/cdp/property-filter', '/docs/cdp/sources/propertyware'),
-    ('mcp-analytics/installation.mdx', '/docs/getting-started/project-token', '/docs/getting-started/next-steps'),
-    ('session-replay/find-replays-ai.mdx', '/docs/session-replay/session-summaries', '/docs/session-replay/sharing'),
+    ('product-analytics/example.mdx', '/docs/cdp/property-filter', '/docs/cdp/sources/propertyware'),
+    ('mcp-analytics/example.mdx', '/docs/getting-started/project-token', '/docs/getting-started/next-steps'),
+    ('session-replay/example.mdx', '/docs/session-replay/session-summaries', '/docs/session-replay/sharing'),
 )
 for docs_link_page, docs_link_path, nonsense_suggestion in nonsense_docs_links:
-    docs_link_suggestions = {detail.split(' ')[0]: suggestion for detail, suggestion in real_page_suggestions(docs_link_page, 'docs-link').items()}
+    docs_link_suggestions = {detail.split(' ')[0]: suggestion for detail, suggestion in synthetic_page_suggestions(f'See [the guide]({docs_link_path}).\n', docs_link_page, 'docs-link').items()}
     assert docs_link_suggestions[docs_link_path] != nonsense_suggestion, (docs_link_page, docs_link_suggestions)
-moved_page_suggestions = real_page_suggestions('model-context-protocol/faq.mdx', 'docs-link')
+moved_page_suggestions = synthetic_page_suggestions('See [annotations](/docs/product-analytics/annotations).\n', 'model-context-protocol/example.mdx', 'docs-link')
 assert moved_page_suggestions['/docs/product-analytics/annotations (missing: /docs/product-analytics/annotations)'] == '/docs/data/annotations'
 assert real_page_suggestions('feature-flags/scheduled-flag-changes.mdx', 'docs-link')['/docs/settings (missing: /docs/settings)'] != '/docs/posthog-desktop/settings'
 
@@ -339,11 +347,11 @@ project_access_suggestion = real_page_suggestions('settings/property-access-cont
 assert (project_access_suggestion, confidence_of(project_access_suggestion)) == ('settings/project-access-control', 'exact')
 assert real_page_suggestions('data/comments.mdx', 'app-url')['data-management/comments'] == ''
 
-save_insight_suggestion = real_page_suggestions('data-warehouse/query.mdx', 'ui-label-minor')['Save insight (UI: save as insight)']
+save_insight_suggestion = synthetic_page_suggestions('Click **Save to insight**.\n', 'data-warehouse/example.mdx', 'ui-label-minor')['Save to insight (UI: save as insight)']
 assert (save_insight_suggestion, confidence_of(save_insight_suggestion)) == ('Save as insight', 'candidate')
 assert 'Create feature flag' in findings_of_kind(real_page_audit('feature-flags/dependencies.mdx'), 'ui-label')
 assert 'Export to JSON' in findings_of_kind(real_page_audit('session-replay/recording-retention.mdx'), 'ui-label')
-judge_suggestion = real_page_suggestions('ai-evals/index.mdx', 'ui-label-minor')['LLM-as-a-judge (UI: llm as a judge)']
+judge_suggestion = synthetic_page_suggestions('Click **LLM-as-a-judge**.\n', 'ai-evals/example.mdx', 'ui-label-minor')['LLM-as-a-judge (UI: llm as a judge)']
 assert (judge_suggestion, confidence_of(judge_suggestion)) == ('LLM as a judge', 'exact')
 assert [str(suggestion) for _, _, suggestion in billing_audit.findings] == ['Set a billing limit']
 assert app_route_suggestions([(('feature_flags', ROUTE_PARAM_MARKER), False)]) == ['feature_flags/:id']
@@ -425,7 +433,7 @@ except ValueError as failure:
     assert 'Never written' in str(failure)
 repeated_claims = (
     ('product-analytics/identify.mdx', 'docs-fragment', 'product-analytics/identify.mdx#person-properties', [601, 638]),
-    ('migrate/managed-migrations.mdx', 'docs-fragment', 'migrate/managed-migrations.mdx#direct-imports-mixpanel-amplitude', [36, 141]),
+    ('migrate/managed-migrations.mdx', 'docs-fragment', 'migrate/managed-migrations.mdx#direct-imports-mixpanel-amplitude', [36, 148]),
     ('settings/property-access-control.mdx', 'app-url', 'settings/project-access', [48, 63]),
 )
 for repeated_page, repeated_kind, repeated_claim, expected_lines in repeated_claims:

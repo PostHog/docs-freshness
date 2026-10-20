@@ -696,7 +696,10 @@ def label_index_from_sources(sources, extractions_by_text=None):
             normalized_unit = normalize_label_text(unit) if len(unit) <= MAX_LABEL_UNIT_LENGTH * 2 else ''
             if normalized_unit and len(normalized_unit) <= MAX_LABEL_UNIT_LENGTH:
                 files_by_unit[normalized_unit].add(file)
-                display_text_by_unit.setdefault(normalized_unit, display_label_text(unit))
+                display_text = display_label_text(unit)
+                known_display_text = display_text_by_unit.get(normalized_unit)
+                if known_display_text is None or (known_display_text.islower() and not display_text.islower()):
+                    display_text_by_unit[normalized_unit] = display_text
         for template, index_words in filter(None, templates):
             for word in index_words:
                 templates_by_word[word].append(template)

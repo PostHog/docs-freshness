@@ -7,3 +7,5 @@ data/docs-inventory-cache.json*.partial
 data/docs-inventory-monorepo-cache.json
 data/docs-inventory-monorepo-cache.json*.partial
 data/unsent-events/
+data/attribution-cache.json
+data/mutation-site/
