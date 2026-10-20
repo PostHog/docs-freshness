@@ -1,0 +1,131 @@
+name: Docs proof
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  docs-proof:
+    if: contains(github.event.pull_request.body, 'docs-freshness-source:')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DOCAUDIT_SITE_ROOT: ${{ github.workspace }}/posthog.com
+      DOCAUDIT_MONOREPO_ROOT: ${{ github.workspace }}/posthog
+      DOCAUDIT_POSTHOG_JS_ROOT: ${{ github.workspace }}/posthog-js
+      DOCAUDIT_POSTHOG_PYTHON_ROOT: ${{ github.workspace }}/posthog-python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/docs-freshness
+          ref: ${{ job.workflow_sha }}
+          path: docs-freshness
+          persist-credentials: false
+      - name: Read the source marker
+        id: source
+        working-directory: docs-freshness/docaudit
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          python3 - "$RUNNER_TEMP/pr-body.md" >> "$GITHUB_OUTPUT" <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          import proof
+
+          def fail(reason):
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as step_summary:
+                  step_summary.write(f'## docs-proof\n\nThe source marker was rejected: {reason}\n')
+              raise SystemExit(reason)
+
+          source, _, failures = proof.read_markers(Path(sys.argv[1]).read_text())
+          if failures:
+              fail('; '.join(failures))
+          code_pull_request = f"PostHog/posthog#{source['number']}"
+          if source['repository'] != 'PostHog/posthog':
+              fail(f"marker repository {source['repository']} is not PostHog/posthog")
+          head_lookup = subprocess.run(
+              ['gh', 'api', f"repos/PostHog/posthog/pulls/{source['number']}", '--jq', '.head.sha'], capture_output=True, text=True,
+          )
+          if head_lookup.returncode != 0:
+              fail(f'could not resolve the head of {code_pull_request}: {head_lookup.stderr.strip()}')
+          code_head_sha = head_lookup.stdout.strip()
+          if code_head_sha != source['head_sha']:
+              fail(f"marker sha {source['head_sha']} is not the head of {code_pull_request} ({code_head_sha})")
+          print(f"head_sha={source['head_sha']}")
+          PY
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/posthog.com
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: posthog.com
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/posthog
+          ref: ${{ steps.source.outputs.head_sha }}
+          path: posthog
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/posthog-js
+          path: posthog-js
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/posthog-python
+          path: posthog-python
+          persist-credentials: false
+      - name: Download the claim map
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download claim-map --repo PostHog/docs-freshness --pattern doc-references.json --dir docs-freshness/docaudit/output
+      - name: Fetch the base side of the changed docs files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          merge_base=$(git -C posthog.com merge-base "$BASE_SHA" "$HEAD_SHA")
+          base_blob_ids=()
+          while IFS= read -r -d '' diff_header && IFS= read -r -d '' changed_path; do
+            read -r base_mode _ base_object_id _ _ <<< "${diff_header#:}"
+            if [ "$base_mode" = 000000 ] || [ "$base_mode" = 160000 ]; then
+              continue
+            fi
+            base_blob_ids+=("$base_object_id")
+          done < <(git -C posthog.com diff --raw -z --no-abbrev --no-renames "$merge_base" "$HEAD_SHA")
+          if [ "${#base_blob_ids[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          git -C posthog.com -c fetch.negotiationAlgorithm=noop fetch --quiet --filter=blob:none --no-tags --no-write-fetch-head --recurse-submodules=no origin "${base_blob_ids[@]}"
+      - name: Prove the docs PR
+        working-directory: docs-freshness/docaudit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SOURCE_HEAD_SHA: ${{ steps.source.outputs.head_sha }}
+        shell: bash
+        run: |
+          proof_status=0
+          python3 proof.py --base "$BASE_SHA" --head "$HEAD_SHA" --body-file "$RUNNER_TEMP/pr-body.md" --json "$RUNNER_TEMP/proof.json" 2>&1 | tee "$RUNNER_TEMP/proof-output.log" || proof_status=$?
+          {
+            printf '## docs-proof\n\nDocs head `%s`, validated source head `%s`.\n\n' "$HEAD_SHA" "$SOURCE_HEAD_SHA"
+            if [ ! -f "$RUNNER_TEMP/proof.json" ]; then
+              printf 'proof.py exited %s without writing a report. Last output:\n\n```\n' "$proof_status"
+              tail -n 20 "$RUNNER_TEMP/proof-output.log"
+              printf '```\n'
+            fi
+            if [ -f "$RUNNER_TEMP/proof.json" ]; then
+              python3 -c 'import json,sys; report=json.load(open(sys.argv[1])); print("Passed." if report["passed"] else "\n".join(f"- {failure}" for failure in report["failures"]))' "$RUNNER_TEMP/proof.json"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$proof_status"
