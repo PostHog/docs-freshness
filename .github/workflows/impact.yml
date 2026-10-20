@@ -1,0 +1,103 @@
+name: Docs impact
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  docs-impact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      DOCAUDIT_SITE_ROOT: ${{ github.workspace }}/posthog.com
+      DOCAUDIT_MONOREPO_ROOT: ${{ github.workspace }}/posthog
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/docs-freshness
+          ref: ${{ job.workflow_sha }}
+          path: docs-freshness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: posthog
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PostHog/posthog.com
+          path: posthog.com
+          persist-credentials: false
+      - name: Download the claim map
+        id: claim-map
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download claim-map --repo PostHog/docs-freshness --pattern doc-references.json --dir docs-freshness/docaudit/output
+      - name: Check docs impact
+        id: impact
+        if: steps.claim-map.outcome == 'success'
+        continue-on-error: true
+        working-directory: docs-freshness/docaudit
+        run: |
+          impact_status=0
+          python3 impact.py --repo monorepo --json "$RUNNER_TEMP/impact.json" HEAD^1..HEAD || impact_status=$?
+          if [ "$impact_status" -gt 1 ]; then
+            exit "$impact_status"
+          fi
+          printf 'flagged=%s\n' "$([ "$impact_status" -eq 1 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          printf 'comments=%s\n' "$(python3 -c 'import json; print(str(json.load(open("../config/posthog.json"))["comments"]).lower())')" >> "$GITHUB_OUTPUT"
+      - name: Capture docs_impact_flagged
+        if: steps.impact.outputs.flagged == 'true'
+        continue-on-error: true
+        working-directory: docs-freshness/docaudit
+        run: python3 report_metrics.py --impact-flagged "$RUNNER_TEMP/impact.json" --pr-url "$PR_URL" --head-sha "$HEAD_SHA"
+      - name: Render the impact comment
+        id: comment
+        if: steps.impact.outputs.flagged == 'true' && steps.impact.outputs.comments == 'true'
+        continue-on-error: true
+        working-directory: docs-freshness/docaudit
+        run: |
+          python3 - "$RUNNER_TEMP/impact.json" "$RUNNER_TEMP/impact-comment.md" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          import impact
+          import report_metrics
+          entries = json.loads(Path(sys.argv[1]).read_text())
+          body = [
+              report_metrics.IMPACT_COMMENT_MARKER,
+              'This PR changes code that published PostHog docs cite. A linked docs PR will follow; react with :-1: if this flag is not relevant.',
+              '',
+              '```',
+              *(line for entry in entries for line in impact.comment_lines(entry)),
+              '```',
+          ]
+          Path(sys.argv[2]).write_text('\n'.join(body) + '\n')
+          PY
+          printf 'marker=%s\n' "$(python3 -c 'import report_metrics; print(report_metrics.IMPACT_COMMENT_MARKER)')" >> "$GITHUB_OUTPUT"
+      - name: Upsert the impact comment
+        if: steps.comment.outcome == 'success'
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          COMMENT_FILE: ${{ runner.temp }}/impact-comment.md
+          IMPACT_COMMENT_MARKER: ${{ steps.comment.outputs.marker }}
+        with:
+          script: |
+            const fs = require('fs')
+            const body = fs.readFileSync(process.env.COMMENT_FILE, 'utf8')
+            const issue = { owner: context.repo.owner, repo: context.repo.repo, issue_number: context.payload.pull_request.number }
+            const comments = await github.paginate(github.rest.issues.listComments, { ...issue, per_page: 100 })
+            const existing = comments.find(comment => comment.user?.login === 'github-actions[bot]' && comment.body?.includes(process.env.IMPACT_COMMENT_MARKER))
+            if (existing) {
+              await github.rest.issues.updateComment({ owner: issue.owner, repo: issue.repo, comment_id: existing.id, body })
+              return
+            }
+            await github.rest.issues.createComment({ ...issue, body })
