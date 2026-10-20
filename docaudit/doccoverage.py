@@ -14,10 +14,11 @@ from urllib.parse import quote
 
 TOOL_ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get('DOCAUDIT_OUTPUT_ROOT', TOOL_ROOT / 'output'))
-SITE_ROOT = Path(os.environ.get('DOCAUDIT_SITE_ROOT', '/Users/johnw/projects/posthog.com-worktrees/master'))
-MONOREPO_ROOT = Path(os.environ.get('DOCAUDIT_MONOREPO_ROOT', '/Users/johnw/projects/posthog/posthog'))
-POSTHOG_JS_ROOT = Path(os.environ.get('DOCAUDIT_POSTHOG_JS_ROOT', '/Users/johnw/projects/posthog/posthog-js'))
-POSTHOG_PYTHON_ROOT = Path(os.environ.get('DOCAUDIT_POSTHOG_PYTHON_ROOT', '/Users/johnw/projects/posthog/posthog-python'))
+CHECKOUTS_ROOT = TOOL_ROOT.parent.parent
+SITE_ROOT = Path(os.environ.get('DOCAUDIT_SITE_ROOT', CHECKOUTS_ROOT / 'posthog.com'))
+MONOREPO_ROOT = Path(os.environ.get('DOCAUDIT_MONOREPO_ROOT', CHECKOUTS_ROOT / 'posthog'))
+POSTHOG_JS_ROOT = Path(os.environ.get('DOCAUDIT_POSTHOG_JS_ROOT', CHECKOUTS_ROOT / 'posthog-js'))
+POSTHOG_PYTHON_ROOT = Path(os.environ.get('DOCAUDIT_POSTHOG_PYTHON_ROOT', CHECKOUTS_ROOT / 'posthog-python'))
 LIVE_ROUTES_FILE = TOOL_ROOT / 'data' / 'live-routes.txt'
 BACKGROUND_PRIORITY_MARKER = 'DOCAUDIT_BACKGROUND_PRIORITY'
 BACKGROUND_NICENESS = 19

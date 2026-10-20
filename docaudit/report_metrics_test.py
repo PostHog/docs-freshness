@@ -154,7 +154,7 @@ def verify_payload(report, commits):
     assert str(uuid.UUID(payload['uuid'])) == payload['uuid']
     assert payload['api_key'] == 'sTMFPsFhdP1Ssg'
     assert payload['event'] == 'docs_audit_run_completed'
-    assert payload['distinct_id'] == 'docs-audit:john.w'
+    assert payload['distinct_id'] == 'docs-audit'
     expected_properties = {
         '$process_person_profile': False, 'status': 'success', 'duration_seconds': 12.5,
         'run_date': '2026-10-06', **commits, 'findings_total': 2,

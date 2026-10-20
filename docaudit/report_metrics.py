@@ -88,7 +88,7 @@ def build_payload(report, duration_seconds, commits, failure_reason=None):
         raise ValueError('duration_seconds must be finite and nonnegative')
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     properties = {'$process_person_profile': False, 'duration_seconds': duration_seconds, **commits}
-    payload = {'api_key': API_KEY, 'event': 'docs_audit_run_completed', 'distinct_id': 'docs-audit:john.w', 'properties': properties, 'timestamp': timestamp, 'uuid': str(uuid.uuid4())}
+    payload = {'api_key': API_KEY, 'event': 'docs_audit_run_completed', 'distinct_id': 'docs-audit', 'properties': properties, 'timestamp': timestamp, 'uuid': str(uuid.uuid4())}
     if failure_reason is not None:
         properties.update(status='failed', failure_reason=failure_reason, run_date=datetime.date.today().isoformat())
         return payload
