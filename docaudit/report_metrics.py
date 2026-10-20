@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -30,6 +31,16 @@ INVENTORY_EVENT_UUID_NAMESPACE = uuid.UUID('4f9c1d52-6a0e-4c56-9d7e-2b8f3e1a7c40
 SPOOL_DIRECTORY = Path(os.environ.get('DOCAUDIT_SPOOL_ROOT', TOOL_ROOT / 'data' / 'unsent-events'))
 TRANSPORT_FAILURES = (urllib.error.URLError, OSError, http.client.HTTPException)
 SPOOL_WRITE_FAILED_EXIT_CODE = 3
+IMPACT_COMMENT_MARKER = '<!-- docs-freshness-impact -->'
+IMPACT_COMMENT_AUTHOR = 'github-actions[bot]'
+IMPACT_FLAGGED_EVENT_UUID_NAMESPACE = uuid.UUID('0b6c8f1e-3d27-4a9e-8f5b-6e1d2c9a4b73')
+IMPACT_FEEDBACK_EVENT_UUID_NAMESPACE = uuid.UUID('9e2a7c41-5f83-4d06-b1c8-3a6f0e9d2b15')
+PRECISION_WINDOW_DAYS = 14
+PULL_REQUEST_URL = re.compile(r'https://github\.com/([A-Za-z0-9-]+/[A-Za-z0-9._-]+)/pull/([0-9]+)')
+GITHUB_API_URL = 'https://api.github.com'
+GITHUB_NEXT_PAGE_LINK = re.compile(r'<([^>]+)>;\s*rel="next"')
+IMPACT_REPOSITORIES = ('PostHog/posthog',)
+FEEDBACK_ENVIRONMENT = ('POSTHOG_HOST', 'POSTHOG_PROJECT_ID', 'POSTHOG_PERSONAL_API_KEY', 'GITHUB_TOKEN')
 
 
 class SpoolWriteError(Exception):
@@ -207,6 +218,98 @@ def build_inventory_payload(inventory, run_payload):
     return payload
 
 
+def pull_request_repository(pr_url):
+    match = PULL_REQUEST_URL.fullmatch(pr_url)
+    if not match:
+        raise ValueError(f'Not a GitHub pull request URL: {pr_url!r}')
+    return match.group(1), int(match.group(2))
+
+
+def build_impact_flagged_payload(impacted, pr_url, head_sha):
+    if not re.fullmatch(r'[0-9a-f]{40}', head_sha):
+        raise ValueError(f'head_sha must be a full commit id: {head_sha!r}')
+    if not impacted:
+        raise ValueError('docs_impact_flagged needs at least one impacted claim')
+    repository, _ = pull_request_repository(pr_url)
+    claims = [{name: require_field(entry, name, 'impact') for name in ('page', 'kind', 'claim')} for entry in impacted]
+    properties = {
+        '$process_person_profile': False, 'pr_url': pr_url, 'repository': repository, 'head_sha': head_sha,
+        'claims': claims, 'pages': sorted({claim['page'] for claim in claims}),
+    }
+    return {
+        'api_key': API_KEY, 'event': 'docs_impact_flagged', 'distinct_id': read_capture_distinct_id(), 'properties': properties,
+        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'uuid': str(uuid.uuid5(IMPACT_FLAGGED_EVENT_UUID_NAMESPACE, f'{pr_url}@{head_sha}')),
+    }
+
+
+def read_json_url(url, headers, payload=None):
+    body = None if payload is None else json.dumps(payload).encode()
+    request = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json', **headers}, method='GET' if body is None else 'POST')
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode()), response.headers.get('Link', '')
+
+
+def flagged_pull_request_urls(environment, distinct_id):
+    query = {'query': {
+        'kind': 'HogQLQuery',
+        'query': (
+            "SELECT DISTINCT properties.pr_url FROM events WHERE event = 'docs_impact_flagged' AND distinct_id = {distinct_id}"
+            f" AND timestamp > now() - INTERVAL {PRECISION_WINDOW_DAYS} DAY"
+        ),
+        'values': {'distinct_id': distinct_id},
+    }}
+    url = f"{environment['POSTHOG_HOST'].rstrip('/')}/api/projects/{urllib.parse.quote(environment['POSTHOG_PROJECT_ID'], safe='')}/query/"
+    response, _ = read_json_url(url, {'Authorization': f"Bearer {environment['POSTHOG_PERSONAL_API_KEY']}"}, query)
+    return sorted(row[0] for row in response['results'] if isinstance(row[0], str) and is_impact_pull_request_url(row[0]))
+
+
+def is_impact_pull_request_url(candidate):
+    match = PULL_REQUEST_URL.fullmatch(candidate)
+    return bool(match) and match.group(1) in IMPACT_REPOSITORIES
+
+
+def impact_comments(pr_url, github_token):
+    repository, number = pull_request_repository(pr_url)
+    url = f'{GITHUB_API_URL}/repos/{repository}/issues/{number}/comments?per_page=100'
+    headers = {'Authorization': f'Bearer {github_token}', 'Accept': 'application/vnd.github+json'}
+    comments = []
+    while url:
+        page, link = read_json_url(url, headers)
+        comments.extend(comment for comment in page if comment['user']['login'] == IMPACT_COMMENT_AUTHOR and IMPACT_COMMENT_MARKER in (comment.get('body') or ''))
+        next_page = GITHUB_NEXT_PAGE_LINK.search(link)
+        url = next_page.group(1) if next_page else None
+    return comments
+
+
+def build_impact_feedback_payload(pr_url, comment, distinct_id):
+    properties = {
+        '$process_person_profile': False, 'pr_url': pr_url, 'repository': pull_request_repository(pr_url)[0],
+        'comment_url': comment['html_url'], 'thumbs_down': comment['reactions']['-1'], 'not_relevant': True,
+    }
+    return {
+        'api_key': API_KEY, 'event': 'docs_impact_feedback', 'distinct_id': distinct_id, 'properties': properties,
+        'timestamp': comment['created_at'], 'uuid': str(uuid.uuid5(IMPACT_FEEDBACK_EVENT_UUID_NAMESPACE, comment['node_id'])),
+    }
+
+
+def impact_comments_or_skip(pr_url, github_token):
+    try:
+        return impact_comments(pr_url, github_token)
+    except TRANSPORT_FAILURES as failure:
+        print(f'Skipped impact feedback for {pr_url}: {type(failure).__name__}: {failure}', file=sys.stderr)
+        return []
+
+
+def build_impact_feedback_payloads(environment):
+    distinct_id = read_capture_distinct_id()
+    return [
+        build_impact_feedback_payload(pr_url, comment, distinct_id)
+        for pr_url in flagged_pull_request_urls(environment, distinct_id)
+        for comment in impact_comments_or_skip(pr_url, environment['GITHUB_TOKEN'])
+        if comment['reactions']['-1'] > 0
+    ]
+
+
 def send_payload(payload):
     endpoint = os.environ.get('DOCAUDIT_CAPTURE_URL', CAPTURE_URL)
     encoded_payload = json.dumps(payload, allow_nan=False).encode('utf-8')
@@ -318,19 +421,48 @@ def deliver_failed_payload_and_exit(arguments, failure_reason):
     raise SystemExit(f'Sent failed event instead of success: {failure_reason}')
 
 
+def deliver_all(payloads, dry_run):
+    outcomes = [(payload, delivery_outcome(payload, dry_run)) for payload in payloads]
+    spooled_events = [f'{payload["event"]} {payload["uuid"]}' for payload, outcome in outcomes if outcome == 'spooled']
+    rejected_events = [f'{payload["event"]} {payload["uuid"]}' for payload, outcome in outcomes if outcome == 'rejected']
+    if spooled_events or rejected_events:
+        raise SystemExit(f'Undelivered events: spooled for the next run: {spooled_events}; rejected by the capture endpoint, not resent: {rejected_events}')
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--duration-seconds', required=True, type=float)
+    parser.add_argument('--duration-seconds', type=float)
     parser.add_argument('--failed', action='store_true')
     parser.add_argument('--reason')
+    parser.add_argument('--impact-flagged', type=Path, metavar='IMPACT_JSON', help='capture docs_impact_flagged from impact.py --json output')
+    parser.add_argument('--pr-url')
+    parser.add_argument('--head-sha')
+    parser.add_argument('--impact-feedback', action='store_true', help='capture docs_impact_feedback for thumbs-down impact comments in the precision window')
     parser.add_argument('--dry-run', action='store_true')
     arguments = parser.parse_args()
+    if arguments.impact_flagged and arguments.impact_feedback:
+        parser.error('--impact-flagged and --impact-feedback are separate runs')
+    if arguments.impact_flagged and not (arguments.pr_url and arguments.head_sha):
+        parser.error('--impact-flagged requires --pr-url and --head-sha')
+    is_run_report = not (arguments.impact_flagged or arguments.impact_feedback)
+    if is_run_report and arguments.duration_seconds is None:
+        parser.error('--duration-seconds is required for a run report')
     if arguments.failed and not arguments.reason:
         parser.error('--failed requires --reason')
     if arguments.reason and not arguments.failed:
         parser.error('--reason requires --failed')
+    missing_environment = [name for name in FEEDBACK_ENVIRONMENT if not os.environ.get(name)]
+    if arguments.impact_feedback and missing_environment:
+        parser.error(f'--impact-feedback needs environment: {", ".join(missing_environment)}')
     if not arguments.dry_run:
         resend_spooled_payloads()
+    if arguments.impact_flagged:
+        impacted = json.loads(arguments.impact_flagged.read_text(encoding='utf-8'))
+        deliver_all([build_impact_flagged_payload(impacted, arguments.pr_url, arguments.head_sha)], arguments.dry_run)
+        return
+    if arguments.impact_feedback:
+        deliver_all(build_impact_feedback_payloads(os.environ), arguments.dry_run)
+        return
     if arguments.failed:
         deliver_payload(build_payload(None, arguments.duration_seconds, read_commit_properties_for_failed_event(), arguments.reason), arguments.dry_run)
         return
@@ -338,11 +470,7 @@ def main():
         run_payload, inventory_payload = build_success_payloads(arguments.duration_seconds)
     except Exception as failure:
         deliver_failed_payload_and_exit(arguments, f'report metrics: {type(failure).__name__}: {failure}')
-    outcomes = [(payload, delivery_outcome(payload, arguments.dry_run)) for payload in (inventory_payload, run_payload)]
-    spooled_events = [f'{payload["event"]} {payload["uuid"]}' for payload, outcome in outcomes if outcome == 'spooled']
-    rejected_events = [f'{payload["event"]} {payload["uuid"]}' for payload, outcome in outcomes if outcome == 'rejected']
-    if spooled_events or rejected_events:
-        raise SystemExit(f'Undelivered events: spooled for the next run: {spooled_events}; rejected by the capture endpoint, not resent: {rejected_events}')
+    deliver_all((inventory_payload, run_payload), arguments.dry_run)
 
 
 def run_reporting():
