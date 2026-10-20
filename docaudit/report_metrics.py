@@ -18,6 +18,8 @@ API_KEY = 'sTMFPsFhdP1Ssg'
 CAPTURE_URL = 'https://us.i.posthog.com/i/v0/e/'
 FINDING_KINDS = ('app-url', 'docs-fragment', 'docs-link', 'sdk-method', 'settings-anchor', 'ui-label', 'ui-label-minor')
 TOOL_ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = TOOL_ROOT.parent / 'config' / 'posthog.json'
+FALLBACK_CAPTURE_DISTINCT_ID = 'docs-audit'
 MAX_NEW_FINDINGS = 50
 INVENTORY_EVENT_COLUMNS = (
     'url', 'source_repo', 'page_class', 'doc_kind', 'is_route', 'redirected_away', 'created_at', 'agent_line_share', 'nonblank_lines',
@@ -76,6 +78,17 @@ def read_commit_properties_for_failed_event():
         return {'commits_unavailable_reason': f'{type(failure).__name__}: {failure}'}
 
 
+def read_capture_distinct_id():
+    return json.loads(CONFIG_PATH.read_text())['capture_distinct_id']
+
+
+def read_capture_identity_for_failed_event():
+    try:
+        return read_capture_distinct_id(), {}
+    except Exception as failure:
+        return FALLBACK_CAPTURE_DISTINCT_ID, {'config_unavailable_reason': f'{type(failure).__name__}: {failure}'}
+
+
 def require_known_keys(totals, known_keys, path):
     unknown_keys = sorted(set(totals) - set(known_keys))
     if unknown_keys:
@@ -87,8 +100,9 @@ def build_payload(report, duration_seconds, commits, failure_reason=None):
     if not math.isfinite(duration_seconds) or duration_seconds < 0:
         raise ValueError('duration_seconds must be finite and nonnegative')
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    properties = {'$process_person_profile': False, 'duration_seconds': duration_seconds, **commits}
-    payload = {'api_key': API_KEY, 'event': 'docs_audit_run_completed', 'distinct_id': 'docs-audit', 'properties': properties, 'timestamp': timestamp, 'uuid': str(uuid.uuid4())}
+    distinct_id, config_properties = read_capture_identity_for_failed_event() if failure_reason is not None else (read_capture_distinct_id(), {})
+    properties = {'$process_person_profile': False, 'duration_seconds': duration_seconds, **commits, **config_properties}
+    payload = {'api_key': API_KEY, 'event': 'docs_audit_run_completed', 'distinct_id': distinct_id, 'properties': properties, 'timestamp': timestamp, 'uuid': str(uuid.uuid4())}
     if failure_reason is not None:
         properties.update(status='failed', failure_reason=failure_reason, run_date=datetime.date.today().isoformat())
         return payload

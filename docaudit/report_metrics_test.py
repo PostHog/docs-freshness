@@ -369,6 +369,8 @@ def verify_broken_tool_module_still_sends_failed_events(root):
     tool_copy.mkdir()
     (tool_copy / 'report_metrics.py').write_text((report_metrics.TOOL_ROOT / 'report_metrics.py').read_text())
     (tool_copy / 'doccoverage.py').write_text('def broken(:\n')
+    (root / 'config').mkdir()
+    (root / 'config' / 'posthog.json').write_text(report_metrics.CONFIG_PATH.read_text())
     completed, captured_requests = run_report_metrics_against_capture_server(tool_copy, root, '--failed', '--reason', 'audit: broken', '--duration-seconds', '2')
     assert completed.returncode == 0, completed
     assert len(captured_requests) == 1, captured_requests
