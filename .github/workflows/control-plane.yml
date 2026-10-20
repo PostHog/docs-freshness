@@ -8,6 +8,7 @@ on:
       - agents/**
       - config/posthog.json
       - .github/workflows/control-plane.yml
+  workflow_dispatch:
 
 permissions: {}
 
