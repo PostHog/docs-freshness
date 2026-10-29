@@ -4,6 +4,7 @@ import { test } from 'node:test'
 
 import { inkeepDraftsDir } from './github/build-cases.ts'
 import { loadCases, loadMeta } from './load-cases.ts'
+import { scoreDrafts } from './run.ts'
 
 test('the committed snapshot is valid and every Inkeep draft belongs to a case', () => {
     const cases = loadCases()
@@ -19,4 +20,15 @@ test('the committed snapshot is valid and every Inkeep draft belongs to a case',
         .map((name) => name.replace(/\.diff$/, ''))
         .filter((caseId) => !caseIds.has(caseId))
     assert.deepEqual(orphanDrafts, [])
+})
+
+test('every unedited Inkeep draft matches its reference on pages and lines', () => {
+    const uneditedScores = scoreDrafts(inkeepDraftsDir).filter((score) => score.referenceKind === 'unedited-inkeep')
+    assert.ok(uneditedScores.length > 0, 'the snapshot holds no unedited Inkeep cases')
+    for (const score of uneditedScores) {
+        assert.deepEqual(
+            [score.caseId, score.hasDraft, score.pageOverlap, score.editSizeLines],
+            [score.caseId, true, 1, 0]
+        )
+    }
 })

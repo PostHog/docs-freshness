@@ -8,6 +8,7 @@
     },
     "scripts": {
         "build-cases": "node evals/github/build-cases.ts",
+        "evals": "node evals/run.ts",
         "test:evals": "node --test evals/evals.test.ts",
         "test": "pnpm test:evals",
         "typecheck": "tsc --noEmit",
