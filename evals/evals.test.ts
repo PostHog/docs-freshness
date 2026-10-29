@@ -3,7 +3,8 @@ import { readdirSync } from 'node:fs'
 import { test } from 'node:test'
 
 import { inkeepDraftsDir } from './github/build-cases.ts'
-import { loadCases, loadMeta } from './load-cases.ts'
+import { defects, loadCases, loadMeta, readCaseDiff } from './load-cases.ts'
+import { mutateReference } from './mutate.ts'
 import { scoreDrafts } from './run.ts'
 
 test('the committed snapshot is valid and every Inkeep draft belongs to a case', () => {
@@ -31,5 +32,18 @@ test('every unedited Inkeep draft matches its reference on pages and lines', asy
             [score.caseId, score.hasDraft, score.pageOverlap, score.editSizeLines],
             [score.caseId, true, 1, 0]
         )
+    }
+})
+
+test('every wrong variant changes its reference and keeps the pages it touches', () => {
+    for (const caseItem of loadCases()) {
+        const referenceDiff = readCaseDiff(caseItem.id, 'reference.diff')
+        const touchedPaths = (diff: string) => diff.match(/^diff --git .*$/gm)
+        for (const defect of defects) {
+            const mutation = mutateReference(referenceDiff, defect)
+            if (mutation === null) continue
+            assert.notEqual(mutation.diff, referenceDiff, `${caseItem.id} ${defect} left the reference unchanged`)
+            assert.deepEqual(touchedPaths(mutation.diff), touchedPaths(referenceDiff))
+        }
     }
 })

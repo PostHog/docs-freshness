@@ -4,9 +4,20 @@ import { parseArgs } from 'node:util'
 import { parse } from 'yaml'
 
 import { createJudge, type Judge, type JudgeConfig, type Verdict } from './judge/judge.ts'
-import { type Case, loadCases, loadDrafts, loadMeta, readCaseDiff, type ReferenceKind, repoRoot } from './load-cases.ts'
+import {
+    type Case,
+    type Defect,
+    defects,
+    loadCases,
+    loadDrafts,
+    loadMeta,
+    readCaseDiff,
+    type ReferenceKind,
+    repoRoot,
+} from './load-cases.ts'
 import { diffStats } from './metrics/diff-stats.ts'
 import { prepareVale, type ValeRunner, type ValeStats } from './metrics/vale.ts'
+import { minimumSharedWords, mutateReference, significantWords } from './mutate.ts'
 
 export type CaseScore = {
     caseId: string
@@ -228,6 +239,20 @@ function renderSummary(scoreRun: ScoreRun, skippedMetrics: string[]): string {
 
 const toJsonLines = (rows: object[]) => rows.map((row) => JSON.stringify(row) + '\n').join('')
 
+function selectCases(caseIdsArgument: string | undefined): Case[] {
+    const requestedCaseIds = caseIdsArgument?.split(',')
+    return loadCases().filter((caseItem) => requestedCaseIds?.includes(caseItem.id) ?? true)
+}
+
+function createRunDir(): string {
+    const runDir = join(resultsDir, new Date().toISOString().replace(/[:.]/g, '-'))
+    mkdirSync(runDir, { recursive: true })
+    return runDir
+}
+
+const loadJudge = (runConfig: RunConfig) =>
+    createJudge(runConfig.judge, readYaml<Record<string, string>>('criteria.yaml'))
+
 async function score(args: string[]) {
     const { values } = parseArgs({
         args,
@@ -242,14 +267,11 @@ async function score(args: string[]) {
     if (values.drafts === undefined) throw new Error('score needs --drafts <dir>')
 
     const runConfig = readYaml<RunConfig>('run-config.yml')
-    const requestedCaseIds = values.cases?.split(',')
-    const cases = loadCases().filter((caseItem) => requestedCaseIds?.includes(caseItem.id) ?? true)
+    const cases = selectCases(values.cases)
     const vale = values['skip-vale']
         ? undefined
         : await prepareVale({ docsRepo: runConfig.docsRepo, ...runConfig.vale })
-    const judge = values['skip-judge']
-        ? undefined
-        : createJudge(runConfig.judge, readYaml<Record<string, string>>('criteria.yaml'))
+    const judge = values['skip-judge'] ? undefined : loadJudge(runConfig)
     const scoreRun = await scoreDrafts(values.drafts, {
         cases,
         vale,
@@ -257,8 +279,7 @@ async function score(args: string[]) {
         reps: Number(values.reps ?? runConfig.judge.reps),
         parallelRequests: runConfig.judge.parallelRequests,
     })
-    const runDir = join(resultsDir, new Date().toISOString().replace(/[:.]/g, '-'))
-    mkdirSync(runDir, { recursive: true })
+    const runDir = createRunDir()
     writeFileSync(join(runDir, 'results.jsonl'), toJsonLines(scoreRun.scores))
     writeFileSync(join(runDir, 'errors.jsonl'), toJsonLines(scoreRun.errors))
     const skippedMetrics = [...(values['skip-vale'] ? ['Vale'] : []), ...(values['skip-judge'] ? ['judge'] : [])]
@@ -268,7 +289,110 @@ async function score(args: string[]) {
     console.log(`Results in ${runDir}`)
 }
 
-const commands: Record<string, (args: string[]) => Promise<void>> = { score }
+type GraderVariant = 'reference' | Defect
+type GraderOutcome = { caseId: string; variant: GraderVariant; rep: number; isCaught: boolean; reason: string }
+
+function namesDefect(verdict: Verdict, defect: Defect, marker: string): boolean {
+    const verdictText = JSON.stringify([verdict.wrongFacts, verdict.missingFacts]).toLowerCase()
+    if (defect !== 'dropped-removal') return verdictText.includes(marker.toLowerCase())
+    const verdictWords = significantWords(verdictText)
+    return [...significantWords(marker)].filter((word) => verdictWords.has(word)).length >= minimumSharedWords
+}
+
+function graderOutcome(score: CaseScore, variant: GraderVariant, marker: string | undefined): GraderOutcome {
+    const outcome = { caseId: score.caseId, variant, rep: score.rep }
+    const verdict = score.verdict
+    if (verdict === null) return { ...outcome, isCaught: false, reason: 'no verdict' }
+    if (variant === 'reference') {
+        return { ...outcome, isCaught: verdict.mergeReady, reason: verdict.mergeReady ? 'merge-ready' : verdict.reason }
+    }
+    if (verdict.mergeReady) return { ...outcome, isCaught: false, reason: `judged merge-ready: ${verdict.reason}` }
+    if (!namesDefect(verdict, variant, marker ?? '')) {
+        return { ...outcome, isCaught: false, reason: `not merge-ready, but the verdict does not name \`${marker}\`` }
+    }
+    return { ...outcome, isCaught: true, reason: 'not merge-ready, defect named' }
+}
+
+function renderGraderSummary(outcomes: GraderOutcome[], errors: ScoreError[]): string {
+    const variants: GraderVariant[] = ['reference', ...defects]
+    const variantRows = variants.map((variant) => {
+        const variantOutcomes = outcomes.filter((outcome) => outcome.variant === variant)
+        const caughtCount = variantOutcomes.filter((outcome) => outcome.isCaught).length
+        return `| ${variant} | ${caughtCount}/${variantOutcomes.length} |`
+    })
+    const misses = outcomes.filter((outcome) => !outcome.isCaught)
+    const missRows = misses.map(
+        (miss) => `| ${miss.caseId} | ${miss.variant} | ${miss.rep} | ${miss.reason.replace(/\|/g, '\\|')} |`
+    )
+    return [
+        '# Grader check',
+        '',
+        'References must be judged merge-ready. Wrong variants must be judged not merge-ready with the defect named.',
+        ...(errors.length > 0
+            ? ['', `${errors.length} judge call(s) hit infrastructure errors; see errors.jsonl.`]
+            : []),
+        '',
+        '| variant | passed |',
+        '| --- | --- |',
+        ...variantRows,
+        '',
+        `## Misses (${misses.length})`,
+        '',
+        ...(misses.length === 0
+            ? ['None.']
+            : ['| case | variant | rep | reason |', '| --- | --- | --- | --- |', ...missRows]),
+        '',
+    ].join('\n')
+}
+
+async function checkGrader(args: string[]) {
+    const { values } = parseArgs({ args, options: { cases: { type: 'string' }, reps: { type: 'string' } } })
+    const runConfig = readYaml<RunConfig>('run-config.yml')
+    const cases = selectCases(values.cases)
+    const judge = loadJudge(runConfig)
+    const runDir = createRunDir()
+
+    const markerByVariantCase = new Map<string, string>()
+    const variants: GraderVariant[] = ['reference', ...defects]
+    for (const variant of variants) {
+        mkdirSync(join(runDir, 'drafts', variant), { recursive: true })
+        for (const caseItem of cases) {
+            const referenceDiff = readCaseDiff(caseItem.id, 'reference.diff')
+            const mutation =
+                variant === 'reference' ? { diff: referenceDiff, marker: '' } : mutateReference(referenceDiff, variant)
+            if (mutation === null) continue
+            markerByVariantCase.set(`${variant}/${caseItem.id}`, mutation.marker)
+            writeFileSync(join(runDir, 'drafts', variant, `${caseItem.id}.diff`), mutation.diff)
+        }
+    }
+
+    const outcomes: GraderOutcome[] = []
+    const errors: ScoreError[] = []
+    for (const variant of variants) {
+        const variantCases = cases.filter((caseItem) => markerByVariantCase.has(`${variant}/${caseItem.id}`))
+        const scoreRun = await scoreDrafts(join(runDir, 'drafts', variant), {
+            cases: variantCases,
+            judge,
+            reps: Number(values.reps ?? 1),
+            parallelRequests: runConfig.judge.parallelRequests,
+        })
+        errors.push(...scoreRun.errors)
+        outcomes.push(
+            ...scoreRun.scores.map((score) =>
+                graderOutcome(score, variant, markerByVariantCase.get(`${variant}/${score.caseId}`))
+            )
+        )
+    }
+    writeFileSync(join(runDir, 'results.jsonl'), toJsonLines(outcomes))
+    writeFileSync(join(runDir, 'errors.jsonl'), toJsonLines(errors))
+    const summary = renderGraderSummary(outcomes, errors)
+    writeFileSync(join(runDir, 'summary.md'), summary)
+    console.log(summary)
+    console.log(`Results in ${runDir}`)
+    if (outcomes.some((outcome) => !outcome.isCaught) || errors.length > 0) process.exitCode = 1
+}
+
+const commands: Record<string, (args: string[]) => Promise<void>> = { score, 'check-grader': checkGrader }
 
 async function main() {
     const [commandName, ...args] = process.argv.slice(2)
