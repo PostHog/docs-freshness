@@ -56,7 +56,7 @@ async function mapInParallel<T>(items: T[], limit: number, handleItem: (item: T)
 }
 
 function mergeReadiness(score: Omit<CaseScore, 'isMergeReady'>, canScoreMergeReady: boolean): boolean | null {
-    if (!canScoreMergeReady) return null
+    if (!canScoreMergeReady || !score.hasDraft) return null
     if (score.vale === null || score.verdict === null || !score.vale.draftApplies) return false
     return score.verdict.mergeReady && score.vale.valeErrorsOnAddedLines === 0
 }
