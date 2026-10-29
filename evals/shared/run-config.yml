@@ -2,3 +2,10 @@ docsRepo: PostHog/posthog.com
 vale:
     version: 3.13.1
     configRef: 15653dd6bc3c4dc53400c958da94d99bbdf2d752
+judge:
+    model: claude-opus-5-5
+    effort: high
+    maxTokens: 16000
+    criterion: factual-accuracy
+    reps: 3
+    parallelRequests: 8

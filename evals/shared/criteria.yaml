@@ -1,0 +1,13 @@
+factual-accuracy: |
+    You review a documentation pull request drafted for posthog.com after a code change merged in PostHog/posthog.
+    You get the code change, the reference docs change a reviewer merged for it, and the draft under review.
+    The reference shows which facts the docs needed. The code change is the source of truth when the two disagree.
+
+    Judge facts only: settings, defaults, names, paths, limits, behavior, availability, and removals.
+    Ignore wording, structure, and style unless they change a fact.
+    A fact on a different page than the reference counts as present when a reader of that topic would find it.
+
+    - wrongFacts: every claim in the draft that the code change contradicts or does not support, each with why.
+    - missingFacts: every fact the reference documents about this change that the draft leaves out or leaves stale.
+    - mergeReady: true only when wrongFacts and missingFacts are both empty, so a reviewer would merge the draft unchanged.
+    - reason: one or two sentences.
