@@ -140,13 +140,15 @@ const mergeReadyRate = (scores: CaseScore[]) =>
 
 function mergeReadyLine({ scores, reps }: ScoreRun, skippedMetrics: string[]): string {
     if (skippedMetrics.length > 0) return `Merge-ready rate not scored: ${skippedMetrics.join(' and ')} skipped.`
-    const ratesByRep = Array.from({ length: reps }, (_, index) =>
-        mergeReadyRate(scores.filter((score) => score.rep === index + 1))
-    )
+    const scoresByRep = Array.from({ length: reps }, (_, index) =>
+        scores.filter((score) => score.rep === index + 1 && isScoredForMergeReady(score))
+    ).filter((repScores) => repScores.length > 0)
+    if (scoresByRep.length === 0) return 'Merge-ready rate not scored: no drafted cases.'
+    const ratesByRep = scoresByRep.map(mergeReadyRate)
     const averageRate = mean(ratesByRep)
     const spread = Math.sqrt(mean(ratesByRep.map((rate) => (rate - averageRate) ** 2)))
     const historicalRate = loadMeta().inkeep.mergeReadyRate
-    return `Merge-ready rate ${formatRate(averageRate)} ± ${formatRate(spread)} over ${reps} rep(s) (Inkeep historical ${formatRate(historicalRate)}).`
+    return `Merge-ready rate ${formatRate(averageRate)} ± ${formatRate(spread)} over ${ratesByRep.length} rep(s) (Inkeep historical ${formatRate(historicalRate)}).`
 }
 
 function summaryRows(scores: CaseScore[]): string[] {
