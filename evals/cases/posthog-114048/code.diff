@@ -1,0 +1,633 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index d12ded99ef89..e9262eaaa79f 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -8521,9 +8521,9 @@ snapshots:
+     scenes-app-ai-observability-prompts--empty-state--light:
+         hash: v1.k794b7964.59b3b3f6cff7db50863f7894a3c8ae00774ef5fd96d0607dc68379e0a4e606cc.-uyE1CWJWfnXDndj60yp3prOUr_ZrFSf8Yxxfj2jbj0
+     scenes-app-ai-observability-prompts--prompts-list--dark:
+-        hash: v1.k794b7964.5cdaae6b72efa77261704903c3b14197bd4996f9db290718a4a585758aaa6cf2.xbF6ujFL2OI5SqKxuBM4wYp4MT4t2IC_HjI5-9mkT4c
++        hash: v1.k794b7964.fc558bddb956e8054f89a082b36ca22ab33c7ec29a9cdd7dc58d8a7d13dcbe8d.N-Lfq2NkfIoIa7xX0e8noroGD-5By-re_gG1z4KwpK4
+     scenes-app-ai-observability-prompts--prompts-list--light:
+-        hash: v1.k794b7964.f4a3e9e0c94c327fbf41ea4698bb4d9cb92b5112848b3ee7f31c57466f0075b2.MoyySImBvALTiYl2FHqO1UG4XLCdcaJJzoUG56t_7gI
++        hash: v1.k794b7964.0bed014864277a4bb14d90aa0ae263eef5a9269a31f0a1a74024584db6c92fd5.zuJ_Vsm9-1FjDG61RTuEvM9g-RhAL9CJb4jdn64HYHM
+     scenes-app-ai-observability-redacted-media-placeholder--audio--dark:
+         hash: v1.k794b7964.033a00b2dba30f23eb78439e091493ce9882d8e93bf3931b74c06a2b3baa8bdc.q2eqo0JCAfpaZw91QmzH16t5IDUxFvwzXGHrvliQg5c
+     scenes-app-ai-observability-redacted-media-placeholder--audio--light:
+diff --git a/posthog/api/llm_prompt.py b/posthog/api/llm_prompt.py
+index 85bab4a1d7d7..dac91ebfc0fd 100644
+--- a/posthog/api/llm_prompt.py
++++ b/posthog/api/llm_prompt.py
+@@ -37,6 +37,7 @@
+ from posthog.api.monitoring import monitor
+ from posthog.api.routing import TeamAndOrgViewSetMixin
+ from posthog.api.services.llm_prompt import (
++    LLMPromptArchivedVersionsOverlapError,
+     LLMPromptDuplicateNameConflictError,
+     LLMPromptEditError,
+     LLMPromptLabelConflictError,
+@@ -49,6 +50,7 @@
+     archive_prompt,
+     duplicate_prompt,
+     get_active_prompt_queryset,
++    get_archived_prompts_queryset,
+     get_labeled_prompts_queryset,
+     get_latest_prompts_queryset,
+     get_prompt_by_name_from_db,
+@@ -57,6 +59,7 @@
+     remove_prompt_label,
+     resolve_versions_page,
+     set_prompt_label,
++    unarchive_prompt,
+ )
+ from posthog.auth import DelegatedOAuthAccessTokenAuthentication, OAuthAccessTokenAuthentication, SessionAuthentication
+ from posthog.event_usage import report_team_action, report_user_action
+@@ -327,9 +330,12 @@ def _get_list_queryset(self, request: Request) -> QuerySet[LLMPrompt]:
+         params = self._get_list_params(request)
+ 
+         label = params.get("label")
+-        base_queryset = (
+-            get_labeled_prompts_queryset(self.team, label) if label else get_latest_prompts_queryset(self.team)
+-        )
++        if params.get("archived"):
++            base_queryset = get_archived_prompts_queryset(self.team)
++        elif label:
++            base_queryset = get_labeled_prompts_queryset(self.team, label)
++        else:
++            base_queryset = get_latest_prompts_queryset(self.team)
+         queryset = base_queryset.annotate(
+             prompt_size_bytes=Func(
+                 Cast("prompt", output_field=TextField()), function="OCTET_LENGTH", output_field=IntegerField()
+@@ -633,6 +639,59 @@ def duplicate(self, request: Request, prompt_name: str = "", **kwargs) -> Respon
+         )
+         return Response(self._serialize_prompt(new_prompt), status=status.HTTP_201_CREATED)
+ 
++    @extend_schema(
++        request=None,
++        responses={
++            200: LLMPromptSerializer,
++            409: OpenApiResponse(
++                description="An active prompt with this name already exists, or the archived versions overlap."
++            ),
++        },
++    )
++    @action(
++        methods=["POST"],
++        detail=False,
++        url_path=r"name/(?P<prompt_name>[^/]+)/unarchive",
++        required_scopes=["llm_prompt:write"],
++    )
++    @llma_track_latency("llma_prompts_unarchive")
++    @monitor(feature=None, endpoint="llma_prompts_unarchive", method="POST")
++    def unarchive(self, request: Request, prompt_name: str = "", **kwargs) -> Response:
++        try:
++            restored_versions = unarchive_prompt(self.team, prompt_name, user=cast(User, request.user))
++        except LLMPromptNotFoundError:
++            return Response(
++                {"detail": f"No archived prompt matching '{prompt_name}' in this project."},
++                status=status.HTTP_404_NOT_FOUND,
++            )
++        except LLMPromptDuplicateNameConflictError:
++            return Response(
++                {"detail": "An active prompt with this name already exists. Rename or archive it first."},
++                status=status.HTTP_409_CONFLICT,
++            )
++        except LLMPromptArchivedVersionsOverlapError:
++            return Response(
++                {
++                    "detail": "This name was archived more than once and its versions overlap, so it can't be restored. Create a new prompt instead."
++                },
++                status=status.HTTP_409_CONFLICT,
++            )
++
++        report_user_action(
++            cast(User, request.user),
++            "llma prompt unarchived",
++            {
++                "prompt_name": prompt_name,
++                "prompt_versions": len(restored_versions),
++            },
++            team=self.team,
++            request=request,
++        )
++        prompt = get_prompt_by_name_from_db(self.team, prompt_name)
++        if prompt is None:
++            return self._prompt_not_found_response(prompt_name)
++        return Response(self._serialize_prompt(prompt))
++
+     @extend_schema(
+         request=LLMPromptSetLabelSerializer,
+         responses={
+@@ -786,10 +845,11 @@ def list(self, request: Request, *args, **kwargs) -> Response:
+             except PromptReferenceResolutionError as err:
+                 return self._reference_resolution_error_response(err)
+ 
+-        if label or not self._is_browser_session(request):
++        if (label or not self._is_browser_session(request)) and not params.get("archived"):
+             # The unlabeled list also backs the prompts UI page, where reading the
+             # page is not a prompt fetch. The browser session separates a prompt
+-            # served to an application from someone looking at the list.
++            # served to an application from someone looking at the list. An archived
++            # list is never served to an application, so it is not a fetch either.
+             resolved_reference_count = sum(len(item.get("resolved_references") or []) for item in data)
+             self._track_list_fetch(len(data), label, resolved_reference_count)
+ 
+diff --git a/posthog/api/llm_prompt_serializers.py b/posthog/api/llm_prompt_serializers.py
+index a02159ca160f..cad622fe6627 100644
+--- a/posthog/api/llm_prompt_serializers.py
++++ b/posthog/api/llm_prompt_serializers.py
+@@ -214,10 +214,23 @@ class LLMPromptListQuerySerializer(serializers.Serializer):
+         default="full",
+         help_text=CONTENT_MODE_HELP,
+     )
++    archived = serializers.BooleanField(
++        required=False,
++        default=False,
++        help_text=(
++            "Return archived prompts instead of active ones. "
++            "Each archived prompt appears once, at its most recent version."
++        ),
++    )
+ 
+     def validate_label(self, value: str) -> str:
+         return validate_prompt_label_name_value(value)
+ 
++    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
++        if attrs.get("archived") and attrs.get("label"):
++            raise serializers.ValidationError("Archived prompts carry no labels. Remove the label parameter.")
++        return attrs
++
+ 
+ class LLMPromptResolveQuerySerializer(LLMPromptFetchQuerySerializer):
+     version_id = serializers.UUIDField(
+diff --git a/posthog/api/services/llm_prompt.py b/posthog/api/services/llm_prompt.py
+index 341c3ff508cd..38c3e72eb7d7 100644
+--- a/posthog/api/services/llm_prompt.py
++++ b/posthog/api/services/llm_prompt.py
+@@ -4,7 +4,7 @@
+ 
+ from django.conf import settings
+ from django.db import IntegrityError, transaction
+-from django.db.models import QuerySet
++from django.db.models import OuterRef, QuerySet, Subquery
+ 
+ from rest_framework import serializers
+ 
+@@ -129,6 +129,22 @@ def get_latest_prompts_queryset(team: Team) -> QuerySet[LLMPrompt]:
+     return get_active_prompt_queryset(team).filter(is_latest=True)
+ 
+ 
++def get_archived_prompts_queryset(team: Team) -> QuerySet[LLMPrompt]:
++    # One row per archived name. Archive clears is_latest, so the newest row is
++    # found by ordering instead.
++    newest_per_name = (
++        LLMPrompt.objects.filter(team=OuterRef("team"), deleted=True, name=OuterRef("name"))
++        .order_by("-version", "-created_at", "-id")
++        .values("id")[:1]
++    )
++    return annotate_llm_prompt_version_history_metadata(
++        LLMPrompt.objects.filter(team=team, deleted=True, id=Subquery(newest_per_name))
++        .select_related("created_by")
++        .prefetch_related("labels"),
++        deleted=True,
++    )
++
++
+ def get_labeled_prompts_queryset(team: Team, label_name: str) -> QuerySet[LLMPrompt]:
+     # Starts from the label rows, not from a WHERE on the latest queryset: a label
+     # usually points at a version that is no longer latest.
+@@ -290,6 +306,10 @@ class LLMPromptDuplicateNameConflictError(Exception):
+     pass
+ 
+ 
++class LLMPromptArchivedVersionsOverlapError(Exception):
++    pass
++
++
+ def duplicate_prompt(
+     team: Team,
+     *,
+@@ -422,6 +442,82 @@ def invalidate_caches_on_commit() -> None:
+     return prompt_versions
+ 
+ 
++def unarchive_prompt(team: Team, prompt_name: str, *, user: User | None = None) -> list[int]:
++    with transaction.atomic():
++        archived_rows = list(
++            LLMPrompt.objects.select_for_update()
++            .filter(team=team, name=prompt_name, deleted=True)
++            .order_by("version", "created_at", "id")
++        )
++        if not archived_rows:
++            raise LLMPromptNotFoundError()
++
++        # The uniqueness constraints only cover active rows, so a prompt created
++        # after the archive can hold the name.
++        if LLMPrompt.objects.filter(team=team, name=prompt_name, deleted=False).exists():
++            raise LLMPromptDuplicateNameConflictError()
++
++        # A name archived, recreated and archived again holds two generations of
++        # rows that share version numbers. Restoring both would violate the
++        # active-row version constraint, and keeping only one would drop history.
++        restored_versions = [row.version for row in archived_rows]
++        if len(set(restored_versions)) != len(restored_versions):
++            raise LLMPromptArchivedVersionsOverlapError()
++
++        latest_row = archived_rows[-1]
++        # Active prompts may only reference active targets (the publish and label
++        # paths enforce the same invariant), so a restore cannot reintroduce a
++        # reference to a still-archived prompt.
++        validate_reference_targets(team.id, prompt_name=prompt_name, prompt_payload=latest_row.prompt)
++
++        try:
++            LLMPrompt.objects.filter(team=team, name=prompt_name, deleted=True).update(deleted=False)
++            LLMPrompt.objects.filter(id=latest_row.id).update(is_latest=True)
++        except IntegrityError as err:
++            # The archived rows are locked but a concurrent create of the same
++            # name is not, so the active-row check above can go stale.
++            if "unique_llm_prompt_latest_per_team" in str(err) or "unique_llm_prompt_version_per_team" in str(err):
++                raise LLMPromptDuplicateNameConflictError() from err
++            raise
++
++        log_llm_prompt_activity(
++            team=team,
++            user=user,
++            prompt_name=prompt_name,
++            activity="unarchived",
++            changes=[Change(type="LLMPrompt", action="created", field="version_count", after=len(restored_versions))],
++        )
++
++        def invalidate_caches_on_commit() -> None:
++            invalidate_prompt_latest_cache(team.id, prompt_name)
++
++            sync_versions = (
++                restored_versions if settings.TEST else restored_versions[:SYNC_ARCHIVE_VERSION_INVALIDATION_LIMIT]
++            )
++            invalidate_prompt_version_caches(team.id, prompt_name, sync_versions)
++
++            remaining_versions = restored_versions[len(sync_versions) :]
++            if not remaining_versions:
++                return
++
++            try:
++                from posthog.tasks.llm_prompt_cache import invalidate_archived_prompt_versions_cache_task
++
++                invalidate_archived_prompt_versions_cache_task.delay(
++                    team.id,
++                    prompt_name,
++                    remaining_versions[0],
++                    remaining_versions[-1],
++                )
++            except Exception as err:
++                capture_exception(err)
++                invalidate_prompt_version_caches(team.id, prompt_name, remaining_versions)
++
++        transaction.on_commit(invalidate_caches_on_commit)
++
++    return restored_versions
++
++
+ @dataclass
+ class PromptLabelSetResult:
+     label: LLMPromptLabel
+diff --git a/products/ai_observability/backend/models/llm_prompt.py b/products/ai_observability/backend/models/llm_prompt.py
+index 36914aefd01e..288c6007d256 100644
+--- a/products/ai_observability/backend/models/llm_prompt.py
++++ b/products/ai_observability/backend/models/llm_prompt.py
+@@ -150,8 +150,12 @@ class Meta:
+     created_at = models.DateTimeField(default=timezone.now)
+ 
+ 
+-def annotate_llm_prompt_version_history_metadata(queryset: QuerySet[LLMPrompt]) -> QuerySet[LLMPrompt]:
+-    active_versions = LLMPrompt.objects.filter(team_id=OuterRef("team_id"), name=OuterRef("name"), deleted=False)
++def annotate_llm_prompt_version_history_metadata(
++    queryset: QuerySet[LLMPrompt], *, deleted: bool = False
++) -> QuerySet[LLMPrompt]:
++    # With deleted=True the metadata describes an archived prompt's own version
++    # set, since none of its rows are active.
++    active_versions = LLMPrompt.objects.filter(team_id=OuterRef("team_id"), name=OuterRef("name"), deleted=deleted)
+ 
+     version_count = Subquery(
+         active_versions.values("name").annotate(count=Count("id")).values("count")[:1],
+diff --git a/products/ai_observability/frontend/generated/api.schemas.ts b/products/ai_observability/frontend/generated/api.schemas.ts
+index c574323b0205..a81852fda0d3 100644
+--- a/products/ai_observability/frontend/generated/api.schemas.ts
++++ b/products/ai_observability/frontend/generated/api.schemas.ts
+@@ -5429,6 +5429,10 @@ export type LlmAnalyticsTraceReviewsListParams = {
+ export type LlmAnalyticsTranslateCreate200 = { [key: string]: unknown }
+ 
+ export type LlmPromptsListParams = {
++    /**
++     * Return archived prompts instead of active ones. Each archived prompt appears once, at its most recent version.
++     */
++    archived?: boolean
+     /**
+      * Controls how much prompt content is included in the response. 'full' includes the full prompt, 'preview' includes a short prompt_preview, and 'none' omits prompt content entirely. The config field is only included with 'full'. The outline field is always included.
+      *
+diff --git a/products/ai_observability/frontend/generated/api.ts b/products/ai_observability/frontend/generated/api.ts
+index 7dc549eb6add..70953de2d17d 100644
+--- a/products/ai_observability/frontend/generated/api.ts
++++ b/products/ai_observability/frontend/generated/api.ts
+@@ -2878,6 +2878,21 @@ export const llmPromptsNameLabelsDestroy = async (
+     })
+ }
+ 
++export const getLlmPromptsNameUnarchiveCreateUrl = (projectId: string, promptName: string) => {
++    return `/api/projects/${projectId}/llm_prompts/name/${promptName}/unarchive/`
++}
++
++export const llmPromptsNameUnarchiveCreate = async (
++    projectId: string,
++    promptName: string,
++    options?: RequestInit
++): Promise<LLMPromptApi> => {
++    return apiMutator<LLMPromptApi>(getLlmPromptsNameUnarchiveCreateUrl(projectId, promptName), {
++        ...options,
++        method: 'POST',
++    })
++}
++
+ export const getLlmPromptsResolveNameRetrieveUrl = (
+     projectId: string,
+     promptName: string,
+diff --git a/products/ai_observability/frontend/prompts/LLMPromptsScene.tsx b/products/ai_observability/frontend/prompts/LLMPromptsScene.tsx
+index ea06b04165b9..b87a146af261 100644
+--- a/products/ai_observability/frontend/prompts/LLMPromptsScene.tsx
++++ b/products/ai_observability/frontend/prompts/LLMPromptsScene.tsx
+@@ -15,6 +15,7 @@ import { urls } from 'scenes/urls'
+ import { SceneContent } from '~/layout/scenes/components/SceneContent'
+ import { SceneTitleSection } from '~/layout/scenes/components/SceneTitleSection'
+ import { LemonInput } from '~/lib/lemon-ui/LemonInput'
++import { LemonSwitch } from '~/lib/lemon-ui/LemonSwitch'
+ import { LemonTable, LemonTableColumn, LemonTableColumns } from '~/lib/lemon-ui/LemonTable'
+ import { atColumn } from '~/lib/lemon-ui/LemonTable/columnUtils'
+ import { ProductKey } from '~/queries/schema/schema-general'
+@@ -34,12 +35,14 @@ export const scene: SceneExport = {
+ }
+ 
+ export function LLMPromptsScene(): JSX.Element {
+-    const { setFilters, deletePrompt } = useActions(llmPromptsLogic)
++    const { setFilters, deletePrompt, restorePrompt } = useActions(llmPromptsLogic)
+     const { duplicatePrompt } = useAsyncActions(llmPromptsLogic)
+-    const { prompts, promptsLoading, sorting, pagination, filters, promptCountLabel } = useValues(llmPromptsLogic)
++    const { prompts, promptsLoading, sorting, pagination, filters, promptCountLabel, restoringPromptName } =
++        useValues(llmPromptsLogic)
+     const { searchParams } = useValues(router)
+     const promptUrl = (name: string): string =>
+         combineUrl(urls.aiObservabilityPrompt(name), stripPromptSceneSearchParams(searchParams)).url
++    const showingArchived = !!filters.archived
+ 
+     const columns: LemonTableColumns<LLMPrompt> = [
+         {
+@@ -48,6 +51,10 @@ export function LLMPromptsScene(): JSX.Element {
+             key: 'name',
+             width: '25%',
+             render: function renderName(_, prompt) {
++                // The prompt page only loads active prompts, so an archived row gets no link.
++                if (showingArchived) {
++                    return <span className="font-semibold">{prompt.name}</span>
++                }
+                 return (
+                     <Link to={promptUrl(prompt.name)} className="font-semibold" data-attr="llma-prompt-name-link">
+                         {prompt.name}
+@@ -89,26 +96,54 @@ export function LLMPromptsScene(): JSX.Element {
+                 return <span className="text-muted-alt">{prompt.version_count}</span>
+             },
+         },
+-        {
+-            title: 'Labels',
+-            key: 'labels',
+-            render: function renderLabels(_, prompt) {
+-                if (!prompt.all_labels?.length) {
+-                    return <span className="text-muted-alt">–</span>
+-                }
+-                return (
+-                    <div className="flex flex-wrap gap-1">
+-                        {prompt.all_labels.map((label) => (
+-                            <PromptLabelChip key={label.name} label={`${label.name}: v${label.version}`} />
+-                        ))}
+-                    </div>
+-                )
+-            },
+-        },
++        // Archiving deletes a prompt's labels, so the archived view has none to show.
++        ...(showingArchived
++            ? []
++            : [
++                  {
++                      title: 'Labels',
++                      key: 'labels',
++                      render: function renderLabels(_, prompt) {
++                          if (!prompt.all_labels?.length) {
++                              return <span className="text-muted-alt">–</span>
++                          }
++                          return (
++                              <div className="flex flex-wrap gap-1">
++                                  {prompt.all_labels.map((label) => (
++                                      <PromptLabelChip key={label.name} label={`${label.name}: v${label.version}`} />
++                                  ))}
++                              </div>
++                          )
++                      },
++                  } as LemonTableColumn<LLMPrompt, keyof LLMPrompt | undefined>,
++              ]),
+         atColumn('created_at', 'Latest version created') as LemonTableColumn<LLMPrompt, keyof LLMPrompt | undefined>,
+         {
+             width: 0,
+             render: function renderMore(_, prompt) {
++                if (showingArchived) {
++                    return (
++                        <AccessControlAction
++                            resourceType={AccessControlResourceType.LlmAnalytics}
++                            minAccessLevel={AccessControlLevel.Editor}
++                        >
++                            <LemonButton
++                                type="secondary"
++                                size="small"
++                                loading={restoringPromptName === prompt.name}
++                                disabledReason={
++                                    restoringPromptName && restoringPromptName !== prompt.name
++                                        ? 'Another prompt is being restored'
++                                        : undefined
++                                }
++                                onClick={() => restorePrompt(prompt.name)}
++                                data-attr="llma-prompt-restore"
++                            >
++                                Restore
++                            </LemonButton>
++                        </AccessControlAction>
++                    )
++                }
+                 return (
+                     <More
+                         overlay={
+@@ -203,6 +238,14 @@ export function LLMPromptsScene(): JSX.Element {
+                         size="xsmall"
+                         onChange={(user) => setFilters({ created_by_id: user?.id, page: 1 })}
+                     />
++                    <LemonSwitch
++                        checked={showingArchived}
++                        onChange={(checked) => setFilters({ archived: checked || undefined, page: 1 })}
++                        label="Show archived"
++                        bordered
++                        size="small"
++                        data-attr="llma-prompts-show-archived"
++                    />
+                 </div>
+ 
+                 <LemonTable
+diff --git a/products/ai_observability/frontend/prompts/llmPromptsLogic.ts b/products/ai_observability/frontend/prompts/llmPromptsLogic.ts
+index 0ef2df127e5c..a8ede609ecc8 100644
+--- a/products/ai_observability/frontend/prompts/llmPromptsLogic.ts
++++ b/products/ai_observability/frontend/prompts/llmPromptsLogic.ts
+@@ -12,7 +12,7 @@ import { trackedActionToUrl } from '~/lib/logic/scenes/trackedActionToUrl'
+ import { sceneLogic } from '~/scenes/sceneLogic'
+ import { urls } from '~/scenes/urls'
+ 
+-import { llmPromptsList, llmPromptsNameArchiveCreate } from '../generated/api'
++import { llmPromptsList, llmPromptsNameArchiveCreate, llmPromptsNameUnarchiveCreate } from '../generated/api'
+ import { cleanPagedSearchOrderParams } from '../utils'
+ import { LLMPrompt } from './types'
+ import { getApiErrorDetail, requestPromptDuplicate } from './utils'
+@@ -25,6 +25,7 @@ export interface PromptFilters {
+     search: string
+     order_by: string
+     created_by_id?: number
++    archived?: boolean
+ }
+ 
+ function cleanFilters(values: Partial<PromptFilters>): PromptFilters {
+@@ -33,6 +34,8 @@ function cleanFilters(values: Partial<PromptFilters>): PromptFilters {
+         search: String(values.search || ''),
+         order_by: values.order_by || '-created_at',
+         created_by_id: values.created_by_id ? Number(values.created_by_id) : undefined,
++        // URL params arrive as strings, so compare the stringified value.
++        archived: String(values.archived) === 'true' ? true : undefined,
+     }
+ }
+ 
+@@ -47,6 +50,7 @@ export interface llmPromptsLogicValues {
+     prompts: CountedPaginatedResponse<LLMPrompt>
+     promptsLoading: boolean
+     rawFilters: Partial<PromptFilters> | null
++    restoringPromptName: string | null
+     sorting: Sorting | null
+ }
+ 
+@@ -83,6 +87,12 @@ export interface llmPromptsLogicActions {
+             debounce: boolean
+         }
+     }
++    restorePrompt: (promptName: string) => {
++        promptName: string
++    }
++    restorePromptFinished: () => {
++        value: true
++    }
+     setFilters: (
+         filters: Partial<PromptFilters>,
+         merge?: boolean,
+@@ -124,10 +134,19 @@ export const llmPromptsLogic = kea<llmPromptsLogicType>([
+         }),
+         loadPrompts: (debounce: boolean = true) => ({ debounce }),
+         deletePrompt: (promptName: string) => ({ promptName }),
++        restorePrompt: (promptName: string) => ({ promptName }),
++        restorePromptFinished: true,
+         duplicatePrompt: (promptName: string, newName: string) => ({ promptName, newName }),
+     }),
+ 
+     reducers({
++        restoringPromptName: [
++            null as string | null,
++            {
++                restorePrompt: (_, { promptName }) => promptName,
++                restorePromptFinished: () => null,
++            },
++        ],
+         rawFilters: [
+             null as Partial<PromptFilters> | null,
+             {
+@@ -157,6 +176,7 @@ export const llmPromptsLogic = kea<llmPromptsLogicType>([
+                         offset: Math.max(0, (filters.page - 1) * PROMPTS_PER_PAGE),
+                         limit: PROMPTS_PER_PAGE,
+                         created_by_id: filters.created_by_id,
++                        archived: filters.archived,
+                     }
+ 
+                     if (
+@@ -218,7 +238,7 @@ export const llmPromptsLogic = kea<llmPromptsLogicType>([
+         ],
+     }),
+ 
+-    listeners(({ asyncActions, values, selectors }) => ({
++    listeners(({ actions, asyncActions, values, selectors }) => ({
+         setFilters: async ({ debounce }, _, __, previousState) => {
+             const oldFilters = selectors.filters(previousState)
+             const { filters } = values
+@@ -238,6 +258,18 @@ export const llmPromptsLogic = kea<llmPromptsLogicType>([
+             }
+         },
+ 
++        restorePrompt: async ({ promptName }) => {
++            try {
++                await llmPromptsNameUnarchiveCreate(String(ApiConfig.getCurrentTeamId()), promptName)
++                lemonToast.success(`${promptName || 'Prompt'} has been restored.`)
++                await asyncActions.loadPrompts(false)
++            } catch (error) {
++                lemonToast.error(getApiErrorDetail(error) || 'Failed to restore prompt')
++            } finally {
++                actions.restorePromptFinished()
++            }
++        },
++
+         duplicatePrompt: async ({ promptName, newName }) => {
+             await requestPromptDuplicate(promptName, newName)
+         },
+@@ -248,6 +280,7 @@ export const llmPromptsLogic = kea<llmPromptsLogicType>([
+             const nextValues = {
+                 ...cleanPagedSearchOrderParams(values.filters),
+                 created_by_id: values.filters.created_by_id,
++                archived: values.filters.archived,
+             }
+             const urlValues = cleanFilters(router.values.searchParams)
+ 
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index dda2627c34d5..836ba7153c06 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -123065,6 +123065,10 @@ export namespace Schemas {
+     export type LlmAnalyticsTranslateCreate200 = { [key: string]: unknown };
+ 
+     export type LlmPromptsListParams = {
++    /**
++     * Return archived prompts instead of active ones. Each archived prompt appears once, at its most recent version.
++     */
++    archived?: boolean;
+     /**
+      * Controls how much prompt content is included in the response. 'full' includes the full prompt, 'preview' includes a short prompt_preview, and 'none' omits prompt content entirely. The config field is only included with 'full'. The outline field is always included.
+      *
+diff --git a/services/mcp/src/generated/ai_observability/api.ts b/services/mcp/src/generated/ai_observability/api.ts
+index fccb1c6bcdb0..231ca638e2fb 100644
+--- a/services/mcp/src/generated/ai_observability/api.ts
++++ b/services/mcp/src/generated/ai_observability/api.ts
+@@ -3378,6 +3378,7 @@ export const LlmPromptsListParams = () => zod.object({
+         ),
+ })
+ 
++export const llmPromptsListQueryArchivedDefault = false
+ export const llmPromptsListQueryContentDefault = `full`
+ export const llmPromptsListQueryLabelMax = 128
+ 
+@@ -3386,6 +3387,12 @@ export const llmPromptsListQueryOrderByDefault = `-created_at`
+ export const llmPromptsListQueryResolveDefault = true
+ 
+ export const LlmPromptsListQueryParams = () => zod.object({
++    archived: zod
++        .boolean()
++        .default(llmPromptsListQueryArchivedDefault)
++        .describe(
++            'Return archived prompts instead of active ones. Each archived prompt appears once, at its most recent version.'
++        ),
+     content: zod
+         .enum(['full', 'preview', 'none'])
+         .default(llmPromptsListQueryContentDefault)

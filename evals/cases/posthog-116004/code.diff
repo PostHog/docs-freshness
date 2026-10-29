@@ -1,0 +1,348 @@
+diff --git a/docs/internal/hog-function-arities.md b/docs/internal/hog-function-arities.md
+index 651ff822009c..d286962471a6 100644
+--- a/docs/internal/hog-function-arities.md
++++ b/docs/internal/hog-function-arities.md
+@@ -4,6 +4,9 @@ Hog checks standard library argument counts for direct calls and functions store
+ The Python and TypeScript native function registries define the minimum and maximum accepted counts.
+ The HogQL parity test checks both bounds against shared HogQL function names in these registries.
+ 
++`sha1(data)` returns lowercase hex in HogQL and Hog. Hog also accepts an optional encoding argument;
++HogQL takes exactly one argument.
++
+ `JSONHas(json)` accepts no path components and returns `true`, preserving Hog's existing empty-path behavior.
+ 
+ Some Hog signatures are deliberately narrower than HogQL:
+diff --git a/posthog/hogql/functions/clickhouse/conversions.py b/posthog/hogql/functions/clickhouse/conversions.py
+index e1f434fa0010..42ad0612fbe7 100644
+--- a/posthog/hogql/functions/clickhouse/conversions.py
++++ b/posthog/hogql/functions/clickhouse/conversions.py
+@@ -141,6 +141,8 @@
+     "defaultValueOfTypeName": HogQLFunctionMeta("defaultValueOfTypeName", 1, 1),
+     "cityHash64": HogQLFunctionMeta("cityHash64", 1, 1),
+     "MD5": HogQLFunctionMeta("MD5", 1, 1),
++    # ClickHouse SHA1 returns a binary digest. Hex keeps API responses and cached results JSON-safe.
++    "sha1": HogQLFunctionMeta("lower(hex(SHA1({})))", 1, 1, using_placeholder_arguments=True),
+     "UUIDv7ToDateTime": HogQLFunctionMeta("UUIDv7ToDateTime", 1, 1, tz_aware=True),
+ }
+ 
+diff --git a/posthog/hogql/printer/duckdb_functions.py b/posthog/hogql/printer/duckdb_functions.py
+index 8f6a22c219e4..b74e69fad7f9 100644
+--- a/posthog/hogql/printer/duckdb_functions.py
++++ b/posthog/hogql/printer/duckdb_functions.py
+@@ -76,6 +76,7 @@ def _handle_current_timestamp(args: list[str]) -> str:
+ 
+ 
+ DUCKDB_FUNCTION_HANDLERS: dict[str, Callable[[list[str]], str]] = {
++    "sha1": lambda args: f"sha1({args[0]})",
+     "argMaxIf": _handle_arg_max_if,
+     "argMinIf": _handle_arg_min_if,
+     "dateAdd": _handle_date_add,
+diff --git a/posthog/hogql/printer/hogql.py b/posthog/hogql/printer/hogql.py
+index 58dcd51c6863..9a086212a636 100644
+--- a/posthog/hogql/printer/hogql.py
++++ b/posthog/hogql/printer/hogql.py
+@@ -120,6 +120,13 @@ def _render_untyped_join_expr(self, node: ast.JoinExpr) -> list[str]:
+     def _expands_placeholder_macros(self) -> bool:
+         return False
+ 
++    def visit_call(self, node: ast.Call):
++        if node.name.lower() == "sha1":
++            connection_function = self._render_connection_supported_function(node)
++            if connection_function is not None:
++                return connection_function
++        return super().visit_call(node)
++
+     def _render_connection_supported_function(self, node: ast.Call) -> str | None:
+         if node.name.lower() in self._get_connection_supported_functions():
+             return f"{node.name}({', '.join([self.visit(arg) for arg in node.args])})"
+diff --git a/posthog/hogql/printer/mysql_functions.py b/posthog/hogql/printer/mysql_functions.py
+index 43f7920b2a3e..2b71ce85b8c6 100644
+--- a/posthog/hogql/printer/mysql_functions.py
++++ b/posthog/hogql/printer/mysql_functions.py
+@@ -218,6 +218,8 @@ def _handle_json_extract_bool(args: list[str]) -> str:
+ # MySQLPrinter._visit_to_start_of_call() / visit_call(), which intercept before this dict
+ # is consulted (dateDiff needs the unparameterized unit constant).
+ MYSQL_FUNCTION_HANDLERS: dict[str, Callable[[list[str]], str]] = {
++    # Hash UTF-8 bytes even when the column uses another character set.
++    "sha1": lambda args: f"sha1(CONVERT({args[0]} USING utf8mb4))",
+     # Type conversions — MySQL CAST never raises; invalid input becomes 0/NULL, which also
+     # covers the *OrZero variants faithfully.
+     "toDate": _make_cast_handler("DATE"),
+diff --git a/posthog/hogql/printer/postgres.py b/posthog/hogql/printer/postgres.py
+index c10202bd1e9a..0f9dddda3303 100644
+--- a/posthog/hogql/printer/postgres.py
++++ b/posthog/hogql/printer/postgres.py
+@@ -12,6 +12,7 @@
+ from posthog.hogql.database.models import StructDatabaseField
+ from posthog.hogql.errors import ImpossibleASTError, QueryError
+ from posthog.hogql.escape_sql import escape_postgres_identifier
++from posthog.hogql.functions.core import validate_function_args
+ from posthog.hogql.printer.base import BasePrinter
+ from posthog.hogql.printer.postgres_functions import (
+     POSTGRES_FUNCTION_HANDLERS_LOWER,
+@@ -169,6 +170,8 @@ def visit_call(self, node: ast.Call):
+ 
+         handler = function_handlers.get(func_name)
+         if handler is not None:
++            if func_name == "sha1":
++                validate_function_args(node.args, 1, 1, node.name)
+             if node.order_by:
+                 raise QueryError(
+                     f"Function '{node.name}' does not support ORDER BY in the {self.DIALECT_LABEL} dialect."
+@@ -220,7 +223,28 @@ def _get_function_renames(self) -> dict[str, str]:
+ 
+     def _get_function_handlers(self) -> dict[str, Callable[[list[str]], str]]:
+         """Lowercased HogQL-name → handler-callable map for functions that need custom rendering."""
+-        return POSTGRES_FUNCTION_HANDLERS_LOWER
++        handlers = POSTGRES_FUNCTION_HANDLERS_LOWER.copy()
++        extension_fallbacks = {"sha1": self._render_sha1}
++        for name, handler in extension_fallbacks.items():
++            if name not in self._connection_supported_functions:
++                handlers[name] = handler
++        return handlers
++
++    def _render_sha1(self, args: list[str]) -> str:
++        metadata = self.context.direct_postgres_connection_metadata or {}
++        if "pgcrypto_schema" not in metadata:
++            raise QueryError(
++                "Refresh this PostgreSQL connection's schemas to check for the pgcrypto extension before using sha1."
++            )
++        schema = metadata["pgcrypto_schema"]
++        if not isinstance(schema, str) or not schema:
++            raise QueryError(
++                "Function 'sha1' requires the pgcrypto extension on this PostgreSQL connection. "
++                "Install pgcrypto and refresh the connection's schemas."
++            )
++        # The connection's search_path may exclude the extension's schema.
++        digest = f"{escape_postgres_identifier(schema)}.digest"
++        return f"encode({digest}(convert_to({args[0]}, 'UTF8'), 'sha1'), 'hex')"
+ 
+     def _get_passthrough_functions(self) -> frozenset[str]:
+         """Lowercased function names that are emitted verbatim without renaming."""
+diff --git a/posthog/hogql/printer/redshift_functions.py b/posthog/hogql/printer/redshift_functions.py
+index 821cd7ea16e5..36f1738ce6d2 100644
+--- a/posthog/hogql/printer/redshift_functions.py
++++ b/posthog/hogql/printer/redshift_functions.py
+@@ -94,6 +94,7 @@ def _handle_avg(args: list[str]) -> str:
+ # Functions whose inherited Postgres rendering Redshift would reject or silently reinterpret;
+ # rewritten to a Redshift-native equivalent that keeps HogQL semantics.
+ _REDSHIFT_ONLY_HANDLERS: dict[str, Callable[[list[str]], str]] = {
++    "sha1": lambda args: f"sha1({args[0]})",
+     "concat": _handle_concat,
+     "position": _handle_position,
+     "avg": _handle_avg,
+diff --git a/posthog/hogql/printer/snowflake_functions.py b/posthog/hogql/printer/snowflake_functions.py
+index 4cf72b7ce367..4d42f83f7886 100644
+--- a/posthog/hogql/printer/snowflake_functions.py
++++ b/posthog/hogql/printer/snowflake_functions.py
+@@ -175,6 +175,7 @@ def _handle_uniq_if(args: list[str]) -> str:
+ 
+ # Functions needing custom rendering: lowercased-name → callable(rendered_args) → SQL.
+ SNOWFLAKE_FUNCTION_HANDLERS: dict[str, Callable[[list[str]], str]] = {
++    "sha1": lambda args: f"sha1({args[0]})",
+     # Type conversions (Snowflake type synonyms; no UUID type → VARCHAR)
+     "toDate": _make_cast_handler("DATE"),
+     "toDateTime": _make_cast_handler("TIMESTAMP"),
+diff --git a/posthog/hogql/printer/trino.py b/posthog/hogql/printer/trino.py
+index bb57323f6bd6..5aaa9323ad75 100644
+--- a/posthog/hogql/printer/trino.py
++++ b/posthog/hogql/printer/trino.py
+@@ -1017,6 +1017,10 @@ def visit_call(self, node: ast.Call) -> str:
+         if name == "md5":
+             rendered_value = self._visit_unary_arg(node)
+             return f"to_hex(md5(to_utf8(CAST({rendered_value} AS VARCHAR))))"
++        if name == "sha1":
++            rendered_value = self._visit_unary_arg(node)
++            # Trino's to_hex is uppercase; HogQL sha1 returns lowercase across dialects.
++            return f"lower(to_hex(sha1(to_utf8(CAST({rendered_value} AS VARCHAR)))))"
+         if name == "extract":
+             return self._visit_extract(node)
+         if name in {"quantile", "quantileif"}:
+diff --git a/posthog/hogql/transforms/trino/validate.py b/posthog/hogql/transforms/trino/validate.py
+index 007173b937ae..e206ba84fb63 100644
+--- a/posthog/hogql/transforms/trino/validate.py
++++ b/posthog/hogql/transforms/trino/validate.py
+@@ -134,6 +134,7 @@
+         "jsonlength",
+         "match",
+         "md5",
++        "sha1",
+         "notempty",
+         "notin",
+         "parsedatetime",
+diff --git a/posthog/hogql/type_system.py b/posthog/hogql/type_system.py
+index bee8cb102bfc..40cdc0ba16e4 100644
+--- a/posthog/hogql/type_system.py
++++ b/posthog/hogql/type_system.py
+@@ -205,6 +205,7 @@ def _display_inner(self) -> str:
+         "reverseutf8",
+         "rightpad",
+         "rightpadutf8",
++        "sha1",
+         "substring",
+         "substringutf8",
+         "tostring",
+diff --git a/products/warehouse_sources/backend/presentation/views/external_data_source/schema_operations.py b/products/warehouse_sources/backend/presentation/views/external_data_source/schema_operations.py
+index c2ead35a76c3..05613ccae919 100644
+--- a/products/warehouse_sources/backend/presentation/views/external_data_source/schema_operations.py
++++ b/products/warehouse_sources/backend/presentation/views/external_data_source/schema_operations.py
+@@ -14,6 +14,8 @@
+ from rest_framework.request import Request
+ from rest_framework.response import Response
+ 
++from posthog.hogql.direct_sql.capability import is_direct_capable
++
+ from posthog.api.utils import action
+ from posthog.permissions import is_service_auth
+ 
+@@ -235,7 +237,7 @@ def refresh_schemas(self, request: Request, *args: Any, **kwargs: Any) -> Respon
+                     source_model=instance,
+                     fallback=instance.connection_metadata,
+                 )
+-                if instance.is_direct_query
++                if is_direct_capable(instance)
+                 else instance.connection_metadata
+             )
+             schema_names = {s.name: s.label for s in schemas}
+@@ -274,7 +276,7 @@ def refresh_schemas(self, request: Request, *args: Any, **kwargs: Any) -> Respon
+         descriptions = {s.name: s.description for s in schemas}
+         with transaction.atomic():
+             ExternalDataSource._base_manager.filter(pk=instance.pk).select_for_update().get()
+-            if instance.is_direct_query and connection_metadata != instance.connection_metadata:
++            if connection_metadata != instance.connection_metadata:
+                 instance.connection_metadata = connection_metadata
+                 instance.save(update_fields=["connection_metadata", "updated_at"])
+             # Migrate/dedupe legacy rows before sync_old_schemas; non-Postgres only once namespace cleared.
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
+index 9a9a6ce269ed..0a8b4670aab3 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
+@@ -1885,6 +1885,18 @@ def get_foreign_keys(
+         return _foreign_keys_from_conn(connection, schema, names)
+ 
+ 
++def _get_connection_functions(cursor: psycopg.Cursor, query: str) -> list[str]:
++    try:
++        cursor.execute(query)
++        functions = _normalize_function_names([row[0] for row in cursor.fetchall()])
++        return [fn for fn in functions if not is_dangerous_table_function(fn)]
++    except Exception as error:
++        # Even a failed SELECT aborts PostgreSQL's transaction; reset it before the next catalog query.
++        cursor.connection.rollback()
++        capture_exception(error)
++        return []
++
++
+ def get_connection_metadata(
+     host: str,
+     database: str,
+@@ -1911,42 +1923,42 @@ def get_connection_metadata(
+             is_duckdb = "duckdb" in version.lower() or "duckgres" in version.lower()
+ 
+             function_source = "duckdb_functions" if is_duckdb else "pg_proc"
+-            available_functions: list[str] = []
+-            available_table_functions: list[str] = []
+-
+-            try:
+-                if is_duckdb:
+-                    cursor.execute("SELECT DISTINCT function_name FROM duckdb_functions()")
+-                else:
+-                    cursor.execute("SELECT DISTINCT proname FROM pg_proc WHERE pg_function_is_visible(oid)")
+-                available_functions = _normalize_function_names([row[0] for row in cursor.fetchall()])
+-            except Exception as error:
+-                capture_exception(error)
+-
+-            try:
+-                if is_duckdb:
+-                    cursor.execute(
+-                        "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
+-                    )
+-                else:
+-                    # prokind='f' excludes aggregates/windows/procedures; proretset=true selects set-returning fns,
+-                    # which is how Postgres exposes table functions in pg_proc.
+-                    cursor.execute(
+-                        "SELECT DISTINCT proname FROM pg_proc "
+-                        "WHERE pg_function_is_visible(oid) AND proretset = true AND prokind = 'f'"
+-                    )
+-                available_table_functions = _normalize_function_names([row[0] for row in cursor.fetchall()])
+-            except Exception as error:
+-                capture_exception(error)
+-
+-            available_functions = [fn for fn in available_functions if not is_dangerous_table_function(fn)]
+-            available_table_functions = [fn for fn in available_table_functions if not is_dangerous_table_function(fn)]
+-
+-            return {
++            metadata: dict[str, Any] = {
+                 "database": current_database,
+                 "version": version,
+                 "engine": "duckdb" if is_duckdb else "postgres",
+                 "function_source": function_source,
++            }
++            if is_duckdb:
++                available_functions = _get_connection_functions(
++                    cursor, "SELECT DISTINCT function_name FROM duckdb_functions()"
++                )
++                available_table_functions = _get_connection_functions(
++                    cursor, "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
++                )
++            else:
++                available_functions = _get_connection_functions(
++                    cursor, "SELECT DISTINCT proname FROM pg_proc WHERE pg_function_is_visible(oid)"
++                )
++                # prokind='f' excludes aggregates/windows/procedures; proretset=true selects set-returning fns,
++                # which is how Postgres exposes table functions in pg_proc.
++                available_table_functions = _get_connection_functions(
++                    cursor,
++                    "SELECT DISTINCT proname FROM pg_proc "
++                    "WHERE pg_function_is_visible(oid) AND proretset = true AND prokind = 'f'",
++                )
++                try:
++                    cursor.execute(
++                        "SELECT n.nspname FROM pg_extension e "
++                        "JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pgcrypto'"
++                    )
++                    extension = cursor.fetchone()
++                    metadata["pgcrypto_schema"] = extension[0] if extension else None
++                except Exception as error:
++                    capture_exception(error)
++
++            return {
++                **metadata,
+                 "available_functions": available_functions,
+                 "available_table_functions": available_table_functions,
+             }
+diff --git a/services/hogql-language-service/internal/completion/functions.go b/services/hogql-language-service/internal/completion/functions.go
+index e08cf9d346b9..1ee709237db1 100644
+--- a/services/hogql-language-service/internal/completion/functions.go
++++ b/services/hogql-language-service/internal/completion/functions.go
+@@ -51,17 +51,17 @@ ngrams not notEmpty notEquals notILike notIn notLike now nowInBlock nth_value nu
+ pointInEllipses pointInPolygon port position positionCaseInsensitive positionCaseInsensitiveUTF8 positionUTF8 positiveModulo pow power protocol quantile quantileExact quantileIf quantiles quantilesIf quantilesMerge quantilesMergeIf quantilesState quantilesStateIf
+ queryString queryStringAndFragment radians rand range rank recordingButton regexpExtract regexpQuoteMeta reinterpretAsFloat32 reinterpretAsFloat64 reinterpretAsInt128 reinterpretAsInt16 reinterpretAsInt256 reinterpretAsInt32 reinterpretAsInt64 reinterpretAsInt8 reinterpretAsUInt128 reinterpretAsUInt16 reinterpretAsUInt256
+ reinterpretAsUInt32 reinterpretAsUInt64 reinterpretAsUInt8 reinterpretAsUUID repeat replace replaceAll replaceOne replaceRegexpAll replaceRegexpOne reverse reverseUTF8 right rightPad rightPadUTF8 round roundAge roundBankers roundDown roundDuration
+-roundToExp2 rowNumberInAllBlocks rowNumberInBlock row_number rpad rtrim sign simpleLinearRegression simpleLinearRegressionIf sin sinh skewPop skewPopIf skewSamp skewSampIf sortablesemver sparkline splitByChar splitByNonAlpha splitByRegexp
+-splitByString splitByWhitespace split_part sqrt startsWith stddevPop stddevPopIf stddevSamp stddevSampIf stringToH3 string_agg subBitmap substring substringUTF8 subtractDays subtractHours subtractMinutes subtractMonths subtractQuarters subtractSeconds
+-subtractWeeks subtractYears sum sumArgMax sumArgMaxIf sumArgMaxOrDefault sumArgMaxOrDefaultIf sumArgMaxOrNull sumArgMaxOrNullIf sumArgMin sumArgMinIf sumArgMinOrDefault sumArgMinOrDefaultIf sumArgMinOrNull sumArgMinOrNullIf sumArray sumArrayIf sumArrayOrDefault sumArrayOrDefaultIf sumArrayOrNull
+-sumArrayOrNullIf sumForEach sumForEachIf sumForEachMerge sumForEachOrDefault sumForEachOrDefaultIf sumForEachOrNull sumForEachOrNullIf sumForEachState sumIf sumMap sumMapIf sumMapMerge sumMapMergeIf sumMapOrDefault sumMapOrDefaultIf sumMapOrNull sumMapOrNullIf sumMerge sumMergeIf
+-sumMergeOrDefault sumMergeOrDefaultIf sumMergeOrNull sumMergeOrNullIf sumOrDefault sumOrDefaultIf sumOrNull sumOrNullIf sumState sumStateIf sumStateOrDefault sumStateOrDefaultIf sumStateOrNull sumStateOrNullIf sumWithOverflow sumWithOverflowIf tan tgamma theilsU theilsUIf
+-throwIf timeSlot timeSlots timeStampAdd timeStampSub timeZoneOf timeZoneOffset timezone toBool toDate toDateTime toDateTime64 toDateTimeUS toDayOfMonth toDayOfWeek toDayOfYear toDecimal toFloat toFloat64OrNull toFloatOrDefault
+-toFloatOrNull toFloatOrZero toHour toIPv4 toIPv4OrDefault toIPv4OrNull toIPv4OrZero toIPv6 toIPv6OrDefault toIPv6OrNull toIPv6OrZero toISOWeek toISOYear toInt toIntOrDefault toIntOrZero toIntervalDay toIntervalHour toIntervalMinute toIntervalMonth
+-toIntervalQuarter toIntervalSecond toIntervalWeek toIntervalYear toJSONString toLastDayOfMonth toLastDayOfWeek toMinute toModifiedJulianDay toMonday toMonth toNullable toNullableString toQuarter toSecond toStartOfDay toStartOfFifteenMinutes toStartOfFiveMinutes toStartOfHour toStartOfISOYear
+-toStartOfInterval toStartOfMinute toStartOfMonth toStartOfQuarter toStartOfSecond toStartOfTenMinutes toStartOfWeek toStartOfYear toString toTime toTimeZone toTypeName toUUID toUUIDOrDefault toUnixTimestamp toUnixTimestamp64Milli toValidUTF8 toWeek toYYYYMM toYYYYMMDD
+-toYYYYMMDDhhmmss toYear toYearWeek to_char to_date to_timestamp today tokens topK topLevelDomain transform translate translateUTF8 trim trimLeft trimRight trunc tryBase58Decode tryBase64Decode tumble
+-tumbleEnd tumbleStart tuple tupleDivide tupleDivideByNumber tupleElement tupleHammingDistance tupleMinus tupleMultiply tupleMultiplyByNumber tupleNegate tuplePlus tupleToNameValuePairs unhex uniq uniqCombined uniqCombined64 uniqExact uniqExactIf uniqExactMerge
+-uniqExactState uniqHLL12 uniqHLL12If uniqIf uniqMap uniqMapMerge uniqMapMergeIf uniqMerge uniqMergeIf uniqState uniqStateIf uniqTheta uniqThetaIf uniqUpToMerge uniqueSurveySubmissionsFilter untuple upper upperUTF8 varPop varPopIf
+-varSamp varSampIf width_bucket windowFunnel xor yesterday
++roundToExp2 rowNumberInAllBlocks rowNumberInBlock row_number rpad rtrim sha1 sign simpleLinearRegression simpleLinearRegressionIf sin sinh skewPop skewPopIf skewSamp skewSampIf sortablesemver sparkline splitByChar splitByNonAlpha
++splitByRegexp splitByString splitByWhitespace split_part sqrt startsWith stddevPop stddevPopIf stddevSamp stddevSampIf stringToH3 string_agg subBitmap substring substringUTF8 subtractDays subtractHours subtractMinutes subtractMonths subtractQuarters
++subtractSeconds subtractWeeks subtractYears sum sumArgMax sumArgMaxIf sumArgMaxOrDefault sumArgMaxOrDefaultIf sumArgMaxOrNull sumArgMaxOrNullIf sumArgMin sumArgMinIf sumArgMinOrDefault sumArgMinOrDefaultIf sumArgMinOrNull sumArgMinOrNullIf sumArray sumArrayIf sumArrayOrDefault sumArrayOrDefaultIf
++sumArrayOrNull sumArrayOrNullIf sumForEach sumForEachIf sumForEachMerge sumForEachOrDefault sumForEachOrDefaultIf sumForEachOrNull sumForEachOrNullIf sumForEachState sumIf sumMap sumMapIf sumMapMerge sumMapMergeIf sumMapOrDefault sumMapOrDefaultIf sumMapOrNull sumMapOrNullIf sumMerge
++sumMergeIf sumMergeOrDefault sumMergeOrDefaultIf sumMergeOrNull sumMergeOrNullIf sumOrDefault sumOrDefaultIf sumOrNull sumOrNullIf sumState sumStateIf sumStateOrDefault sumStateOrDefaultIf sumStateOrNull sumStateOrNullIf sumWithOverflow sumWithOverflowIf tan tgamma theilsU
++theilsUIf throwIf timeSlot timeSlots timeStampAdd timeStampSub timeZoneOf timeZoneOffset timezone toBool toDate toDateTime toDateTime64 toDateTimeUS toDayOfMonth toDayOfWeek toDayOfYear toDecimal toFloat toFloat64OrNull
++toFloatOrDefault toFloatOrNull toFloatOrZero toHour toIPv4 toIPv4OrDefault toIPv4OrNull toIPv4OrZero toIPv6 toIPv6OrDefault toIPv6OrNull toIPv6OrZero toISOWeek toISOYear toInt toIntOrDefault toIntOrZero toIntervalDay toIntervalHour toIntervalMinute
++toIntervalMonth toIntervalQuarter toIntervalSecond toIntervalWeek toIntervalYear toJSONString toLastDayOfMonth toLastDayOfWeek toMinute toModifiedJulianDay toMonday toMonth toNullable toNullableString toQuarter toSecond toStartOfDay toStartOfFifteenMinutes toStartOfFiveMinutes toStartOfHour
++toStartOfISOYear toStartOfInterval toStartOfMinute toStartOfMonth toStartOfQuarter toStartOfSecond toStartOfTenMinutes toStartOfWeek toStartOfYear toString toTime toTimeZone toTypeName toUUID toUUIDOrDefault toUnixTimestamp toUnixTimestamp64Milli toValidUTF8 toWeek toYYYYMM
++toYYYYMMDD toYYYYMMDDhhmmss toYear toYearWeek to_char to_date to_timestamp today tokens topK topLevelDomain transform translate translateUTF8 trim trimLeft trimRight trunc tryBase58Decode tryBase64Decode
++tumble tumbleEnd tumbleStart tuple tupleDivide tupleDivideByNumber tupleElement tupleHammingDistance tupleMinus tupleMultiply tupleMultiplyByNumber tupleNegate tuplePlus tupleToNameValuePairs unhex uniq uniqCombined uniqCombined64 uniqExact uniqExactIf
++uniqExactMerge uniqExactState uniqHLL12 uniqHLL12If uniqIf uniqMap uniqMapMerge uniqMapMergeIf uniqMerge uniqMergeIf uniqState uniqStateIf uniqTheta uniqThetaIf uniqUpToMerge uniqueSurveySubmissionsFilter untuple upper upperUTF8 varPop
++varPopIf varSamp varSampIf width_bucket windowFunnel xor yesterday
+ `)

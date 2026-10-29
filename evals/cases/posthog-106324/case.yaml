@@ -1,0 +1,10 @@
+id: posthog-106324
+codePr: 106324
+mergeSha: 06b1c54e33b9b6c4ebcd2a3993c024046e7f3ba9
+docsPr: 20455
+docsBaseSha: fb690c8dd11801ce555e7dc4e8050d17d508f78a
+section: product-analytics
+referenceKind: carbon-unit
+pages:
+  - contents/docs/product-analytics/dashboards.mdx
+  - contents/handbook/marketing/templates.md

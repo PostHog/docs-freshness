@@ -1,0 +1,9 @@
+id: posthog-116939
+codePr: 116939
+mergeSha: ee9e4f1f9cc3ef7c567dcb3577535d4af32af687
+docsPr: 21195
+docsBaseSha: 6ef73eaa2e322f256b3cd5c2d5c26be53131ed9b
+section: replay-vision
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/replay-vision/what-to-watch.mdx

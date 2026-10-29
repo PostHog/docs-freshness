@@ -1,0 +1,861 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 990cfb428719..4b61f28b919e 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -12619,9 +12619,9 @@ snapshots:
+     scenes-app-inbox-signalsourcespanel--source-catalog-connect-step--light:
+         hash: v1.k794b7964.306fb23c439334374b9ceae47f242edb0ba2cbf9313d255a6f0aac54fd038d16.829n9nWezXS75jPieMDpWOhWmkDuY5xq5I0OD4Mu5zA
+     scenes-app-inbox-signalsourcespanel--source-catalog-open--dark:
+-        hash: v1.k794b7964.040782e418308a65ecfdc73205cac6761ecbeb257290b881855d801db0382d7a.qzNQe1ZpHgPWj4Yd4Al-UYEhrjlQlEv7ToKvFTH6b4s
++        hash: v1.k794b7964.640a6d72858b407aa3fa0887be9c6f777b2f6111609c78e9fbf35098e41139e1.YbtYxoJ-OD3BybjN0FKpsy73r-TQfyGmVQw1Se_b7sg
+     scenes-app-inbox-signalsourcespanel--source-catalog-open--light:
+-        hash: v1.k794b7964.96eca83328e55ae410dd69e70dcdd9a3fbb4bd091993f1b0fea652869ea67911._tDwwiMH43wQOiTF-ycb4LRTTLPP_nan1LpTiwD03h0
++        hash: v1.k794b7964.a141e4e7aaa9114ccceaafd570f73b089f9fbce223b464597cc94f6691ccacbb.gLcsS2s_Jg0rfm9b_UMU39aNUZSbreVP2qRvqla82aQ
+     scenes-app-inbox-signalsourcespanel--source-configs-unavailable--dark:
+         hash: v1.k794b7964.db9d51d553a1b00cc491773f3eb1f200e8aed4c380649d5bf536ff424ab97d2d.SQ7oPEEK3Ndguww2v2PCgeBbURlHxtKheOjR0BQs_us
+     scenes-app-inbox-signalsourcespanel--source-configs-unavailable--light:
+diff --git a/products/signals/backend/contracts.py b/products/signals/backend/contracts.py
+index 65a8f6904a4f..8c5b49e3fd90 100644
+--- a/products/signals/backend/contracts.py
++++ b/products/signals/backend/contracts.py
+@@ -1561,6 +1561,68 @@ class InstatusIncidentSignalInput(SignalInputBase):
+     extra: InstatusIncidentSignalExtra
+ 
+ 
++class GooglePlayConsoleIssueSignalExtra(SignalExtraBase):
++    issue_type: str | None
++    code_location: str | None
++    report_count: str | None
++    affected_users: str | None
++    first_version: str | None
++    last_version: str | None
++    last_report_time: str | None
++    issue_url: str | None
++
++
++class GooglePlayConsoleIssueSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.GOOGLE_PLAY_CONSOLE]
++    extra: GooglePlayConsoleIssueSignalExtra
++
++
++class AzureApplicationInsightsIssueSignalExtra(SignalExtraBase):
++    problem_id: str | None
++    exception_type: str | None
++    role_name: str | None
++    occurrences: str | None
++    first_seen: str | None
++    last_seen: str | None
++
++
++class AzureApplicationInsightsIssueSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.AZURE_APPLICATION_INSIGHTS]
++    extra: AzureApplicationInsightsIssueSignalExtra
++
++
++class AppsignalIssueSignalExtra(SignalExtraBase):
++    state: str | None
++    severity: str | None
++    namespace: str | None
++    occurrence_count: str | None
++    created_at: str | None
++    last_occurred_at: str | None
++
++
++class AppsignalIssueSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.APPSIGNAL]
++    extra: AppsignalIssueSignalExtra
++
++
++class CursorIssueSignalExtra(SignalExtraBase):
++    repo: str | None
++    pr_number: str | None
++    commit_sha: str | None
++    bugs_found: str | None
++    publication_status: str | None
++    timestamp: str | None
++
++
++class CursorIssueSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.CURSOR]
++    extra: CursorIssueSignalExtra
++
++
+ # ── Error monitors ─────────────────────────────────────────────────────────────
+ 
+ 
+@@ -1882,6 +1944,10 @@ class MicrosoftDefenderCloudAppsScannerFindingSignalInput(SignalInputBase):
+     | LaceworkScannerFindingSignalInput
+     | OrcaSecurityScannerFindingSignalInput
+     | TenableVulnerabilityManagementScannerFindingSignalInput
++    | GooglePlayConsoleIssueSignalInput
++    | AzureApplicationInsightsIssueSignalInput
++    | AppsignalIssueSignalInput
++    | CursorIssueSignalInput
+     | TriggerDevErrorSignalInput
+     | ChecklyErrorGroupSignalInput
+     | RoarkIssueSignalInput
+@@ -1990,6 +2056,10 @@ class MicrosoftDefenderCloudAppsScannerFindingSignalInput(SignalInputBase):
+     LaceworkScannerFindingSignalInput,
+     OrcaSecurityScannerFindingSignalInput,
+     TenableVulnerabilityManagementScannerFindingSignalInput,
++    GooglePlayConsoleIssueSignalInput,
++    AzureApplicationInsightsIssueSignalInput,
++    AppsignalIssueSignalInput,
++    CursorIssueSignalInput,
+     TriggerDevErrorSignalInput,
+     ChecklyErrorGroupSignalInput,
+     RoarkIssueSignalInput,
+diff --git a/products/signals/backend/emission/appsignal_exception_incidents.py b/products/signals/backend/emission/appsignal_exception_incidents.py
+new file mode 100644
+index 000000000000..ce0177041b36
+--- /dev/null
++++ b/products/signals/backend/emission/appsignal_exception_incidents.py
+@@ -0,0 +1,49 @@
++"""Signal emitter for appsignal `exception_incidents` (record kind: issue).
++
++Each row is an incident that AppSignal already groups from many error samples.
++`created_at` is an ISO string and never changes, so the time cursor emits each incident once.
++`state` is OPEN, WIP or CLOSED.
++"""
++
++from products.signals.backend.emission._common import make_flat_emitter
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.fetchers.data_warehouse import data_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalSourceTableConfig
++
++# The headline joins the exception name and message, and uses whichever one is set when the other is empty.
++APPSIGNAL_FIELDS = (
++    "id",
++    "if(ifNull(exception_message, '') = '', ifNull(exception_name, ''), "
++    "if(ifNull(exception_name, '') = '', exception_message, "
++    "concat(exception_name, ': ', exception_message))) AS headline",
++    "first_backtrace_line AS backtrace_line",
++    "state",
++    "severity",
++    "namespace",
++    "count AS occurrence_count",
++    "created_at",
++    "last_occurred_at",
++)
++
++APPSIGNAL_CONFIG = SignalSourceTableConfig(
++    source_product="appsignal",
++    source_type="issue",
++    emitter=make_flat_emitter(
++        source_product="appsignal",
++        source_type="issue",
++        id_field="id",
++        title_field="headline",
++        body_field="backtrace_line",
++        extra_fields=("state", "severity", "namespace", "occurrence_count", "created_at", "last_occurred_at"),
++    ),
++    record_fetcher=data_warehouse_record_fetcher,
++    partition_field="toString(created_at)",
++    partition_field_is_datetime_string=True,
++    fields=APPSIGNAL_FIELDS,
++    where_clause="state != 'CLOSED'",
++    max_records=200,
++    first_sync_lookback_days=1,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/azure_application_insights_exceptions.py b/products/signals/backend/emission/azure_application_insights_exceptions.py
+new file mode 100644
+index 000000000000..6af946e50c36
+--- /dev/null
++++ b/products/signals/backend/emission/azure_application_insights_exceptions.py
+@@ -0,0 +1,109 @@
++"""Signal emitter for azure_application_insights `exceptions` (record kind: issue).
++
++The table holds one row per exception occurrence.
++The fetcher groups the rows of a trailing window by `problem_id`, and the emitter produces one signal per problem, at most once per ISO week.
++The emission ledger and the weekly fingerprint keep re-reading the same rows safe.
++"""
++
++import hashlib
++from typing import Any
++
++from structlog import get_logger
++
++from products.signals.backend.emission._common import build_extra
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.datadog_common import clean_text
++from products.signals.backend.emission.fetchers.grouped_warehouse import grouped_warehouse_record_fetcher, week_period
++from products.signals.backend.emission.registry import SignalEmitterOutput, SignalSourceTableConfig
++
++logger = get_logger(__name__)
++
++AZURE_EXCEPTION_FIELDS = (
++    "problem_id",
++    "exception_type",
++    "sample_message",
++    "role_name",
++    "occurrences",
++    "first_seen",
++    "last_seen",
++)
++
++_EXTRA_FIELDS = tuple(f for f in AZURE_EXCEPTION_FIELDS if f not in ("sample_message",))
++_MAX_MESSAGE_CHARS = 300
++
++_SELECT_SQL = """
++    problem_id,
++    any(type) AS exception_type,
++    any(outer_message) AS sample_message,
++    any(cloud_role_name) AS role_name,
++    count() AS occurrences,
++    min(timestamp) AS first_seen,
++    max(timestamp) AS last_seen
++"""
++
++
++def exception_source_id(record: dict[str, Any]) -> str:
++    # The week lets a fixed problem that returns, or one that stays noisy, emit again.
++    fingerprint = "|".join((clean_text(record.get("problem_id")), week_period(record.get("last_seen"))))
++    return "exception:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
++
++
++azure_exception_record_fetcher = grouped_warehouse_record_fetcher(
++    select_sql=_SELECT_SQL,
++    group_by_sql="problem_id",
++    order_by_sql="occurrences DESC",
++    source_id_for=exception_source_id,
++)
++
++
++def azure_exception_emitter(team_id: int, record: dict[str, Any]) -> SignalEmitterOutput | None:
++    problem_id = clean_text(record.get("problem_id"))
++    exception_type = clean_text(record.get("exception_type"))
++    message = clean_text(record.get("sample_message"))[:_MAX_MESSAGE_CHARS]
++    if not problem_id or not (exception_type or message):
++        logger.info(
++            "Ignoring azure_application_insights exception group without a type or message",
++            team_id=team_id,
++            signals_type="data-import-signals",
++        )
++        return None
++    role_name = clean_text(record.get("role_name"))
++    occurrences = clean_text(record.get("occurrences"))
++    first_seen = clean_text(record.get("first_seen"))
++    last_seen = clean_text(record.get("last_seen"))
++    summary = f"Exceptions in {role_name}" if role_name else "Exceptions"
++    if occurrences:
++        summary += f": {occurrences} occurrences"
++    if first_seen and last_seen:
++        summary += f" between {first_seen} and {last_seen}"
++    lines = [summary]
++    if exception_type:
++        lines.append(exception_type)
++    if message:
++        lines.append(message)
++    return SignalEmitterOutput(
++        source_product="azure_application_insights",
++        source_type="issue",
++        source_id=exception_source_id(record),
++        description="\n".join(lines),
++        # Below the report threshold of 1.0, so one noisy problem alone cannot open a report.
++        weight=0.5,
++        extra=build_extra(record, _EXTRA_FIELDS, ()),
++    )
++
++
++AZURE_EXCEPTIONS_CONFIG = SignalSourceTableConfig(
++    source_product="azure_application_insights",
++    source_type="issue",
++    emitter=azure_exception_emitter,
++    record_fetcher=azure_exception_record_fetcher,
++    record_processed_outputs=True,
++    partition_field="toString(timestamp)",
++    partition_field_is_datetime_string=True,
++    fields=AZURE_EXCEPTION_FIELDS,
++    where_clause="problem_id != ''",
++    max_records=100,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/cursor_bugbot_reviews.py b/products/signals/backend/emission/cursor_bugbot_reviews.py
+new file mode 100644
+index 000000000000..d3d77d9769fd
+--- /dev/null
++++ b/products/signals/backend/emission/cursor_bugbot_reviews.py
+@@ -0,0 +1,122 @@
++"""Signal emitter for cursor `bugbot_reviews` (record kind: issue).
++
++One row is one completed Bugbot review of a pull request.
++Dry runs post nothing, so the query and the emitter skip them, and so they skip reviews with no findings.
++A posted review lists only the severity and resolution status of each finding.
++A finding has a title and a description only when the API returns them, so the text is optional.
++"""
++
++from typing import Any
++
++from structlog import get_logger
++
++from products.signals.backend.emission._common import build_extra, parse_json_list
++from products.signals.backend.emission._prompts import ISSUE_ACTIONABILITY_PROMPT, ISSUE_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.datadog_common import clean_text
++from products.signals.backend.emission.fetchers.data_warehouse import data_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalEmitterOutput, SignalSourceTableConfig
++
++logger = get_logger(__name__)
++
++CURSOR_BUGBOT_FIELDS = (
++    "request_id",
++    "timestamp",
++    "repo",
++    "pr_number",
++    "commit_sha",
++    "bugs_found",
++    "dry_run",
++    "publication_status",
++    "bugs",
++)
++
++_EXTRA_FIELDS = ("repo", "pr_number", "commit_sha", "bugs_found", "publication_status", "timestamp")
++_SEVERITY_ORDER = ("critical", "high", "medium", "low")
++_MAX_LISTED_BUGS = 10
++_MAX_BUG_DESCRIPTION_CHARS = 200
++_TRUE_VALUES = ("true", "1")
++
++
++def _bug_lines(bugs: list[Any]) -> list[str]:
++    lines: list[str] = []
++    for bug in bugs:
++        if not isinstance(bug, dict):
++            continue
++        title = clean_text(bug.get("title"))
++        if not title:
++            continue
++        severity = clean_text(bug.get("severity"))
++        line = f"- [{severity}] {title}" if severity else f"- {title}"
++        if description := clean_text(bug.get("description")):
++            line += f": {description[:_MAX_BUG_DESCRIPTION_CHARS]}"
++        lines.append(line)
++        if len(lines) >= _MAX_LISTED_BUGS:
++            break
++    return lines
++
++
++def cursor_bugbot_emitter(team_id: int, record: dict[str, Any]) -> SignalEmitterOutput | None:
++    request_id = clean_text(record.get("request_id"))
++    if not request_id:
++        return None
++    if clean_text(record.get("dry_run")).lower() in _TRUE_VALUES:
++        return None
++    try:
++        bugs_found = int(clean_text(record.get("bugs_found")) or 0)
++    except ValueError:
++        bugs_found = 0
++    if bugs_found <= 0:
++        logger.info(
++            "Ignoring cursor bugbot review without findings",
++            team_id=team_id,
++            signals_type="data-import-signals",
++        )
++        return None
++    bugs = parse_json_list(record.get("bugs"))
++    statuses = [clean_text(bug.get("resolution_status")).lower() for bug in bugs if isinstance(bug, dict)]
++    if statuses and all(status == "resolved" for status in statuses):
++        return None
++    repo = clean_text(record.get("repo"))
++    pr_number = clean_text(record.get("pr_number"))
++    target = " ".join(part for part in (repo, f"PR #{pr_number}" if pr_number else "") if part)
++    noun = "issue" if bugs_found == 1 else "issues"
++    lines = [
++        f"Cursor Bugbot found {bugs_found} {noun} in {target}" if target else f"Cursor Bugbot found {bugs_found} {noun}"
++    ]
++    severities = [clean_text(bug.get("severity")).lower() for bug in bugs if isinstance(bug, dict)]
++    # Known levels come first in a fixed order, then any other level the API returns.
++    levels = [*_SEVERITY_ORDER, *sorted({level for level in severities if level and level not in _SEVERITY_ORDER})]
++    breakdown = ", ".join(f"{severities.count(level)} {level}" for level in levels if severities.count(level) > 0)
++    if breakdown:
++        lines.append(f"Severity: {breakdown}")
++    unresolved = statuses.count("unresolved")
++    if unresolved:
++        lines.append(f"Unresolved: {unresolved}")
++    if commit_sha := clean_text(record.get("commit_sha")):
++        lines.append(f"Commit: {commit_sha}")
++    lines.extend(_bug_lines(bugs))
++    return SignalEmitterOutput(
++        source_product="cursor",
++        source_type="issue",
++        source_id=request_id,
++        description="\n".join(lines),
++        weight=1.0,
++        extra=build_extra(record, _EXTRA_FIELDS, ()),
++    )
++
++
++CURSOR_CONFIG = SignalSourceTableConfig(
++    source_product="cursor",
++    source_type="issue",
++    emitter=cursor_bugbot_emitter,
++    record_fetcher=data_warehouse_record_fetcher,
++    partition_field="timestamp",
++    partition_field_is_datetime_string=True,
++    fields=CURSOR_BUGBOT_FIELDS,
++    where_clause="bugs_found > 0 AND toString(dry_run) NOT IN ('true', '1')",
++    max_records=200,
++    first_sync_lookback_days=1,
++    actionability_prompt=ISSUE_ACTIONABILITY_PROMPT,
++    summarization_prompt=ISSUE_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/google_play_console_error_issues.py b/products/signals/backend/emission/google_play_console_error_issues.py
+new file mode 100644
+index 000000000000..73229f93a7c3
+--- /dev/null
++++ b/products/signals/backend/emission/google_play_console_error_issues.py
+@@ -0,0 +1,109 @@
++"""Signal emitter for google_play_console `error_issues` (record kind: issue).
++
++The table is a full refresh with one row per clustered crash or ANR issue, and it has no creation time.
++The fetcher reads the issues with a recent report and the emission ledger keeps each issue name to one signal.
++Aliases differ from the column names, because a grouped query cannot reuse a column name for an aggregate.
++"""
++
++from typing import Any
++
++from structlog import get_logger
++
++from products.signals.backend.emission._common import build_extra
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.datadog_common import clean_text
++from products.signals.backend.emission.fetchers.grouped_warehouse import grouped_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalEmitterOutput, SignalSourceTableConfig
++
++logger = get_logger(__name__)
++
++GOOGLE_PLAY_CONSOLE_ERROR_ISSUE_FIELDS = (
++    "issue_name",
++    "issue_type",
++    "cause",
++    "code_location",
++    "report_count",
++    "affected_users",
++    "first_version",
++    "last_version",
++    "last_report_time",
++    "issue_url",
++)
++
++_EXTRA_FIELDS = tuple(f for f in GOOGLE_PLAY_CONSOLE_ERROR_ISSUE_FIELDS if f not in ("issue_name", "cause"))
++
++_SELECT_SQL = """
++    name AS issue_name,
++    any(type) AS issue_type,
++    any(cause) AS cause,
++    any(location) AS code_location,
++    max(error_report_count) AS report_count,
++    max(distinct_users) AS affected_users,
++    any(first_app_version) AS first_version,
++    any(last_app_version) AS last_version,
++    max(last_error_report_time) AS last_report_time,
++    any(issue_uri) AS issue_url
++"""
++
++
++def issue_source_id(record: dict[str, Any]) -> str:
++    return clean_text(record.get("issue_name"))
++
++
++google_play_console_error_issue_record_fetcher = grouped_warehouse_record_fetcher(
++    select_sql=_SELECT_SQL,
++    group_by_sql="name",
++    order_by_sql="report_count DESC",
++    source_id_for=issue_source_id,
++)
++
++
++def google_play_console_error_issue_emitter(team_id: int, record: dict[str, Any]) -> SignalEmitterOutput | None:
++    source_id = issue_source_id(record)
++    cause = clean_text(record.get("cause"))
++    location = clean_text(record.get("code_location"))
++    if not source_id or not (cause or location):
++        logger.info(
++            "Ignoring google_play_console error issue without a cause or location",
++            team_id=team_id,
++            signals_type="data-import-signals",
++        )
++        return None
++    issue_type = clean_text(record.get("issue_type")) or "Error"
++    lines = [f"Google Play {issue_type}: {cause}" if cause else f"Google Play {issue_type}"]
++    if location:
++        lines.append(f"Location: {location}")
++    stats = ", ".join(
++        part
++        for part in (
++            f"Reports: {clean_text(record.get('report_count'))}" if clean_text(record.get("report_count")) else "",
++            f"Users: {clean_text(record.get('affected_users'))}" if clean_text(record.get("affected_users")) else "",
++        )
++        if part
++    )
++    if stats:
++        lines.append(stats)
++    return SignalEmitterOutput(
++        source_product="google_play_console",
++        source_type="issue",
++        source_id=source_id,
++        description="\n".join(lines),
++        weight=1.0,
++        extra=build_extra(record, _EXTRA_FIELDS, ()),
++    )
++
++
++GOOGLE_PLAY_CONSOLE_ERROR_ISSUES_CONFIG = SignalSourceTableConfig(
++    source_product="google_play_console",
++    source_type="issue",
++    emitter=google_play_console_error_issue_emitter,
++    record_fetcher=google_play_console_error_issue_record_fetcher,
++    record_processed_outputs=True,
++    partition_field="toString(last_error_report_time)",
++    partition_field_is_datetime_string=True,
++    fields=GOOGLE_PLAY_CONSOLE_ERROR_ISSUE_FIELDS,
++    max_records=200,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/registry.py b/products/signals/backend/emission/registry.py
+index fe1299822b85..4f39136f1d92 100644
+--- a/products/signals/backend/emission/registry.py
++++ b/products/signals/backend/emission/registry.py
+@@ -160,11 +160,13 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.aha_ideas import AHA_CONFIG
+     from products.signals.backend.emission.appfigures_reviews import APPFIGURES_CONFIG
+     from products.signals.backend.emission.appfollow_reviews import APPFOLLOW_CONFIG
++    from products.signals.backend.emission.appsignal_exception_incidents import APPSIGNAL_CONFIG
+     from products.signals.backend.emission.asana_tasks import ASANA_CONFIG
+     from products.signals.backend.emission.asknicely_responses import ASKNICELY_CONFIG
+     from products.signals.backend.emission.aws_guardduty_findings import AWS_GUARDDUTY_CONFIG
+     from products.signals.backend.emission.aws_inspector_findings import AWS_INSPECTOR_CONFIG
+     from products.signals.backend.emission.aws_security_hub_findings import AWS_SECURITY_HUB_CONFIG
++    from products.signals.backend.emission.azure_application_insights_exceptions import AZURE_EXCEPTIONS_CONFIG
+     from products.signals.backend.emission.azure_devops_work_item_revisions import AZURE_DEVOPS_CONFIG
+     from products.signals.backend.emission.bettermode_posts import BETTERMODE_CONFIG
+     from products.signals.backend.emission.betterstack_incidents import BETTERSTACK_CONFIG
+@@ -174,6 +176,7 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.checkly_error_groups import CHECKLY_CONFIG
+     from products.signals.backend.emission.conversations_tickets import CONVERSATIONS_TICKETS_CONFIG
+     from products.signals.backend.emission.cronitor_issues import CRONITOR_CONFIG
++    from products.signals.backend.emission.cursor_bugbot_reviews import CURSOR_CONFIG
+     from products.signals.backend.emission.datadog_error_issues import DATADOG_ERROR_ISSUES_CONFIG
+     from products.signals.backend.emission.datadog_error_logs import DATADOG_ERROR_LOGS_CONFIG
+     from products.signals.backend.emission.datadog_error_spans import DATADOG_ERROR_SPANS_CONFIG
+@@ -195,6 +198,9 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.gitea_issues import GITEA_CONFIG
+     from products.signals.backend.emission.github_issues import GITHUB_ISSUES_CONFIG
+     from products.signals.backend.emission.gitlab_issues import GITLAB_CONFIG
++    from products.signals.backend.emission.google_play_console_error_issues import (
++        GOOGLE_PLAY_CONSOLE_ERROR_ISSUES_CONFIG,
++    )
+     from products.signals.backend.emission.google_search_console_opportunities import GOOGLE_SEARCH_CONSOLE_CONFIG
+     from products.signals.backend.emission.gorgias_tickets import GORGIAS_CONFIG
+     from products.signals.backend.emission.grafana_irm_incidents import GRAFANA_IRM_CONFIG
+@@ -381,6 +387,13 @@ def _register_all_emitters() -> None:
+     register_signal_source(
+         ExternalDataSourceType.MICROSOFTDEFENDERCLOUDAPPS, "alerts", MICROSOFT_DEFENDER_CLOUD_APPS_CONFIG
+     )
++    # Tier-2 errors and code review (record kind: issue)
++    register_signal_source(
++        ExternalDataSourceType.GOOGLEPLAYCONSOLE, "error_issues", GOOGLE_PLAY_CONSOLE_ERROR_ISSUES_CONFIG
++    )
++    register_signal_source(ExternalDataSourceType.AZUREAPPLICATIONINSIGHTS, "exceptions", AZURE_EXCEPTIONS_CONFIG)
++    register_signal_source(ExternalDataSourceType.APPSIGNAL, "exception_incidents", APPSIGNAL_CONFIG)
++    register_signal_source(ExternalDataSourceType.CURSOR, "bugbot_reviews", CURSOR_CONFIG)
+ 
+ 
+ _register_all_emitters()
+diff --git a/products/signals/frontend/generated/api.schemas.ts b/products/signals/frontend/generated/api.schemas.ts
+index c5106adff7ce..3e69a97fbc31 100644
+--- a/products/signals/frontend/generated/api.schemas.ts
++++ b/products/signals/frontend/generated/api.schemas.ts
+@@ -3806,6 +3806,44 @@ export interface InstatusIncidentSignalExtraApi {
+     components: string[]
+ }
+ 
++export interface GooglePlayConsoleIssueSignalExtraApi {
++    issue_type: string | null
++    code_location: string | null
++    report_count: string | null
++    affected_users: string | null
++    first_version: string | null
++    last_version: string | null
++    last_report_time: string | null
++    issue_url: string | null
++}
++
++export interface AzureApplicationInsightsIssueSignalExtraApi {
++    problem_id: string | null
++    exception_type: string | null
++    role_name: string | null
++    occurrences: string | null
++    first_seen: string | null
++    last_seen: string | null
++}
++
++export interface AppsignalIssueSignalExtraApi {
++    state: string | null
++    severity: string | null
++    namespace: string | null
++    occurrence_count: string | null
++    created_at: string | null
++    last_occurred_at: string | null
++}
++
++export interface CursorIssueSignalExtraApi {
++    repo: string | null
++    pr_number: string | null
++    commit_sha: string | null
++    bugs_found: string | null
++    publication_status: string | null
++    timestamp: string | null
++}
++
+ export interface TriggerDevErrorSignalExtraApi {
+     task_identifier: string | null
+     status: string | null
+@@ -4017,6 +4055,10 @@ export type SignalExtraApi =
+     | StatuspageIncidentSignalExtraApi
+     | CronitorIncidentSignalExtraApi
+     | InstatusIncidentSignalExtraApi
++    | GooglePlayConsoleIssueSignalExtraApi
++    | AzureApplicationInsightsIssueSignalExtraApi
++    | AppsignalIssueSignalExtraApi
++    | CursorIssueSignalExtraApi
+     | TriggerDevErrorSignalExtraApi
+     | ChecklyErrorGroupSignalExtraApi
+     | RoarkIssueSignalExtraApi
+diff --git a/products/signals/frontend/inbox/externalSignalSources.ts b/products/signals/frontend/inbox/externalSignalSources.ts
+index aa00b73d7828..852a85fcdb3b 100644
+--- a/products/signals/frontend/inbox/externalSignalSources.ts
++++ b/products/signals/frontend/inbox/externalSignalSources.ts
+@@ -34,6 +34,15 @@ export const EXTERNAL_SIGNAL_SOURCES = [
+         requiredTables: ['work_item_revisions'],
+         sourceType: 'issue',
+     },
++    {
++        source: 'cursor',
++        label: 'Cursor Bugbot',
++        category: 'Code review',
++        watches: 'Surface bugs that Bugbot finds in pull requests',
++        dwSourceType: 'Cursor',
++        requiredTables: ['bugbot_reviews'],
++        sourceType: 'issue',
++    },
+     {
+         source: 'gitea',
+         label: 'Gitea',
+@@ -178,6 +187,33 @@ export const EXTERNAL_SIGNAL_SOURCES = [
+         requiredTables: ['errors'],
+         sourceType: 'issue',
+     },
++    {
++        source: 'appsignal',
++        label: 'AppSignal',
++        category: 'Error tracking',
++        watches: 'Surface new unresolved errors',
++        dwSourceType: 'Appsignal',
++        requiredTables: ['exception_incidents'],
++        sourceType: 'issue',
++    },
++    {
++        source: 'azure_application_insights',
++        label: 'Azure Application Insights',
++        category: 'Error tracking',
++        watches: 'Surface new and recurring exceptions',
++        dwSourceType: 'AzureApplicationInsights',
++        requiredTables: ['exceptions'],
++        sourceType: 'issue',
++    },
++    {
++        source: 'google_play_console',
++        label: 'Google Play Console',
++        category: 'Error tracking',
++        watches: 'Surface new crashes and ANRs in your Android apps',
++        dwSourceType: 'GooglePlayConsole',
++        requiredTables: ['error_issues'],
++        sourceType: 'issue',
++    },
+     {
+         source: 'dixa',
+         label: 'Dixa',
+diff --git a/products/signals/frontend/inbox/signalSourcesLogic.ts b/products/signals/frontend/inbox/signalSourcesLogic.ts
+index aee5f2636ae0..9e0c4ad50509 100644
+--- a/products/signals/frontend/inbox/signalSourcesLogic.ts
++++ b/products/signals/frontend/inbox/signalSourcesLogic.ts
+@@ -616,11 +616,13 @@ export interface signalSourcesLogicMeta {
+                 | 'aha'
+                 | 'appfigures'
+                 | 'appfollow'
++                | 'appsignal'
+                 | 'asana'
+                 | 'asknicely'
+                 | 'aws_guardduty'
+                 | 'aws_inspector'
+                 | 'aws_security_hub'
++                | 'azure_application_insights'
+                 | 'azure_devops'
+                 | 'bettermode'
+                 | 'betterstack'
+@@ -629,6 +631,7 @@ export interface signalSourcesLogicMeta {
+                 | 'canny'
+                 | 'checkly'
+                 | 'cronitor'
++                | 'cursor'
+                 | 'decagon'
+                 | 'discourse'
+                 | 'dixa'
+@@ -645,6 +648,7 @@ export interface signalSourcesLogicMeta {
+                 | 'gitea'
+                 | 'github'
+                 | 'gitlab'
++                | 'google_play_console'
+                 | 'google_search_console'
+                 | 'gorgias'
+                 | 'grafana_irm'
+@@ -721,11 +725,13 @@ export interface signalSourcesLogicMeta {
+                 | 'aha'
+                 | 'appfigures'
+                 | 'appfollow'
++                | 'appsignal'
+                 | 'asana'
+                 | 'asknicely'
+                 | 'aws_guardduty'
+                 | 'aws_inspector'
+                 | 'aws_security_hub'
++                | 'azure_application_insights'
+                 | 'azure_devops'
+                 | 'bettermode'
+                 | 'betterstack'
+@@ -734,6 +740,7 @@ export interface signalSourcesLogicMeta {
+                 | 'canny'
+                 | 'checkly'
+                 | 'cronitor'
++                | 'cursor'
+                 | 'decagon'
+                 | 'discourse'
+                 | 'dixa'
+@@ -750,6 +757,7 @@ export interface signalSourcesLogicMeta {
+                 | 'gitea'
+                 | 'github'
+                 | 'gitlab'
++                | 'google_play_console'
+                 | 'google_search_console'
+                 | 'gorgias'
+                 | 'grafana_irm'
+@@ -817,11 +825,13 @@ export interface signalSourcesLogicMeta {
+                 | 'aha'
+                 | 'appfigures'
+                 | 'appfollow'
++                | 'appsignal'
+                 | 'asana'
+                 | 'asknicely'
+                 | 'aws_guardduty'
+                 | 'aws_inspector'
+                 | 'aws_security_hub'
++                | 'azure_application_insights'
+                 | 'azure_devops'
+                 | 'bettermode'
+                 | 'betterstack'
+@@ -830,6 +840,7 @@ export interface signalSourcesLogicMeta {
+                 | 'canny'
+                 | 'checkly'
+                 | 'cronitor'
++                | 'cursor'
+                 | 'decagon'
+                 | 'discourse'
+                 | 'dixa'
+@@ -846,6 +857,7 @@ export interface signalSourcesLogicMeta {
+                 | 'gitea'
+                 | 'github'
+                 | 'gitlab'
++                | 'google_play_console'
+                 | 'google_search_console'
+                 | 'gorgias'
+                 | 'grafana_irm'
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 5c2f7545c825..e48dd75a146a 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -13060,6 +13060,15 @@ export namespace Schemas {
+       snapshots: ApproveSnapshotInput[];
+     }
+ 
++    export interface AppsignalIssueSignalExtra {
++      state: string | null;
++      severity: string | null;
++      namespace: string | null;
++      occurrence_count: string | null;
++      created_at: string | null;
++      last_occurred_at: string | null;
++    }
++
+     export interface ArchiveExperiment {
+       /** When the linked feature flag is still enabled, also disable and archive it along with the experiment. Has no effect if the flag is already disabled (it is archived either way). */
+       disable_feature_flag?: boolean;
+@@ -15239,6 +15248,15 @@ export namespace Schemas {
+       readonly findings: readonly AwsTenantFinding[];
+     }
+ 
++    export interface AzureApplicationInsightsIssueSignalExtra {
++      problem_id: string | null;
++      exception_type: string | null;
++      role_name: string | null;
++      occurrences: string | null;
++      first_seen: string | null;
++      last_seen: string | null;
++    }
++
+     export type AzureBlobDestinationConfigType = typeof AzureBlobDestinationConfigType[keyof typeof AzureBlobDestinationConfigType];
+ 
+ 
+@@ -27272,6 +27290,15 @@ export namespace Schemas {
+       source: string;
+     }
+ 
++    export interface CursorIssueSignalExtra {
++      repo: string | null;
++      pr_number: string | null;
++      commit_sha: string | null;
++      bugs_found: string | null;
++      publication_status: string | null;
++      timestamp: string | null;
++    }
++
+     /**
+      * * `text` - text
+      * * `link` - link
+@@ -55656,6 +55683,17 @@ export namespace Schemas {
+       PerInterval: 'per_interval',
+     } as const;
+ 
++    export interface GooglePlayConsoleIssueSignalExtra {
++      issue_type: string | null;
++      code_location: string | null;
++      report_count: string | null;
++      affected_users: string | null;
++      first_version: string | null;
++      last_version: string | null;
++      last_report_time: string | null;
++      issue_url: string | null;
++    }
++
+     export interface GoogleSearchConsoleSearchOpportunitySignalExtra {
+       page: string;
+       query: string;
+@@ -100361,7 +100399,7 @@ export namespace Schemas {
+       created_at: string | null;
+     }
+ 
+-    export type SignalExtra = SessionProblemSignalExtra | LlmEvalSignalExtra | LlmEvalReportSignalExtra | ZendeskTicketSignalExtra | GithubIssueSignalExtra | LinearIssueSignalExtra | JiraIssueSignalExtra | ConversationsTicketSignalExtra | ErrorTrackingSignalExtra | PgAnalyzeIssueSignalExtra | EndpointExecutionFailedSignalExtra | EndpointBreakdownLimitExceededSignalExtra | SignalsScoutSignalExtra | CheckFailedSignalExtra | LogsAlertStateChangeSignalExtra | ReplayVisionScannerFindingSignalExtra | AnalyticsAnomalyInvestigationSignalExtra | HealthCheckSignalExtra | EngineeringAnalyticsCIFlakyCheckSignalExtra | EngineeringAnalyticsCIBrokenDefaultBranchSignalExtra | EngineeringAnalyticsCIDurationRegressionSignalExtra | FreshdeskTicketSignalExtra | FreshserviceTicketSignalExtra | FrontConversationSignalExtra | GorgiasTicketSignalExtra | KustomerConversationSignalExtra | DixaConversationSignalExtra | PlainThreadSignalExtra | GitlabIssueSignalExtra | GiteaIssueSignalExtra | ShortcutStorySignalExtra | SentryIssueSignalExtra | RollbarItemSignalExtra | BugsnagErrorSignalExtra | HoneybadgerFaultSignalExtra | RaygunErrorGroupSignalExtra | DatadogSignalExtra | SnykScannerFindingSignalExtra | SonarqubeScannerFindingSignalExtra | SemgrepScannerFindingSignalExtra | Rapid7InsightvmScannerFindingSignalExtra | FeaturebaseFeedbackSignalExtra | FrillFeedbackSignalExtra | AhaFeedbackSignalExtra | UservoiceFeedbackSignalExtra | ProductboardFeedbackSignalExtra | CannyFeedbackSignalExtra | AsknicelyFeedbackSignalExtra | RetentlyFeedbackSignalExtra | UsersnapFeedbackSignalExtra | TypeformFeedbackSignalExtra | QualtricsFeedbackSignalExtra | SurveymonkeyFeedbackSignalExtra | FormbricksFeedbackSignalExtra | SurvicateFeedbackSignalExtra | SurveysparrowFeedbackSignalExtra | AppfiguresReviewSignalExtra | AppfollowReviewSignalExtra | JudgemeReviewsReviewSignalExtra | IntercomTicketSignalExtra | HubspotTicketSignalExtra | Dynamics365TicketSignalExtra | ZohoCrmTicketSignalExtra | GoogleSearchConsoleSearchOpportunitySignalExtra | HelpscoutConversationSignalExtra | DecagonConversationSignalExtra | VitallyConversationSignalExtra | PagerdutyIncidentSignalExtra | OpsgenieAlertSignalExtra | IncidentIoIncidentSignalExtra | FirehydrantIncidentSignalExtra | SquadcastIncidentSignalExtra | ServicenowIncidentSignalExtra | SolarwindsServiceDeskIncidentSignalExtra | GrafanaIrmIncidentSignalExtra | XmattersIncidentSignalExtra | LaceworkScannerFindingSignalExtra | OrcaSecurityScannerFindingSignalExtra | TenableVulnerabilityManagementScannerFindingSignalExtra | BetterstackIncidentSignalExtra | AsanaIssueSignalExtra | MondayIssueSignalExtra | PlaneIssueSignalExtra | AzureDevopsIssueSignalExtra | MonteCarloAlertSignalExtra | BigeyeIssueSignalExtra | DynatraceIncidentSignalExtra | StatuspageIncidentSignalExtra | CronitorIncidentSignalExtra | InstatusIncidentSignalExtra | TriggerDevErrorSignalExtra | ChecklyErrorGroupSignalExtra | RoarkIssueSignalExtra | SleekplanFeedbackSignalExtra | BettermodeFeedbackSignalExtra | DiscourseFeedbackSignalExtra | MintlifyFeedbackSignalExtra | LangsmithFeedbackSignalExtra | SprigFeedbackSignalExtra | GainsightPxFeedbackSignalExtra | TrustpilotReviewSignalExtra | OkendoReviewSignalExtra | AwsSecurityHubScannerFindingSignalExtra | AwsGuarddutyScannerFindingSignalExtra | AwsInspectorScannerFindingSignalExtra | MicrosoftDefenderCloudAppsScannerFindingSignalExtra;
++    export type SignalExtra = SessionProblemSignalExtra | LlmEvalSignalExtra | LlmEvalReportSignalExtra | ZendeskTicketSignalExtra | GithubIssueSignalExtra | LinearIssueSignalExtra | JiraIssueSignalExtra | ConversationsTicketSignalExtra | ErrorTrackingSignalExtra | PgAnalyzeIssueSignalExtra | EndpointExecutionFailedSignalExtra | EndpointBreakdownLimitExceededSignalExtra | SignalsScoutSignalExtra | CheckFailedSignalExtra | LogsAlertStateChangeSignalExtra | ReplayVisionScannerFindingSignalExtra | AnalyticsAnomalyInvestigationSignalExtra | HealthCheckSignalExtra | EngineeringAnalyticsCIFlakyCheckSignalExtra | EngineeringAnalyticsCIBrokenDefaultBranchSignalExtra | EngineeringAnalyticsCIDurationRegressionSignalExtra | FreshdeskTicketSignalExtra | FreshserviceTicketSignalExtra | FrontConversationSignalExtra | GorgiasTicketSignalExtra | KustomerConversationSignalExtra | DixaConversationSignalExtra | PlainThreadSignalExtra | GitlabIssueSignalExtra | GiteaIssueSignalExtra | ShortcutStorySignalExtra | SentryIssueSignalExtra | RollbarItemSignalExtra | BugsnagErrorSignalExtra | HoneybadgerFaultSignalExtra | RaygunErrorGroupSignalExtra | DatadogSignalExtra | SnykScannerFindingSignalExtra | SonarqubeScannerFindingSignalExtra | SemgrepScannerFindingSignalExtra | Rapid7InsightvmScannerFindingSignalExtra | FeaturebaseFeedbackSignalExtra | FrillFeedbackSignalExtra | AhaFeedbackSignalExtra | UservoiceFeedbackSignalExtra | ProductboardFeedbackSignalExtra | CannyFeedbackSignalExtra | AsknicelyFeedbackSignalExtra | RetentlyFeedbackSignalExtra | UsersnapFeedbackSignalExtra | TypeformFeedbackSignalExtra | QualtricsFeedbackSignalExtra | SurveymonkeyFeedbackSignalExtra | FormbricksFeedbackSignalExtra | SurvicateFeedbackSignalExtra | SurveysparrowFeedbackSignalExtra | AppfiguresReviewSignalExtra | AppfollowReviewSignalExtra | JudgemeReviewsReviewSignalExtra | IntercomTicketSignalExtra | HubspotTicketSignalExtra | Dynamics365TicketSignalExtra | ZohoCrmTicketSignalExtra | GoogleSearchConsoleSearchOpportunitySignalExtra | HelpscoutConversationSignalExtra | DecagonConversationSignalExtra | VitallyConversationSignalExtra | PagerdutyIncidentSignalExtra | OpsgenieAlertSignalExtra | IncidentIoIncidentSignalExtra | FirehydrantIncidentSignalExtra | SquadcastIncidentSignalExtra | ServicenowIncidentSignalExtra | SolarwindsServiceDeskIncidentSignalExtra | GrafanaIrmIncidentSignalExtra | XmattersIncidentSignalExtra | LaceworkScannerFindingSignalExtra | OrcaSecurityScannerFindingSignalExtra | TenableVulnerabilityManagementScannerFindingSignalExtra | BetterstackIncidentSignalExtra | AsanaIssueSignalExtra | MondayIssueSignalExtra | PlaneIssueSignalExtra | AzureDevopsIssueSignalExtra | MonteCarloAlertSignalExtra | BigeyeIssueSignalExtra | DynatraceIncidentSignalExtra | StatuspageIncidentSignalExtra | CronitorIncidentSignalExtra | InstatusIncidentSignalExtra | GooglePlayConsoleIssueSignalExtra | AzureApplicationInsightsIssueSignalExtra | AppsignalIssueSignalExtra | CursorIssueSignalExtra | TriggerDevErrorSignalExtra | ChecklyErrorGroupSignalExtra | RoarkIssueSignalExtra | SleekplanFeedbackSignalExtra | BettermodeFeedbackSignalExtra | DiscourseFeedbackSignalExtra | MintlifyFeedbackSignalExtra | LangsmithFeedbackSignalExtra | SprigFeedbackSignalExtra | GainsightPxFeedbackSignalExtra | TrustpilotReviewSignalExtra | OkendoReviewSignalExtra | AwsSecurityHubScannerFindingSignalExtra | AwsGuarddutyScannerFindingSignalExtra | AwsInspectorScannerFindingSignalExtra | MicrosoftDefenderCloudAppsScannerFindingSignalExtra;
+ 
+     export type SignalMatchMetadata = MatchedMetadata | NoMatchMetadata;
+ 

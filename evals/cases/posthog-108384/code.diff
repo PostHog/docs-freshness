@@ -1,0 +1,51 @@
+diff --git a/posthog/api/llm_prompt.py b/posthog/api/llm_prompt.py
+index a2098647fdfd..f987a709166d 100644
+--- a/posthog/api/llm_prompt.py
++++ b/posthog/api/llm_prompt.py
+@@ -69,7 +69,12 @@
+ from posthog.exceptions_capture import capture_exception
+ from posthog.models import User
+ from posthog.permissions import AccessControlPermission
+-from posthog.rate_limit import BurstRateThrottle, LLMPromptPublishBurstRateThrottle, SustainedRateThrottle
++from posthog.rate_limit import (
++    BurstRateThrottle,
++    LLMPromptFetchRateThrottle,
++    LLMPromptPublishBurstRateThrottle,
++    SustainedRateThrottle,
++)
+ from posthog.storage.llm_prompt_cache import get_prompt_by_name_from_cache
+ 
+ from products.access_control.backend.presentation.access_control import AccessControlViewSetMixin
+@@ -109,8 +114,10 @@ def safely_get_queryset(self, queryset: QuerySet[LLMPrompt]) -> QuerySet[LLMProm
+     def get_throttles(self):
+         if self.action == "update_by_name":
+             return [LLMPromptPublishBurstRateThrottle(), BurstRateThrottle(), SustainedRateThrottle()]
+-        if self.action in ["get_by_name", "resolve_by_name"]:
+-            return [BurstRateThrottle(), SustainedRateThrottle()]
++        # SDK read paths (get_all() hits list) get a dedicated per-minute budget, so a
++        # polling fleet cannot exhaust the shared sustained budget for the whole API key.
++        if self.action in ["list", "get_by_name", "resolve_by_name"]:
++            return [LLMPromptFetchRateThrottle()]
+ 
+         return super().get_throttles()
+ 
+diff --git a/posthog/rate_limit.py b/posthog/rate_limit.py
+index b2c6056d1c69..98505b88b358 100644
+--- a/posthog/rate_limit.py
++++ b/posthog/rate_limit.py
+@@ -1102,6 +1102,15 @@ class LLMPromptPublishBurstRateThrottle(PersonalApiKeyOrUserRateThrottle):
+     rate = "30/minute"
+ 
+ 
++class LLMPromptFetchRateThrottle(PersonalApiKeyRateThrottle):
++    # SDK fleets poll prompt fetches on a fixed interval, so the shared sustained budget
++    # (4800/hour) rejects steady polling that the burst budget allows. A per-minute-only
++    # bucket keeps prompt fetches out of the general API budget, mirroring the dedicated
++    # feature_flag_remote_config throttle.
++    scope = "llm_prompt_fetch"
++    rate = "600/minute"
++
++
+ class EventValuesBurstThrottle(PersonalApiKeyRateThrottle):
+     scope = "event_values_burst"
+     rate = "60/minute"

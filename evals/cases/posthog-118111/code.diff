@@ -1,0 +1,275 @@
+diff --git a/products/logs/backend/presentation/views/alerts_api.py b/products/logs/backend/presentation/views/alerts_api.py
+index b7d55ef79bc0..458048cdfa53 100644
+--- a/products/logs/backend/presentation/views/alerts_api.py
++++ b/products/logs/backend/presentation/views/alerts_api.py
+@@ -342,7 +342,12 @@ class LogsAlertConfigurationSerializer(serializers.ModelSerializer):
+     cooldown_minutes = serializers.IntegerField(
+         default=0,
+         min_value=0,
+-        help_text="Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.",
++        help_text=(
++            "Minimum minutes between notifications. The alert notifies once when it starts firing and once "
++            "when it resolves. It does not notify again on each check while it stays firing. A fire or resolve "
++            "notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. "
++            "0 means no minimum."
++        ),
+     )
+     schedule_restriction = ScheduleRestrictionField(
+         required=False,
+@@ -962,7 +967,7 @@ class LogsAlertSimulateRequestSerializer(serializers.Serializer):
+     cooldown_minutes = serializers.IntegerField(
+         default=0,
+         min_value=0,
+-        help_text="Minutes to wait after firing before sending another notification.",
++        help_text="Minimum minutes between notifications. A fire or resolve notification inside the cooldown is skipped. 0 means no minimum.",
+     )
+     date_from = serializers.CharField(
+         help_text="Relative date string for how far back to simulate (e.g. '-24h', '-7d', '-30d').",
+diff --git a/products/logs/frontend/components/LogsAlerting/LogsAlertForm.tsx b/products/logs/frontend/components/LogsAlerting/LogsAlertForm.tsx
+index 87d7fd98f648..7d55a8e37173 100644
+--- a/products/logs/frontend/components/LogsAlerting/LogsAlertForm.tsx
++++ b/products/logs/frontend/components/LogsAlerting/LogsAlertForm.tsx
+@@ -245,7 +245,18 @@ export function LogsAlertTrigger(): JSX.Element {
+                 </LemonField.Pure>
+                 <LemonField.Pure
+                     label="Notification cooldown"
+-                    help="After firing, wait this long before sending another notification. Set to 0 to notify on every check."
++                    help={
++                        <div className="flex flex-col gap-1">
++                            <span>Set to 0 for no minimum.</span>
++                            <span>The alert notifies once when it starts firing, and once when it resolves.</span>
++                            <span>It does not re-notify unless it resolves and then fires again.</span>
++                            <span>
++                                Cooldown sets the minimum time between notifications. No notifications are sent during
++                                cooldown.
++                            </span>
++                            <span>Cooldown does not apply to PagerDuty incidents.</span>
++                        </div>
++                    }
+                 >
+                     <div className="flex items-center gap-2">
+                         <LemonInput
+diff --git a/products/logs/frontend/generated/api.schemas.ts b/products/logs/frontend/generated/api.schemas.ts
+index f1da0dc6c5dd..ecd8d493cef4 100644
+--- a/products/logs/frontend/generated/api.schemas.ts
++++ b/products/logs/frontend/generated/api.schemas.ts
+@@ -621,7 +621,7 @@ export interface LogsAlertConfigurationApi {
+      */
+     datapoints_to_alarm?: number
+     /**
+-     * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++     * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+      * @minimum 0
+      */
+     cooldown_minutes?: number
+@@ -791,7 +791,7 @@ export interface LogsAlertConfigurationDetailApi {
+      */
+     datapoints_to_alarm?: number
+     /**
+-     * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++     * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+      * @minimum 0
+      */
+     cooldown_minutes?: number
+@@ -893,7 +893,7 @@ export interface PatchedLogsAlertConfigurationApi {
+      */
+     datapoints_to_alarm?: number
+     /**
+-     * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++     * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+      * @minimum 0
+      */
+     cooldown_minutes?: number
+@@ -1072,7 +1072,7 @@ export interface LogsAlertSimulateRequestApi {
+      */
+     datapoints_to_alarm?: number
+     /**
+-     * Minutes to wait after firing before sending another notification.
++     * Minimum minutes between notifications. A fire or resolve notification inside the cooldown is skipped. 0 means no minimum.
+      * @minimum 0
+      */
+     cooldown_minutes?: number
+diff --git a/products/logs/frontend/generated/api.zod.ts b/products/logs/frontend/generated/api.zod.ts
+index bccb86572599..27f1eac640e3 100644
+--- a/products/logs/frontend/generated/api.zod.ts
++++ b/products/logs/frontend/generated/api.zod.ts
+@@ -138,7 +138,9 @@ export const LogsAlertsCreateBody = /* @__PURE__ */ zod.object({
+         .number()
+         .min(logsAlertsCreateBodyCooldownMinutesMin)
+         .default(logsAlertsCreateBodyCooldownMinutesDefault)
+-        .describe('Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.'),
++        .describe(
++            'Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.'
++        ),
+     schedule_restriction: zod
+         .union([
+             zod.object({
+@@ -260,7 +262,9 @@ export const LogsAlertsUpdateBody = /* @__PURE__ */ zod.object({
+         .number()
+         .min(logsAlertsUpdateBodyCooldownMinutesMin)
+         .default(logsAlertsUpdateBodyCooldownMinutesDefault)
+-        .describe('Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.'),
++        .describe(
++            'Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.'
++        ),
+     schedule_restriction: zod
+         .union([
+             zod.object({
+@@ -382,7 +386,9 @@ export const LogsAlertsPartialUpdateBody = /* @__PURE__ */ zod.object({
+         .number()
+         .min(logsAlertsPartialUpdateBodyCooldownMinutesMin)
+         .default(logsAlertsPartialUpdateBodyCooldownMinutesDefault)
+-        .describe('Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.'),
++        .describe(
++            'Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.'
++        ),
+     schedule_restriction: zod
+         .union([
+             zod.object({
+@@ -540,7 +546,9 @@ export const LogsAlertsSimulateCreateBody = /* @__PURE__ */ zod.object({
+         .number()
+         .min(logsAlertsSimulateCreateBodyCooldownMinutesMin)
+         .default(logsAlertsSimulateCreateBodyCooldownMinutesDefault)
+-        .describe('Minutes to wait after firing before sending another notification.'),
++        .describe(
++            'Minimum minutes between notifications. A fire or resolve notification inside the cooldown is skipped. 0 means no minimum.'
++        ),
+     date_from: zod.string().describe("Relative date string for how far back to simulate (e.g. '-24h', '-7d', '-30d')."),
+ })
+ 
+diff --git a/products/logs/skills/authoring-log-alerts/SKILL.md b/products/logs/skills/authoring-log-alerts/SKILL.md
+index 6b7611b145e5..28f967c1577c 100644
+--- a/products/logs/skills/authoring-log-alerts/SKILL.md
++++ b/products/logs/skills/authoring-log-alerts/SKILL.md
+@@ -113,7 +113,7 @@ for the reasoning:
+ | `window_minutes`      | `5`                                         | Allowed: 5, 10, 15, 30, 60. Must match what you passed to the script. |
+ | `evaluation_periods`  | `3`                                         | M in N-of-M.                                                          |
+ | `datapoints_to_alarm` | `2`                                         | N in N-of-M. 2-of-3 reduces flap from a single noisy bucket.          |
+-| `cooldown_minutes`    | `30`                                        | Minimum time between repeat fires.                                    |
++| `cooldown_minutes`    | `30`                                        | Minimum time between notifications (fire or resolve).                 |
+ 
+ Call `posthog:logs-alerts-simulate-create` with these settings and `date_from: "-7d"`. The response gives you `fire_count`
+ and `resolve_count`.
+diff --git a/products/logs/skills/authoring-log-alerts/references/threshold-defaults.md b/products/logs/skills/authoring-log-alerts/references/threshold-defaults.md
+index 4389df41663d..d486dbf12d71 100644
+--- a/products/logs/skills/authoring-log-alerts/references/threshold-defaults.md
++++ b/products/logs/skills/authoring-log-alerts/references/threshold-defaults.md
+@@ -49,10 +49,12 @@ When to deviate:
+ 
+ ## `cooldown_minutes = 30`
+ 
+-After a fire, suppress repeat fires for 30 minutes. This avoids paging the same channel every check interval
+-during an ongoing incident — once the alert is firing, the user already knows.
++A logs alert notifies once when it starts firing and once when it resolves.
++It does not notify again on each check while it stays firing, whatever the cooldown.
++Cooldown sets the minimum time between any two notifications, so an alert that flaps around the threshold
++notifies at most once per 30 minutes.
+ 
+-Use 0 for snapshot-style alerts where every breach is independently interesting (rare).
++Use 0 when every fire and resolve must notify, even for an alert that flaps (rare).
+ 
+ ## Avoid these footguns
+ 
+diff --git a/products/logs/skills/authoring-log-alerts/references/volume-floor-alerts.md b/products/logs/skills/authoring-log-alerts/references/volume-floor-alerts.md
+index ed591cb36c86..998b036eeed8 100644
+--- a/products/logs/skills/authoring-log-alerts/references/volume-floor-alerts.md
++++ b/products/logs/skills/authoring-log-alerts/references/volume-floor-alerts.md
+@@ -37,7 +37,7 @@ The reasoning:
+ - `evaluation_periods: 3`, `datapoints_to_alarm: 3` (3-of-3) — require 3 consecutive quiet windows. A single
+   blip won't fire.
+ - `window_minutes: 15` minimum — 5-minute floor alerts on noisy services are unreliable.
+-- `cooldown_minutes: 60` — once you know the service is quiet, no point re-paging every check.
++- `cooldown_minutes: 60` — a floor alert can flap near the threshold, and this keeps it to one notification per hour.
+ 
+ ## Simulate is essential here
+ 
+diff --git a/products/posthog_ai/skills/querying-posthog-data/references/models-logs.md b/products/posthog_ai/skills/querying-posthog-data/references/models-logs.md
+index 714ee7fd372e..2723a0b094ff 100644
+--- a/products/posthog_ai/skills/querying-posthog-data/references/models-logs.md
++++ b/products/posthog_ai/skills/querying-posthog-data/references/models-logs.md
+@@ -112,7 +112,7 @@ Alerts that monitor log volume and notify users when thresholds are breached. Us
+ | `state`                  | varchar(20)       | NOT NULL | Current alert state (see State Values below)                        |
+ | `evaluation_periods`     | integer           | NOT NULL | Number of periods in the evaluation window (M in N-of-M)            |
+ | `datapoints_to_alarm`    | integer           | NOT NULL | Breaches needed to fire (N in N-of-M)                               |
+-| `cooldown_minutes`       | integer           | NOT NULL | Minutes to wait after firing before re-evaluating                   |
++| `cooldown_minutes`       | integer           | NOT NULL | Minimum minutes between notifications (fire or resolve)             |
+ | `snooze_until`           | timestamp with tz | NULL     | Snooze expiry (UTC)                                                 |
+ | `next_check_at`          | timestamp with tz | NULL     | When the next evaluation is scheduled                               |
+ | `last_notified_at`       | timestamp with tz | NULL     | When subscribers were last notified                                 |
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index cef413ef3afb..0eb0f758f035 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -63302,7 +63302,7 @@ export namespace Schemas {
+          */
+       datapoints_to_alarm?: number;
+       /**
+-         * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++         * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+          * @minimum 0
+          */
+       cooldown_minutes?: number;
+@@ -63465,7 +63465,7 @@ export namespace Schemas {
+          */
+       datapoints_to_alarm?: number;
+       /**
+-         * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++         * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+          * @minimum 0
+          */
+       cooldown_minutes?: number;
+@@ -63653,7 +63653,7 @@ export namespace Schemas {
+          */
+       datapoints_to_alarm?: number;
+       /**
+-         * Minutes to wait after firing before sending another notification.
++         * Minimum minutes between notifications. A fire or resolve notification inside the cooldown is skipped. 0 means no minimum.
+          * @minimum 0
+          */
+       cooldown_minutes?: number;
+@@ -82792,7 +82792,7 @@ export namespace Schemas {
+          */
+       datapoints_to_alarm?: number;
+       /**
+-         * Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.
++         * Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.
+          * @minimum 0
+          */
+       cooldown_minutes?: number;
+diff --git a/services/mcp/src/generated/logs/api.ts b/services/mcp/src/generated/logs/api.ts
+index c4fbaf7cd551..a1a215da76a6 100644
+--- a/services/mcp/src/generated/logs/api.ts
++++ b/services/mcp/src/generated/logs/api.ts
+@@ -1769,7 +1769,9 @@ export const LogsAlertsCreateBody = () => zod.object({
+         .number()
+         .min(logsAlertsCreateBodyCooldownMinutesMin)
+         .default(logsAlertsCreateBodyCooldownMinutesDefault)
+-        .describe('Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.'),
++        .describe(
++            'Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.'
++        ),
+     schedule_restriction: zod
+         .union([
+             zod.object({
+@@ -3554,7 +3556,9 @@ export const LogsAlertsPartialUpdateBody = () => zod.object({
+         .number()
+         .min(logsAlertsPartialUpdateBodyCooldownMinutesMin)
+         .optional()
+-        .describe('Minimum minutes between repeated notifications after the alert fires. 0 means no cooldown.'),
++        .describe(
++            'Minimum minutes between notifications. The alert notifies once when it starts firing and once when it resolves. It does not notify again on each check while it stays firing. A fire or resolve notification inside the cooldown is skipped. Cooldown does not apply to PagerDuty incidents. 0 means no minimum.'
++        ),
+     schedule_restriction: zod
+         .union([
+             zod.object({
+@@ -5415,7 +5419,9 @@ export const LogsAlertsSimulateCreateBody = () => zod.object({
+         .number()
+         .min(logsAlertsSimulateCreateBodyCooldownMinutesMin)
+         .default(logsAlertsSimulateCreateBodyCooldownMinutesDefault)
+-        .describe('Minutes to wait after firing before sending another notification.'),
++        .describe(
++            'Minimum minutes between notifications. A fire or resolve notification inside the cooldown is skipped. 0 means no minimum.'
++        ),
+     date_from: zod.string().describe("Relative date string for how far back to simulate (e.g. '-24h', '-7d', '-30d')."),
+ })
+ 

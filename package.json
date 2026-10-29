@@ -1,0 +1,24 @@
+{
+    "name": "docs-freshness",
+    "private": true,
+    "type": "module",
+    "packageManager": "pnpm@10.34.7",
+    "engines": {
+        "node": ">=22.18"
+    },
+    "scripts": {
+        "build-cases": "node evals/github/build-cases.ts",
+        "test:evals": "node --test evals/evals.test.ts",
+        "test": "pnpm test:evals",
+        "typecheck": "tsc --noEmit",
+        "lint": "prettier --check ."
+    },
+    "dependencies": {
+        "yaml": "^2.9.1"
+    },
+    "devDependencies": {
+        "@types/node": "^22.20.5",
+        "prettier": "^3.9.10",
+        "typescript": "^5.9.3"
+    }
+}

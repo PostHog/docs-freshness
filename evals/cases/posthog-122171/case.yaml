@@ -1,0 +1,10 @@
+id: posthog-122171
+codePr: 122171
+mergeSha: 06a4603fbee549f714c263fb87b3da4354c6f4f3
+docsPr: 21501
+docsBaseSha: 7dd38facfc2b0f5df7ee147f7d20b044eb893753
+section: mcp-analytics
+referenceKind: carbon-unit
+pages:
+  - contents/docs/mcp-analytics/events.mdx
+  - contents/docs/mcp-analytics/installation/typescript.mdx

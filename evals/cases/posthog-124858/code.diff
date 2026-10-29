@@ -1,0 +1,519 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 160d9c47c668..dfaf8562f8b7 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -8381,9 +8381,9 @@ snapshots:
+     products-workflows-customerioimportmodal--both-steps-completed--light:
+         hash: v1.k794b7964.20cc443a6beb23987451e59d9e37dc5fd6c9edac12070f734c6794085b00a4ef.0j8fLlKs25AL50C_hHxlyOCykMqHir6E4AyrsQP9MyY
+     products-workflows-customerioimportmodal--both-steps-not-completed--dark:
+-        hash: v1.k794b7964.ea5155a38680b44a133382c65e04c769f83c65fc39b9e6755ffd32886c3050c1.kPCkKfbt0yvdjTV8VJn_CxXAYIoek_yy07zyItt9Itc
++        hash: v1.k794b7964.b2b396ec7c5967d606fd23bb1c82900c9d29ad8b13acb5e2a9851b5e9dd92893.BesO-U-zGZU9EFPbizodMUpBNHmcNkY0FCj0m-KAXyc
+     products-workflows-customerioimportmodal--both-steps-not-completed--light:
+-        hash: v1.k794b7964.1df6ca04972f8b0d0b0c517ce16d6924fe27254f359cc0c8e16e816cea95d56c.GQootOFxJjyqS8jojYyVBjB5IY92XYB_MYa0bDIA9s8
++        hash: v1.k794b7964.4088df4bbc38cf8c13bb009d3cd00823cebb329f015e541a25e03fd4ef0cff96.4IU3_9Zezwsy_RRdPoPDV3AMj6ZZmqjafRj8n0ah6s0
+     products-workflows-customerioimportmodal--import-running--dark:
+         hash: v1.k794b7964.57dd6aca001fbf101255b448c27de4688d18c095cfca3c042ab44ccc6bcc3f9f.inc_-_1Gkkm4ByDHH97dG8v-iH2-AyTNW5T9ZqVFLuA
+     products-workflows-customerioimportmodal--import-running--light:
+diff --git a/frontend/src/lib/api-ratchet-baseline.txt b/frontend/src/lib/api-ratchet-baseline.txt
+index cf207f4164cc..ac40e05ae01f 100644
+--- a/frontend/src/lib/api-ratchet-baseline.txt
++++ b/frontend/src/lib/api-ratchet-baseline.txt
+@@ -179,7 +179,6 @@ logsQuery projects/{}/logs/query
+ logsSparkline projects/{}/logs/sparkline
+ media projects/{}/uploaded_media
+ messagingCategories projects/{}/messaging_categories
+-messagingCategoriesImportFromCustomerIO projects/{}/messaging_categories/import_from_customerio
+ messagingCategoriesOptOutSyncConfig projects/{}/messaging_categories/optout_sync_config
+ messagingCategoriesRemoveCustomerIOAppConfig projects/{}/messaging_categories/remove_customerio_app_config
+ messagingCategoriesRemoveTrackConfig projects/{}/messaging_categories/remove_track_config
+diff --git a/frontend/src/lib/api.ts b/frontend/src/lib/api.ts
+index aa3a57115717..ef114b1894f4 100644
+--- a/frontend/src/lib/api.ts
++++ b/frontend/src/lib/api.ts
+@@ -1891,10 +1891,6 @@ export class ApiRequest {
+         return this.teamProjectDetail().addPathComponent('messaging_categories')
+     }
+ 
+-    public messagingCategoriesImportFromCustomerIO(): ApiRequest {
+-        return this.messagingCategories().addPathComponent('import_from_customerio')
+-    }
+-
+     public messagingCategoriesOptOutSyncConfig(): ApiRequest {
+         return this.messagingCategories().addPathComponent('optout_sync_config')
+     }
+diff --git a/frontend/src/lib/constants.tsx b/frontend/src/lib/constants.tsx
+index fb15260c8bc7..6d72818128ec 100644
+--- a/frontend/src/lib/constants.tsx
++++ b/frontend/src/lib/constants.tsx
+@@ -617,7 +617,6 @@ export const FEATURE_FLAGS = {
+     WORKFLOWS_AI_FIRST_NEW: 'workflows-ai-first-new', // owner: @mayteio #team-workflows
+     WORKFLOWS_BROADCAST_AUDIENCE_SUGGESTIONS: 'workflows-broadcast-audience-suggestions', // owner: @dmarchuk #team-workflows, AI audience ideas on the Broadcasts tab
+     WORKFLOWS_COHORT_CONDITIONS: 'workflows-cohort-conditions', // owner: @meikelmosby #team-workflows
+-    WORKFLOWS_CUSTOMERIO_BACKGROUND_IMPORT: 'workflows-customerio-background-import', // owner: @mayteio #team-workflows, runs the Customer.io import in the background with progress
+     WORKFLOWS_EMAIL_DOMAIN_AGENT_SETUP: 'workflows-email-domain-agent-setup', // owner: @silthus #team-workflows
+     WORKFLOWS_EMAIL_DOMAIN_WIZARD: 'workflows-email-domain-wizard', // owner: @silthus #team-workflows
+     WORKFLOWS_EMAIL_SENDER_ROTATION: 'workflows-email-sender-rotation', // owner: @arthurdedeus #team-workflows
+diff --git a/products/workflows/frontend/OptOuts/CustomerIOImportModal.stories.tsx b/products/workflows/frontend/OptOuts/CustomerIOImportModal.stories.tsx
+index 37094f44660e..1699dbfbca2e 100644
+--- a/products/workflows/frontend/OptOuts/CustomerIOImportModal.stories.tsx
++++ b/products/workflows/frontend/OptOuts/CustomerIOImportModal.stories.tsx
+@@ -2,8 +2,6 @@ import { Meta, StoryFn } from '@storybook/react'
+ import { useActions } from 'kea'
+ import { useEffect } from 'react'
+ 
+-import { FEATURE_FLAGS } from 'lib/constants'
+-
+ import { useStorybookMocks } from '~/mocks/browser'
+ 
+ import type { ProviderImportRunApi } from 'products/messaging/frontend/generated/api.schemas'
+@@ -271,7 +269,6 @@ ImportRunning.args = {
+     ],
+ }
+ ImportRunning.parameters = {
+-    featureFlags: [FEATURE_FLAGS.WORKFLOWS_CUSTOMERIO_BACKGROUND_IMPORT],
+     testOptions: {
+         waitForLoadersToDisappear: false,
+         waitForSelector: '[data-attr="customerio-import-run-progress"]',
+@@ -305,7 +302,6 @@ ImportStepFailed.args = {
+     ],
+ }
+ ImportStepFailed.parameters = {
+-    featureFlags: [FEATURE_FLAGS.WORKFLOWS_CUSTOMERIO_BACKGROUND_IMPORT],
+     mockDate: '2026-04-13 10:30:00',
+     testOptions: { waitForSelector: '[data-attr="customerio-import-run-progress"]' },
+ }
+diff --git a/products/workflows/frontend/OptOuts/CustomerIOImportModal.tsx b/products/workflows/frontend/OptOuts/CustomerIOImportModal.tsx
+index 05cb4fffac7d..14064410cece 100644
+--- a/products/workflows/frontend/OptOuts/CustomerIOImportModal.tsx
++++ b/products/workflows/frontend/OptOuts/CustomerIOImportModal.tsx
+@@ -129,7 +129,7 @@ function LegacyImportResult(): JSX.Element | null {
+     )
+ }
+ 
+-function BackgroundImportContent(): JSX.Element {
++function Step1Content(): JSX.Element {
+     const {
+         importForm,
+         importError,
+@@ -244,162 +244,6 @@ function BackgroundImportContent(): JSX.Element {
+     )
+ }
+ 
+-function InRequestImportContent(): JSX.Element {
+-    const { isImporting, importProgress, importError, importForm, syncConfig, isRemovingAppConfig } =
+-        useValues(customerIOImportLogic)
+-    const { submitImportForm, rerunImport, removeAppConfig } = useActions(customerIOImportLogic)
+-
+-    const hasStoredKey = syncConfig?.app_integration_id != null || importProgress?.status === 'completed'
+-    const result = syncConfig?.app_import_result
+-    // Prefer local reducer state, fall back to DB-persisted result
+-    const displayResult = importProgress?.status === 'completed' ? importProgress : null
+-    const persistedResult = !displayResult && result?.status === 'completed' ? result : null
+-    const partialErrors = displayResult?.errors ?? persistedResult?.errors ?? []
+-
+-    if (isImporting) {
+-        return (
+-            <div className="text-center py-8">
+-                <Spinner className="text-3xl mb-4" />
+-                <div className="text-lg font-semibold mb-2">Importing from Customer.io...</div>
+-                <div className="text-sm text-muted-alt">
+-                    This may take a moment. Please don't navigate away from this page.
+-                </div>
+-            </div>
+-        )
+-    }
+-
+-    return (
+-        <div className="space-y-4">
+-            {/* Error banner */}
+-            {importProgress?.status === 'failed' && (
+-                <LemonBanner type="error">
+-                    Import failed: {importProgress.errors?.join(', ') || 'An unknown error occurred'}
+-                </LemonBanner>
+-            )}
+-            {!importProgress && result?.status === 'failed' && (
+-                <LemonBanner type="error">Last import failed: {result.error || 'Unknown error'}</LemonBanner>
+-            )}
+-
+-            {/* Success banner */}
+-            {(displayResult || persistedResult) && (
+-                <>
+-                    <LemonBanner type="success">
+-                        <span className="font-semibold">API import complete</span>
+-                    </LemonBanner>
+-                    {partialErrors.length > 0 && (
+-                        <LemonBanner type="warning">
+-                            Some data didn't import. Run the import again to retry. {partialErrors.join(', ')}
+-                        </LemonBanner>
+-                    )}
+-                    <div className="space-y-2 text-sm">
+-                        {(persistedResult?.imported_at || displayResult) && (
+-                            <div className="flex items-center justify-between">
+-                                <span>Last imported:</span>
+-                                <TZLabel time={persistedResult?.imported_at || new Date().toISOString()} />
+-                            </div>
+-                        )}
+-                        <div className="flex items-center justify-between">
+-                            <span>Categories imported:</span>
+-                            <LemonTag>
+-                                {displayResult?.categories_created ?? persistedResult?.categories_created ?? 0}
+-                            </LemonTag>
+-                        </div>
+-                        <div className="flex items-center justify-between">
+-                            <span>Globally unsubscribed users:</span>
+-                            <LemonTag>
+-                                {(
+-                                    displayResult?.globally_unsubscribed_count ??
+-                                    persistedResult?.globally_unsubscribed_count ??
+-                                    0
+-                                ).toLocaleString()}
+-                            </LemonTag>
+-                        </div>
+-                        <div className="flex items-center justify-between">
+-                            <span>Suppressed addresses:</span>
+-                            <LemonTag>
+-                                {(
+-                                    displayResult?.suppressions_imported ??
+-                                    persistedResult?.suppressions_imported ??
+-                                    0
+-                                ).toLocaleString()}
+-                            </LemonTag>
+-                        </div>
+-                    </div>
+-                </>
+-            )}
+-
+-            {/* API key */}
+-            {hasStoredKey ? (
+-                <>
+-                    <div className="space-y-2">
+-                        <label className="LemonLabel">Customer.io App API Key</label>
+-                        <LemonInput
+-                            value="••••••••••••••••"
+-                            disabledReason="Can't be changed"
+-                            suffix={
+-                                <LemonButton
+-                                    size="xsmall"
+-                                    type="tertiary"
+-                                    status="danger"
+-                                    tooltip="Remove stored API key"
+-                                    onClick={removeAppConfig}
+-                                    loading={isRemovingAppConfig}
+-                                    icon={<IconTrash className="text-danger" />}
+-                                />
+-                            }
+-                        />
+-                    </div>
+-                    <p className="text-sm text-muted">Safe to rerun, existing categories and users will be updated.</p>
+-                </>
+-            ) : (
+-                <Form logic={customerIOImportLogic} formKey="importForm" enableFormOnSubmit>
+-                    <div className="space-y-4">
+-                        <LemonField name="app_api_key" label="Customer.io App API Key">
+-                            <LemonInput
+-                                placeholder="Enter your App API key"
+-                                type="password"
+-                                data-attr="customerio-api-key"
+-                                autoComplete="off"
+-                            />
+-                        </LemonField>
+-                        {importError && (
+-                            <LemonBanner type="error" className="text-sm">
+-                                {importError}
+-                            </LemonBanner>
+-                        )}
+-                        <div className="text-xs text-muted-alt">
+-                            You can generate an App API key in Customer.io under Settings → Account Settings → API
+-                            Credentials.
+-                        </div>
+-                    </div>
+-                </Form>
+-            )}
+-
+-            {/* Action button */}
+-            <div className="flex justify-end">
+-                {hasStoredKey ? (
+-                    <LemonButton type="primary" onClick={rerunImport}>
+-                        Run again
+-                    </LemonButton>
+-                ) : (
+-                    <LemonButton
+-                        type="primary"
+-                        onClick={submitImportForm}
+-                        disabledReason={!importForm.app_api_key ? 'Enter your API key' : undefined}
+-                    >
+-                        Start import
+-                    </LemonButton>
+-                )}
+-            </div>
+-        </div>
+-    )
+-}
+-
+-function Step1Content(): JSX.Element {
+-    const { isBackgroundImportEnabled } = useValues(customerIOImportLogic)
+-    return isBackgroundImportEnabled ? <BackgroundImportContent /> : <InRequestImportContent />
+-}
+-
+ function Step2Content(): JSX.Element {
+     const { csvFile, csvProgress, isUploadingCSV, syncConfig } = useValues(customerIOImportLogic)
+     const { setCSVFile, uploadCSV } = useActions(customerIOImportLogic)
+diff --git a/products/workflows/frontend/OptOuts/customerIOImportLogic.ts b/products/workflows/frontend/OptOuts/customerIOImportLogic.ts
+index 6dec9daaf1a8..e5128b559461 100644
+--- a/products/workflows/frontend/OptOuts/customerIOImportLogic.ts
++++ b/products/workflows/frontend/OptOuts/customerIOImportLogic.ts
+@@ -4,10 +4,7 @@ import type { DeepPartial, DeepPartialMap, FieldName, ValidationErrorType } from
+ import { loaders } from 'kea-loaders'
+ 
+ import { ApiRequest, getCookie } from 'lib/api'
+-import { FEATURE_FLAGS } from 'lib/constants'
+ import { lemonToast } from 'lib/lemon-ui/LemonToast'
+-import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+-import type { FeatureFlagsSet } from 'lib/logic/featureFlagLogic'
+ import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
+ import { teamLogic } from 'scenes/teamLogic'
+ 
+@@ -33,16 +30,6 @@ export interface ImportFormValues {
+     app_api_key: string
+ }
+ 
+-export interface ImportProgress {
+-    status: string
+-    topics_found: number
+-    categories_created?: number
+-    globally_unsubscribed_count?: number
+-    suppressions_imported?: number
+-    details?: string
+-    errors: string[]
+-}
+-
+ export interface CSVImportProgress {
+     status: string
+     total_rows: number
+@@ -92,7 +79,6 @@ export interface OptOutSyncConfigResponse {
+ 
+ // Generated by kea-typegen. Update if you're an agent, ignore if you're human.
+ export interface customerIOImportLogicValues {
+-    featureFlags: FeatureFlagsSet // featureFlagLogic
+     preflight: PreflightStatus | null // preflightLogic
+     currentTeamIdStrict: number | string // teamLogic
+     csvFile: File | null
+@@ -109,18 +95,15 @@ export interface customerIOImportLogicValues {
+     importFormTouched: boolean
+     importFormTouches: Record<string, boolean>
+     importFormValidationErrors: DeepPartialMap<ImportFormValues, ValidationErrorType>
+-    importProgress: ImportProgress | null
+     importProviders: ImportProviderOptionApi[] | null
+     importProvidersLoading: boolean
+     importRuns: ProviderImportRunApi[] | null
+     importRunsLoading: boolean
+     importStepOptions: ImportStepOptionApi[]
+-    isBackgroundImportEnabled: boolean
+     isImportFormSubmitting: boolean
+     isImportFormValid: boolean
+     isImportModalOpen: boolean
+     isImportRunActive: boolean
+-    isImporting: boolean
+     isRemovingAppConfig: boolean
+     isRemovingTrackConfig: boolean
+     isRemovingWebhookConfig: boolean
+@@ -213,9 +196,6 @@ export interface customerIOImportLogicActions {
+     removeWebhookConfig: () => {
+         value: true
+     }
+-    rerunImport: () => {
+-        value: true
+-    }
+     resetImport: () => {
+         value: true
+     }
+@@ -250,9 +230,6 @@ export interface customerIOImportLogicActions {
+     setImportFormValues: (values: DeepPartial<ImportFormValues>) => {
+         values: DeepPartial<ImportFormValues>
+     }
+-    setImportProgress: (importProgress: ImportProgress) => {
+-        importProgress: ImportProgress
+-    }
+     setIsSavingTrack: (isSaving: boolean) => {
+         isSaving: boolean
+     }
+@@ -340,8 +317,6 @@ export interface customerIOImportLogicActions {
+ // Generated by kea-typegen. Update if you're an agent, ignore if you're human.
+ export interface customerIOImportLogicMeta {
+     __keaTypeGenInternalSelectorTypes: {
+-        isBackgroundImportEnabled: (featureFlags: FeatureFlagsSet) => boolean
+-        isImporting: (isImportFormSubmitting: boolean, importProgress: ImportProgress | null) => boolean
+         latestImportRun: (importRuns: ProviderImportRunApi[] | null) => ProviderImportRunApi | null
+         isImportRunActive: (latestImportRun: ProviderImportRunApi | null) => boolean
+         importStepOptions: (importProviders: ImportProviderOptionApi[] | null) => ImportStepOptionApi[]
+@@ -349,9 +324,7 @@ export interface customerIOImportLogicMeta {
+         webhookUrl: (currentTeamIdStrict: number | string) => string
+         stepCompletion: (
+             syncConfig: OptOutSyncConfigResponse | null,
+-            isBackgroundImportEnabled: boolean,
+             latestImportRun: ProviderImportRunApi | null,
+-            importProgress: ImportProgress | null,
+             csvProgress: CSVImportProgress | null
+         ) => {
+             step1: 'completed' | 'failed' | false
+@@ -374,15 +347,13 @@ export type customerIOImportLogicType = MakeLogicType<
+ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+     path(['products', 'workflows', 'customerIOImportLogic']),
+     connect(() => ({
+-        values: [teamLogic, ['currentTeamIdStrict'], preflightLogic, ['preflight'], featureFlagLogic, ['featureFlags']],
++        values: [teamLogic, ['currentTeamIdStrict'], preflightLogic, ['preflight']],
+     })),
+     actions({
+         openImportModal: true,
+         closeImportModal: true,
+         resetImport: true,
+-        setImportProgress: (importProgress: ImportProgress) => ({ importProgress }),
+         setImportError: (error: string | null) => ({ error }),
+-        rerunImport: true,
+         toggleImportStep: (step: string) => ({ step }),
+         setTrackedImportRunId: (runId: string | null) => ({ runId }),
+         removeAppConfig: true,
+@@ -450,24 +421,10 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+                 closeImportModal: () => false,
+             },
+         ],
+-        importProgress: [
+-            null as ImportProgress | null,
+-            {
+-                setImportProgress: (_, { importProgress }) => importProgress,
+-                resetImport: () => null,
+-            },
+-        ],
+         importError: [
+             null as string | null,
+             {
+                 setImportError: (_, { error }) => error,
+-                submitImportFormFailure: (_, { error }) => {
+-                    if (error && typeof error === 'object' && 'detail' in error) {
+-                        return error.detail as string
+-                    }
+-                    return 'Import failed. Please check your API key and try again.'
+-                },
+-                submitImportFormSuccess: () => null,
+                 startImport: () => null,
+                 startImportFailure: (_, { error, errorObject }) =>
+                     errorObject?.detail ?? error ?? "Couldn't start the import. Check your API key and try again.",
+@@ -594,38 +551,17 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+             },
+         ],
+     }),
+-    forms(({ actions, values }) => ({
++    forms(({ actions }) => ({
+         importForm: {
+             defaults: {
+                 app_api_key: '',
+             } as ImportFormValues,
+-            submit: async ({ app_api_key }) => {
+-                if (values.isBackgroundImportEnabled) {
+-                    actions.startImport({ apiKey: app_api_key })
+-                    return
+-                }
+-                const response = await new ApiRequest()
+-                    .messagingCategoriesImportFromCustomerIO()
+-                    .create({ data: { app_api_key } })
+-
+-                actions.setImportProgress(response)
+-                // Reload config to pick up the newly created Integration
+-                actions.loadSyncConfig()
+-                return response
++            submit: ({ app_api_key }) => {
++                actions.startImport({ apiKey: app_api_key })
+             },
+         },
+     })),
+     selectors({
+-        isBackgroundImportEnabled: [
+-            (s) => [s.featureFlags],
+-            (featureFlags: FeatureFlagsSet): boolean =>
+-                !!featureFlags[FEATURE_FLAGS.WORKFLOWS_CUSTOMERIO_BACKGROUND_IMPORT],
+-        ],
+-        isImporting: [
+-            (s) => [s.isImportFormSubmitting, s.importProgress],
+-            (isImportFormSubmitting: boolean, importProgress: ImportProgress | null) =>
+-                isImportFormSubmitting || importProgress?.status === 'importing',
+-        ],
+         latestImportRun: [
+             (s) => [s.importRuns],
+             (importRuns: ProviderImportRunApi[] | null): ProviderImportRunApi | null => importRuns?.[0] ?? null,
+@@ -653,12 +589,10 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+             },
+         ],
+         stepCompletion: [
+-            (s) => [s.syncConfig, s.isBackgroundImportEnabled, s.latestImportRun, s.importProgress, s.csvProgress],
++            (s) => [s.syncConfig, s.latestImportRun, s.csvProgress],
+             (
+                 syncConfig: OptOutSyncConfigResponse | null,
+-                isBackgroundImportEnabled: boolean,
+                 latestImportRun: ProviderImportRunApi | null,
+-                importProgress: ImportProgress | null,
+                 csvProgress: CSVImportProgress | null
+             ): {
+                 step1: 'completed' | 'failed' | false
+@@ -678,10 +612,7 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+                 }
+ 
+                 return {
+-                    step1: resolveStatus(
+-                        isBackgroundImportEnabled ? latestImportRun?.status : importProgress?.status,
+-                        syncConfig?.app_import_result?.status
+-                    ),
++                    step1: resolveStatus(latestImportRun?.status, syncConfig?.app_import_result?.status),
+                     step2: resolveStatus(csvProgress?.status, syncConfig?.csv_import_result?.status),
+                     step3: syncConfig?.webhook_enabled ? 'completed' : false,
+                     step4: syncConfig?.track_enabled ? 'completed' : false,
+@@ -700,10 +631,8 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+     listeners(({ actions, values, cache }) => ({
+         openImportModal: () => {
+             actions.loadSyncConfig()
+-            if (values.isBackgroundImportEnabled) {
+-                actions.loadImportRuns()
+-                actions.loadImportProviders()
+-            }
++            actions.loadImportRuns()
++            actions.loadImportProviders()
+             actions.setTrackRegion(values.preflight?.region ?? 'US')
+         },
+         startImportSuccess: ({ startedImportRun }) => {
+@@ -762,29 +691,6 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+                 actions.loadSyncConfig()
+             }
+         },
+-        rerunImport: async () => {
+-            actions.setImportProgress({ status: 'importing', topics_found: 0, errors: [] })
+-            try {
+-                const response = await new ApiRequest().messagingCategoriesImportFromCustomerIO().create({ data: {} })
+-                actions.setImportProgress(response)
+-                actions.loadSyncConfig()
+-            } catch (error: any) {
+-                actions.setImportProgress({
+-                    status: 'failed',
+-                    topics_found: 0,
+-                    errors: [error.detail || 'Import failed'],
+-                })
+-            }
+-        },
+-        setImportProgress: ({ importProgress }) => {
+-            if (importProgress.status === 'completed') {
+-                lemonToast.success('Customer.io API import completed!')
+-                optOutCategoriesLogic.findMounted()?.actions.loadCategories()
+-            } else if (importProgress.status === 'failed') {
+-                const errorMessage = importProgress.errors?.join(', ') || 'Import failed'
+-                lemonToast.error(errorMessage)
+-            }
+-        },
+         uploadCSV: async () => {
+             const CSRF_COOKIE_NAME = 'posthog_csrftoken'
+             const file = values.csvFile
+@@ -925,7 +831,6 @@ export const customerIOImportLogic = kea<customerIOImportLogicType>([
+                 actions.loadSyncConfig()
+             }
+         },
+-        submitImportFormFailure: () => {},
+         closeImportModal: () => {
+             actions.resetImportForm()
+             actions.resetImport()

@@ -1,0 +1,9 @@
+id: posthog-114018
+codePr: 114018
+mergeSha: 657b639dac409691a3eb656544668030939f7a49
+docsPr: 20985
+docsBaseSha: 137431bd80d795f6db34cc95e4988acdef095da9
+section: self-host
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/self-host/configure/environment-variables.md

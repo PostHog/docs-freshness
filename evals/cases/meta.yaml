@@ -1,0 +1,50 @@
+since: 2026-07-31
+until: 2026-10-29
+candidates: 265
+casesByStratum:
+  ai-engineering/unedited-inkeep: 1
+  ai-evals/carbon-unit: 2
+  ai-evals/unedited-inkeep: 1
+  ai-observability/carbon-unit: 1
+  api/carbon-unit: 1
+  cdp/carbon-unit: 1
+  cdp/edited-inkeep: 1
+  cdp/unedited-inkeep: 1
+  cmd-k/unedited-inkeep: 1
+  data-pipelines/carbon-unit: 1
+  data-pipelines/edited-inkeep: 1
+  data-pipelines/unedited-inkeep: 1
+  data-warehouse/unedited-inkeep: 1
+  data/carbon-unit: 1
+  data/unedited-inkeep: 1
+  distributed-tracing/carbon-unit: 1
+  error-tracking/carbon-unit: 1
+  experiments/carbon-unit: 1
+  feature-flags/carbon-unit: 1
+  logs/carbon-unit: 1
+  mcp-analytics/carbon-unit: 1
+  metrics/carbon-unit: 1
+  migrate/unedited-inkeep: 1
+  product-analytics/carbon-unit: 1
+  product-analytics/unedited-inkeep: 1
+  prompt-management/carbon-unit: 1
+  replay-vision/unedited-inkeep: 1
+  self-driving/carbon-unit: 1
+  self-driving/edited-inkeep: 1
+  self-driving/unedited-inkeep: 1
+  self-host/unedited-inkeep: 1
+  session-replay/carbon-unit: 1
+  settings/unedited-inkeep: 1
+  sql/carbon-unit: 1
+  support/carbon-unit: 1
+  support/unedited-inkeep: 1
+  web-analytics/unedited-inkeep: 1
+  workflows/carbon-unit: 1
+  workflows/unedited-inkeep: 1
+inkeep:
+  opened: 330
+  mergedUnedited: 215
+  mergedEdited: 21
+  closedUnmerged: 13
+  stillOpen: 81
+  mergeReadyRate: 0.652

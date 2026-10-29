@@ -1,0 +1,12 @@
+id: posthog-105555
+codePr: 105555
+mergeSha: e935d90b5d00cd5e5c38fb82af5fe0d51f76501a
+docsPr: 20412
+docsBaseSha: 43875687f41f43234a58aeab68bac8c9be5a7a6f
+section: feature-flags
+referenceKind: carbon-unit
+pages:
+  - contents/docs/feature-flags/cutting-costs.mdx
+  - contents/docs/feature-flags/local-evaluation/_snippets/distributed-environments-intro.mdx
+  - contents/docs/feature-flags/local-evaluation/index.mdx
+  - contents/docs/feature-flags/snippets/flag-charge-estimate.mdx

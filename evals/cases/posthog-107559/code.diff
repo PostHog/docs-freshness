@@ -1,0 +1,2278 @@
+diff --git a/.github/scripts/check-idor-model-coverage.py b/.github/scripts/check-idor-model-coverage.py
+index 7fa95a744072..41f9d85eb428 100644
+--- a/.github/scripts/check-idor-model-coverage.py
++++ b/.github/scripts/check-idor-model-coverage.py
+@@ -205,6 +205,7 @@ def get_scoped_models() -> tuple[dict[str, set[str]], set[str], set[str], set[st
+         "RemoteConfig",
+         "TeamConversationsSlackConfig",
+         "TeamConversationsTeamsChannelSync",
++        "TeamConversationsTicketConfig",
+         "TeamCustomerAnalyticsConfig",
+         "TeamDefaultEvaluationContext",
+         "TeamBusinessKnowledgeConfig",
+diff --git a/.semgrep/rules/security/idor-team-scoped-models.yaml b/.semgrep/rules/security/idor-team-scoped-models.yaml
+index 2c3a325cf199..24ce9cf79578 100644
+--- a/.semgrep/rules/security/idor-team-scoped-models.yaml
++++ b/.semgrep/rules/security/idor-team-scoped-models.yaml
+@@ -325,6 +325,7 @@ rules:
+                               |ProjectSecretAPIKey
+                               |PropertyAccessControl
+                               |PullRequestAudience
++                              |PurgedTicketThread
+                               |QuarantineLiftRequest
+                               |QuarantinedIdentifier
+                               |QueryTabState
+@@ -767,6 +768,7 @@ rules:
+                         |ProjectSecretAPIKey
+                         |PropertyAccessControl
+                         |PullRequestAudience
++                        |PurgedTicketThread
+                         |QuarantineLiftRequest
+                         |QuarantinedIdentifier
+                         |QueryTabState
+diff --git a/posthog/api/comments.py b/posthog/api/comments.py
+index ffe5259201a0..d670287da152 100644
+--- a/posthog/api/comments.py
++++ b/posthog/api/comments.py
+@@ -886,7 +886,13 @@ def _require_ticket_viewer_access_for_pk(self) -> None:
+             return
+         try:
+             ticket = Ticket.objects.get(team_id=self.team_id, id=item_id)
+-        except (Ticket.DoesNotExist, ValueError, django_exceptions.ValidationError):
++        except Ticket.DoesNotExist:
++            # The live manager hides soft-deleted tickets. Their comments are still ticket
++            # content, so a detail fetch must not keep serving them.
++            if Ticket.all_objects.filter(team_id=self.team_id, id=item_id, deleted_at__isnull=False).exists():
++                raise exceptions.NotFound()
++            return
++        except (ValueError, django_exceptions.ValidationError):
+             return
+         if not self.user_access_control.check_access_level_for_object(ticket, required_level="viewer"):
+             # Match the list path, where a denied ticket's comments are simply absent.
+diff --git a/posthog/hogql/database/schema/system.py b/posthog/hogql/database/schema/system.py
+index f7fcb2c2121f..f16eebf08d1f 100644
+--- a/posthog/hogql/database/schema/system.py
++++ b/posthog/hogql/database/schema/system.py
+@@ -2492,8 +2492,10 @@ def ticket_assignment_join(join_to_add: LazyJoinToAdd, context: HogQLContext, no
+ support_tickets: PostgresTable = PostgresTable(
+     name="support_tickets",
+     postgres_table_name="posthog_conversations_ticket",
++    # A deleted ticket waits for its purge, and its content must not stay readable until then.
++    predicates=[parse_expr("_deleted_at IS NULL")],
+     access_scope="ticket",
+-    description="Customer support tickets/conversations; one row per ticket, with channel, status, and message counts.",
++    description="Customer support tickets/conversations; one row per ticket, with channel, status, and message counts (deleted tickets are excluded).",
+     fields={
+         "id": StringDatabaseField(name="id", description="Ticket UUID."),
+         "team_id": IntegerDatabaseField(name="team_id"),
+@@ -2564,6 +2566,7 @@ def ticket_assignment_join(join_to_add: LazyJoinToAdd, context: HogQLContext, no
+         ),
+         "created_at": DateTimeDatabaseField(name="created_at", description="When the ticket was opened."),
+         "updated_at": DateTimeDatabaseField(name="updated_at", description="When the ticket was last updated."),
++        "_deleted_at": DateTimeDatabaseField(name="deleted_at", nullable=True, hidden=True),
+         "tags": ticket_tags_lazy_join,
+         "assignee": ticket_assignment_lazy_join,
+     },
+diff --git a/posthog/management/migration_analysis/atomic_false_acknowledged_migrations.txt b/posthog/management/migration_analysis/atomic_false_acknowledged_migrations.txt
+index 207c449797a2..e1d2c2744131 100644
+--- a/posthog/management/migration_analysis/atomic_false_acknowledged_migrations.txt
++++ b/posthog/management/migration_analysis/atomic_false_acknowledged_migrations.txt
+@@ -47,3 +47,4 @@ signals.0154_backfill_report_actionability
+ # the child instead of all 14 tables at once. Re-running is a no-op: DropForeignKey reads what is left from pg_constraint.
+ posthog.1383_taggeditem_untrack_legacy_keys
+ ee.0064_split_identity_provider_config_scopes
++conversations.0076_tag_legacy_conversation_attachments
+diff --git a/posthog/tasks/scheduled.py b/posthog/tasks/scheduled.py
+index f6eff910b7fe..582617ec0d93 100644
+--- a/posthog/tasks/scheduled.py
++++ b/posthog/tasks/scheduled.py
+@@ -86,7 +86,7 @@
+ )
+ from products.canvas.backend.facade.tasks import cleanup_canvas_builds, sweep_canvas_builds
+ from products.conversations.backend.tasks.email import flush_pending_email_replies
+-from products.conversations.backend.tasks.maintenance import wake_snoozed_tickets
++from products.conversations.backend.tasks.maintenance import purge_deleted_tickets, wake_snoozed_tickets
+ from products.conversations.backend.tasks.slack import sweep_delivery_parts, sweep_inbound_events
+ from products.conversations.backend.tasks.teams import poll_teams_shared_channels
+ from products.customer_analytics.backend.facade.tasks import schedule_task_digests
+@@ -1097,6 +1097,12 @@ def setup_periodic_tasks(sender: Celery, **kwargs: Any) -> None:
+         wake_snoozed_tickets.s(),
+         name="wake snoozed conversation tickets",
+     )
++    add_periodic_task_with_expiry(
++        sender,
++        crontab(hour="4", minute="15"),
++        purge_deleted_tickets.s(),
++        name="purge soft-deleted conversation tickets",
++    )
+ 
+     # Re-drive queued outbound support email replies (survives a multi-day email provider outage)
+     add_periodic_task_with_expiry(
+diff --git a/products/business_knowledge/backend/facade/api.py b/products/business_knowledge/backend/facade/api.py
+new file mode 100644
+index 000000000000..59f680ffab1f
+--- /dev/null
++++ b/products/business_knowledge/backend/facade/api.py
+@@ -0,0 +1,13 @@
++from uuid import UUID
++
++from products.business_knowledge.backend.models import KnowledgeGapSuggestion, KnowledgeLearningRun
++
++
++def purge_ticket_derived_rows(*, team_id: int, ticket_id: UUID) -> None:
++    """Delete learning rows that name one support ticket.
++
++    Generated knowledge documents stay. The analyzer already refuses document text
++    that contains a name, email, identifier, or ticket-specific value.
++    """
++    KnowledgeGapSuggestion.objects.for_team(team_id).filter(ticket_id=ticket_id).delete()
++    KnowledgeLearningRun.objects.for_team(team_id).filter(evidence_key__startswith=f"{ticket_id}:").delete()
+diff --git a/products/business_knowledge/backend/facade/contracts.py b/products/business_knowledge/backend/facade/contracts.py
+new file mode 100644
+index 000000000000..e69de29bb2d1
+diff --git a/products/conversations/backend/api/tickets.py b/products/conversations/backend/api/tickets.py
+index cb5e40a92682..c47c83b42fb7 100644
+--- a/products/conversations/backend/api/tickets.py
++++ b/products/conversations/backend/api/tickets.py
+@@ -3,13 +3,14 @@
+ import json
+ import time
+ import uuid
+-from collections.abc import Sequence
++from collections.abc import Callable, Sequence
+ from datetime import datetime
+ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+ 
+ from django.db import transaction
+ from django.db.models import Q, QuerySet, Sum
+ from django.http import Http404
++from django.utils import timezone
+ 
+ import structlog
+ import posthoganalytics
+@@ -29,7 +30,7 @@
+     viewsets,
+ )
+ from rest_framework.decorators import action
+-from rest_framework.exceptions import MethodNotAllowed, ValidationError
++from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
+ from rest_framework.permissions import IsAuthenticated
+ from rest_framework.request import Request
+ from rest_framework.response import Response
+@@ -78,6 +79,9 @@
+ )
+ from products.conversations.backend.cache import (
+     get_cached_unread_count,
++    invalidate_identity_tickets_cache,
++    invalidate_messages_cache,
++    invalidate_tickets_cache,
+     invalidate_unread_count_cache,
+     set_cached_unread_count,
+ )
+@@ -97,7 +101,9 @@
+ )
+ from products.conversations.backend.models.constants import Channel, ChannelDetail, Status, TicketMessageType
+ from products.conversations.backend.person_lookup import _get_persons_by_email
++from products.conversations.backend.services.delivery import cancel_open_deliveries_for_ticket
+ from products.conversations.backend.services.messages import ticket_message_type
++from products.conversations.backend.tasks.email import cancel_pending_email_replies_for_ticket
+ 
+ from .. import reply_dedupe
+ 
+@@ -601,7 +607,14 @@ class Meta:
+ 
+     def update(self, instance: Ticket, validated_data: dict[str, Any]) -> Ticket:
+         validated_data.pop("assignee", None)
+-        return super().update(instance, validated_data)
++        validated_data.pop("tags", None)
++        for field, value in validated_data.items():
++            setattr(instance, field, value)
++        # Only the submitted columns. A full save writes back every column this request
++        # loaded, so a delete that commits in between would be undone.
++        instance.save(update_fields=[*validated_data, "updated_at"])
++        self._attempt_set_tags(self.initial_data.get("tags"), instance)
++        return instance
+ 
+ 
+ class TicketUnreadCountResponseSerializer(serializers.Serializer):
+@@ -734,7 +747,7 @@ def activity_changes(self) -> list[Change]:
+     partial_update=extend_schema(
+         parameters=[TICKET_ID_PARAM], request=TicketUpdateRequestSerializer, responses=TicketSerializer
+     ),
+-    destroy=extend_schema(parameters=[TICKET_ID_PARAM]),
++    destroy=extend_schema(parameters=[TICKET_ID_PARAM], responses={204: None}),
+     # The mixin action's default schema documents integer ids; tickets are keyed by UUID.
+     bulk_update_tags=extend_schema(
+         request=BulkUpdateTagsUUIDRequestSerializer,
+@@ -758,6 +771,7 @@ class TicketViewSet(TaggedItemViewSetMixin, TeamAndOrgViewSetMixin, AccessContro
+         "note",
+         "delete_note",
+         "create_note",
++        "destroy",
+     ]
+     queryset = Ticket.objects.all()
+     serializer_class = TicketSerializer
+@@ -871,6 +885,70 @@ def get_serializer_context(self):
+         context["team"] = self.team
+         return context
+ 
++    def destroy(self, request, *args, **kwargs):
++        """Soft-delete a ticket. A daily sweeper hard-deletes it after the grace window."""
++        ticket = self.get_object()
++        access = self.user_access_control
++        # Without the access-control add-on there is no manager role to grant, so a
++        # team member who can edit tickets can delete them. With it, only a manager
++        # or an organization admin can.
++        if access.access_controls_supported:
++            is_manager = access.check_access_level_for_object(ticket, required_level="manager")
++            if not is_manager and not access.is_organization_admin:
++                raise PermissionDenied("You need manager access to delete this ticket.")
++
++        with transaction.atomic():
++            # Conditional update, so a second concurrent delete cannot move the purge date or the actor.
++            now = timezone.now()
++            deleted = Ticket.objects.filter(team_id=self.team_id, id=ticket.id).update(
++                deleted_at=now, deleted_by=request.user, updated_at=now
++            )
++            if not deleted:
++                raise Http404("Ticket not found")
++            ticket.deleted_at = now
++            ticket.deleted_by = request.user
++            log_activity(
++                organization_id=self.organization.id,
++                team_id=self.team_id,
++                user=request.user,
++                was_impersonated=is_impersonated(request),
++                item_id=str(ticket.id),
++                scope="Ticket",
++                activity="deleted",
++                detail=Detail(name=f"Ticket #{ticket.ticket_number}"),
++            )
++
++        ticket_id = ticket.id
++        team_id = self.team_id
++        widget_session_id = ticket.widget_session_id
++
++        def _after_delete() -> None:
++            # The delete has committed. One failed step must not skip the others or fail the response.
++            steps: list[Callable[[], object]] = [
++                lambda: cancel_open_deliveries_for_ticket(team_id=team_id, ticket_id=ticket_id),
++                lambda: cancel_pending_email_replies_for_ticket(team_id=team_id, ticket_id=ticket_id),
++                lambda: invalidate_unread_count_cache(team_id),
++                lambda: invalidate_messages_cache(team_id, str(ticket_id)),
++                lambda: invalidate_identity_tickets_cache(team_id),
++                lambda: report_user_action(
++                    request.user,
++                    "support ticket deleted",
++                    _ticket_action_properties(ticket),
++                    team=self.team,
++                    request=request,
++                ),
++            ]
++            if widget_session_id:
++                steps.append(lambda: invalidate_tickets_cache(team_id, widget_session_id))
++            for step in steps:
++                try:
++                    step()
++                except Exception as e:
++                    capture_exception(e, {"ticket_id": str(ticket_id)})
++
++        transaction.on_commit(_after_delete)
++        return Response(status=drf_status.HTTP_204_NO_CONTENT)
++
+     @extend_schema(exclude=True)
+     def create(self, *args, **kwargs):
+         # Tickets are created through their channel (widget, email, Slack, etc.) or the
+@@ -1195,6 +1273,15 @@ def _save_ticket_fields(
+         ticket and keep it pending.
+         """
+         with transaction.atomic():
++            # Lock the live row, so a delete waits for this write, or this write sees the delete.
++            live = (
++                Ticket.objects.select_for_update()
++                .filter(team_id=self.team_id, id=instance.id)
++                .values_list("id", flat=True)
++                .first()
++            )
++            if live is None:
++                raise Http404("Ticket not found")
+             self.perform_update(serializer)
+ 
+             implied_status = _status_implied_by_snooze(before.snoozed_until, instance.snoozed_until)
+diff --git a/products/conversations/backend/events.py b/products/conversations/backend/events.py
+index 1348ba92d997..cc906a14a096 100644
+--- a/products/conversations/backend/events.py
++++ b/products/conversations/backend/events.py
+@@ -35,6 +35,18 @@
+ 
+ EVENT_SOURCE = "conversations_events"
+ 
++# Events that can carry message text or a customer email. The ticket purge files
++# an event-removal request for this set, scoped to one ticket id.
++CONVERSATION_ANALYTICS_EVENTS = (
++    "$conversation_ticket_created",
++    "$conversation_ticket_status_changed",
++    "$conversation_ticket_priority_changed",
++    "$conversation_ticket_assigned",
++    "$conversation_message_sent",
++    "$conversation_private_message_sent",
++    "$conversation_message_received",
++)
++
+ ActorType = Literal["user", "system", "external", "customer"]
+ 
+ 
+diff --git a/products/conversations/backend/migrations/0072_ticket_soft_delete.py b/products/conversations/backend/migrations/0072_ticket_soft_delete.py
+new file mode 100644
+index 000000000000..a654d56b0e39
+--- /dev/null
++++ b/products/conversations/backend/migrations/0072_ticket_soft_delete.py
+@@ -0,0 +1,31 @@
++import django.db.models.deletion
++from django.conf import settings
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("conversations", "0071_emailchannel_trusted_relay_sender"),
++        ("posthog", "1385_add_data_deletion_submission_id_constraint"),
++        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="ticket",
++            name="deleted_at",
++            field=models.DateTimeField(blank=True, null=True),
++        ),
++        migrations.AddField(
++            model_name="ticket",
++            name="deleted_by",
++            field=models.ForeignKey(
++                blank=True,
++                db_constraint=False,
++                null=True,
++                on_delete=django.db.models.deletion.SET_NULL,
++                related_name="+",
++                to=settings.AUTH_USER_MODEL,
++            ),
++        ),
++    ]
+diff --git a/products/conversations/backend/migrations/0073_ticket_deleted_at_index.py b/products/conversations/backend/migrations/0073_ticket_deleted_at_index.py
+new file mode 100644
+index 000000000000..b7f821b40ab2
+--- /dev/null
++++ b/products/conversations/backend/migrations/0073_ticket_deleted_at_index.py
+@@ -0,0 +1,23 @@
++from django.db import migrations, models
++
++from posthog.migration_helpers import SafeAddIndexConcurrently
++
++
++class Migration(migrations.Migration):
++    # Concurrent index builds cannot run inside a transaction.
++    atomic = False
++
++    dependencies = [
++        ("conversations", "0072_ticket_soft_delete"),
++    ]
++
++    operations = [
++        SafeAddIndexConcurrently(
++            model_name="ticket",
++            index=models.Index(
++                fields=["deleted_at"],
++                name="posthog_con_ticket_deleted_idx",
++                condition=models.Q(deleted_at__isnull=False),
++            ),
++        ),
++    ]
+diff --git a/products/conversations/backend/migrations/0074_teamconversationsticketconfig.py b/products/conversations/backend/migrations/0074_teamconversationsticketconfig.py
+new file mode 100644
+index 000000000000..b01918cfd7b9
+--- /dev/null
++++ b/products/conversations/backend/migrations/0074_teamconversationsticketconfig.py
+@@ -0,0 +1,41 @@
++# Generated by Django 5.2.17 on 2026-09-28 10:35
++
++import django.db.models.deletion
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("conversations", "0073_ticket_deleted_at_index"),
++        ("posthog", "1385_add_data_deletion_submission_id_constraint"),
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name="TeamConversationsTicketConfig",
++            fields=[
++                (
++                    "team",
++                    models.OneToOneField(
++                        db_constraint=False,
++                        on_delete=django.db.models.deletion.CASCADE,
++                        primary_key=True,
++                        related_name="+",
++                        serialize=False,
++                        to="posthog.team",
++                    ),
++                ),
++                (
++                    "retired_ticket_number",
++                    models.PositiveIntegerField(
++                        db_default=0,
++                        default=0,
++                        help_text="Highest ticket number that a purged ticket held. New tickets always get a higher number.",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "posthog_conversations_ticket_config",
++            },
++        ),
++    ]
+diff --git a/products/conversations/backend/migrations/0075_purgedticketthread.py b/products/conversations/backend/migrations/0075_purgedticketthread.py
+new file mode 100644
+index 000000000000..ada6c4de32c8
+--- /dev/null
++++ b/products/conversations/backend/migrations/0075_purgedticketthread.py
+@@ -0,0 +1,51 @@
++# Generated by Django 5.2.17 on 2026-10-02 11:07
++
++import django.db.models.deletion
++from django.db import migrations, models
++
++import posthog.uuidt
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("conversations", "0074_teamconversationsticketconfig"),
++        ("posthog", "1391_organization_provisioning"),
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name="PurgedTicketThread",
++            fields=[
++                (
++                    "id",
++                    models.UUIDField(
++                        default=posthog.uuidt.uuid7,
++                        editable=False,
++                        primary_key=True,
++                        serialize=False,
++                    ),
++                ),
++                ("thread_key", models.CharField(max_length=1024)),
++                ("created_at", models.DateTimeField(auto_now_add=True)),
++                (
++                    "team",
++                    models.ForeignKey(
++                        db_constraint=False,
++                        db_index=False,
++                        on_delete=django.db.models.deletion.CASCADE,
++                        related_name="+",
++                        to="posthog.team",
++                    ),
++                ),
++            ],
++            options={
++                "db_table": "posthog_conversations_purged_ticket_thread",
++                "constraints": [
++                    models.UniqueConstraint(
++                        fields=("team", "thread_key"),
++                        name="unique_purged_thread_per_team",
++                    )
++                ],
++            },
++        ),
++    ]
+diff --git a/products/conversations/backend/migrations/0076_tag_legacy_conversation_attachments.py b/products/conversations/backend/migrations/0076_tag_legacy_conversation_attachments.py
+new file mode 100644
+index 000000000000..db79ea0ee7e6
+--- /dev/null
++++ b/products/conversations/backend/migrations/0076_tag_legacy_conversation_attachments.py
+@@ -0,0 +1,81 @@
++import re
++from datetime import datetime, timedelta
++
++from django.db import migrations
++from django.db.models import Q
++
++ATTACHMENT_PURPOSE = "conversations_attachment"
++BATCH_SIZE = 200
++# A channel downloads every file of a message before it inserts the message. A long Slack
++# thread backfill re-hosts all of its files first, so the window is wide.
++REHOST_WINDOW = timedelta(hours=1)
++_MEDIA_ID_RE = re.compile(r"/uploaded_media/([0-9a-fA-F-]{36})")
++
++
++def _was_rehosted_for(media_created_at: datetime, comment_created_at: datetime, *, from_zendesk: bool) -> bool:
++    if comment_created_at - REHOST_WINDOW <= media_created_at <= comment_created_at:
++        return True
++    # The Zendesk import keeps the original message time and re-hosts the file later. A sender
++    # can only link a file that already exists, so a linked file is never newer than the message.
++    return from_zendesk and media_created_at >= comment_created_at
++
++
++def tag_legacy_attachments(apps, schema_editor):
++    """Tag files that support channels re-hosted before re-hosted files carried a purpose.
++
++    The ticket purge deletes only tagged files, so an untagged attachment outlives its ticket.
++    Every channel writes the file link into the message content, so a content match finds it.
++    A link alone does not prove that a channel created the file: a sender can paste the link
++    of another team file. The file must also be created at the time a channel re-hosts it.
++    """
++    UploadedMedia = apps.get_model("posthog", "UploadedMedia")
++    Comment = apps.get_model("posthog", "Comment")
++
++    last_id = None
++    while True:
++        candidates = UploadedMedia.objects.filter(created_by__isnull=True, purpose__isnull=True)
++        if last_id is not None:
++            candidates = candidates.filter(id__gt=last_id)
++        media_rows = list(candidates.order_by("id").values_list("id", "created_at")[:BATCH_SIZE])
++        if not media_rows:
++            return
++        last_id = media_rows[-1][0]
++        media_created_at = {str(media_id): created_at for media_id, created_at in media_rows}
++
++        # Media ids are random UUIDs, so a link names one file. The scope filter uses the
++        # partial trigram index on message content.
++        mentions = Q()
++        for media_id in media_created_at:
++            mentions |= Q(content__icontains=f"/uploaded_media/{media_id}")
++        comments = (
++            Comment.objects.filter(scope="conversations_ticket")
++            .filter(mentions)
++            .values_list("content", "created_at", "item_context")
++        )
++
++        attachment_ids: set[str] = set()
++        for content, comment_created_at, item_context in comments:
++            from_zendesk = isinstance(item_context, dict) and item_context.get("from_zendesk") is True
++            for match in _MEDIA_ID_RE.findall(content or ""):
++                media_id = match.lower()
++                created_at = media_created_at.get(media_id)
++                if created_at is not None and _was_rehosted_for(
++                    created_at, comment_created_at, from_zendesk=from_zendesk
++                ):
++                    attachment_ids.add(media_id)
++        if attachment_ids:
++            UploadedMedia.objects.filter(id__in=attachment_ids, purpose__isnull=True).update(purpose=ATTACHMENT_PURPOSE)
++
++
++class Migration(migrations.Migration):
++    # Each batch commits on its own, so the backfill never holds row locks in one long transaction.
++    # A retry is safe: tagged rows no longer match the candidate filter.
++    atomic = False
++
++    dependencies = [
++        ("conversations", "0075_purgedticketthread"),
++    ]
++
++    operations = [
++        migrations.RunPython(tag_legacy_attachments, migrations.RunPython.noop),
++    ]
+diff --git a/products/conversations/backend/migrations/max_migration.txt b/products/conversations/backend/migrations/max_migration.txt
+index c58aeca74115..41f6f2e35334 100644
+--- a/products/conversations/backend/migrations/max_migration.txt
++++ b/products/conversations/backend/migrations/max_migration.txt
+@@ -1 +1 @@
+-0071_emailchannel_trusted_relay_sender
++0076_tag_legacy_conversation_attachments
+diff --git a/products/conversations/backend/models/__init__.py b/products/conversations/backend/models/__init__.py
+index 5e2d7f1d74d8..1df6e17d555c 100644
+--- a/products/conversations/backend/models/__init__.py
++++ b/products/conversations/backend/models/__init__.py
+@@ -21,12 +21,14 @@
+ )
+ from .github_comment_mapping import GithubCommentMapping
+ from .inbound_event import ConversationInboundEvent, ConversationInboundEventSource, InboundPayloadTooLargeError
++from .purged_ticket_thread import PurgedTicketThread
+ from .restore_token import ConversationRestoreToken
+ from .signing_secret import SigningSecret
+ from .team_conversations_email_config import EmailChannel, EmailChannelConnectionStatus, EmailChannelKind
+ from .team_conversations_slack_config import TeamConversationsSlackConfig
+ from .team_conversations_teams_channel_sync import TeamConversationsTeamsChannelSync
+ from .team_conversations_teams_config import TeamConversationsTeamsConfig
++from .team_conversations_ticket_config import TeamConversationsTicketConfig
+ from .ticket import Ticket
+ from .ticket_view import TicketView
+ from .ticket_view_favorite import TicketViewFavorite
+@@ -60,12 +62,14 @@
+     "GithubCommentMapping",
+     "InboundPayloadTooLargeError",
+     "Priority",
++    "PurgedTicketThread",
+     "RuleType",
+     "SigningSecret",
+     "Status",
+     "TeamConversationsSlackConfig",
+     "TeamConversationsTeamsChannelSync",
+     "TeamConversationsTeamsConfig",
++    "TeamConversationsTicketConfig",
+     "Ticket",
+     "TicketAssignment",
+     "TicketView",
+diff --git a/products/conversations/backend/models/purged_ticket_thread.py b/products/conversations/backend/models/purged_ticket_thread.py
+new file mode 100644
+index 000000000000..4102ed1753e3
+--- /dev/null
++++ b/products/conversations/backend/models/purged_ticket_thread.py
+@@ -0,0 +1,39 @@
++from django.db import models
++
++from posthog.models.scoping.root_mixin import TeamScopedRootMixin
++from posthog.models.utils import UUIDModel
++
++
++def ticket_thread_key(**lookup: object) -> str:
++    """Stable key for an inbound thread lookup, such as a Slack channel and thread timestamp."""
++    return "|".join(f"{field}={lookup[field]}" for field in sorted(lookup))
++
++
++class PurgedTicketThread(TeamScopedRootMixin, UUIDModel):
++    """Marks an inbound thread whose ticket was purged. It holds identifiers only, no content.
++
++    The purge removes the ticket row, so without this marker a later message or mention in the
++    same thread opens a new ticket and imports the deleted history again.
++    """
++
++    # db_constraint=False: a real FK constraint takes SHARE ROW EXCLUSIVE on posthog_team while
++    # migrating, stalling writes under traffic.
++    team = models.ForeignKey(
++        "posthog.Team",
++        on_delete=models.CASCADE,
++        db_constraint=False,
++        db_index=False,
++        related_name="+",
++    )
++    thread_key = models.CharField(max_length=1024)
++    created_at = models.DateTimeField(auto_now_add=True)
++
++    class Meta:
++        app_label = "conversations"
++        db_table = "posthog_conversations_purged_ticket_thread"
++        constraints = [
++            models.UniqueConstraint(fields=["team", "thread_key"], name="unique_purged_thread_per_team"),
++        ]
++
++    def __str__(self) -> str:
++        return f"PurgedTicketThread({self.team_id}:{self.thread_key})"
+diff --git a/products/conversations/backend/models/team_conversations_ticket_config.py b/products/conversations/backend/models/team_conversations_ticket_config.py
+new file mode 100644
+index 000000000000..96fdb2d90a45
+--- /dev/null
++++ b/products/conversations/backend/models/team_conversations_ticket_config.py
+@@ -0,0 +1,23 @@
++from django.db import models
++
++from posthog.models.team import Team
++
++
++class TeamConversationsTicketConfig(models.Model):
++    """Per-team ticket state. Lives on a Team extension so posthog_team is never ALTERed."""
++
++    # db_constraint=False: a real FK constraint takes SHARE ROW EXCLUSIVE on posthog_team while
++    # migrating, stalling writes under traffic.
++    team = models.OneToOneField(Team, on_delete=models.CASCADE, primary_key=True, db_constraint=False, related_name="+")
++
++    # Ticket links and Slack deep links resolve by number. Once a purge removes the highest
++    # ticket, its number must stay taken, or an old link opens a different conversation.
++    retired_ticket_number = models.PositiveIntegerField(
++        default=0,
++        db_default=0,
++        help_text="Highest ticket number that a purged ticket held. New tickets always get a higher number.",
++    )
++
++    class Meta:
++        app_label = "conversations"
++        db_table = "posthog_conversations_ticket_config"
+diff --git a/products/conversations/backend/models/ticket.py b/products/conversations/backend/models/ticket.py
+index bb4cddbdd2ac..d8a324afad2c 100644
+--- a/products/conversations/backend/models/ticket.py
++++ b/products/conversations/backend/models/ticket.py
+@@ -1,4 +1,5 @@
+-from typing import TYPE_CHECKING
++from datetime import timedelta
++from typing import TYPE_CHECKING, Any
+ 
+ from django.db import models, transaction
+ 
+@@ -6,6 +7,12 @@
+ from posthog.models.utils import UUIDTModel
+ 
+ from .constants import Channel, ChannelDetail, Priority, Status
++from .purged_ticket_thread import PurgedTicketThread, ticket_thread_key
++from .team_conversations_ticket_config import TeamConversationsTicketConfig
++
++# Soft-deleted tickets stay this long so a mistaken delete can still be recovered
++# operationally, and so the hard purge finishes inside a one-month erasure window.
++TICKET_HARD_DELETE_AFTER = timedelta(days=14)
+ 
+ # Two-arg lock namespace for ticket_number allocation. Keep this value stable:
+ # every allocator (create_with_number and bulk import) must use the same pair.
+@@ -16,6 +23,12 @@
+ 
+ 
+ class TicketManager(models.Manager):
++    """Every ticket, including soft-deleted rows.
++
++    ``objects`` hides those rows. This manager stays unfiltered so number allocation
++    and inbound thread-key checks can still see them.
++    """
++
+     def lock_ticket_number_allocation(self, team_id: int) -> None:
+         """Serialize ticket_number assignment for this team.
+ 
+@@ -32,21 +45,63 @@ def lock_ticket_number_allocation(self, team_id: int) -> None:
+                 [_TICKET_NUMBER_LOCK_NAMESPACE, team_id],
+             )
+ 
++    def highest_used_ticket_number(self, team_id: int) -> int:
++        """Highest number any ticket of this team holds or held. Call under the allocation lock.
++
++        Soft-deleted rows count, because their number is still in unique_ticket_number_per_team.
++        Purged rows count through the retired number, so an old link never opens a new ticket.
++        """
++        max_num = (
++            Ticket.all_objects.filter(team_id=team_id).aggregate(models.Max("ticket_number"))["ticket_number__max"] or 0
++        )
++        retired = (
++            TeamConversationsTicketConfig.objects.filter(team_id=team_id)
++            .values_list("retired_ticket_number", flat=True)
++            .first()
++            or 0
++        )
++        return max(max_num, retired)
++
+     def create_with_number(self, **kwargs):
+         """Create a ticket with the next ticket_number for its team."""
+         team = kwargs.get("team")
+         if not team:
+             raise ValueError("team is required")
+ 
+-        with transaction.atomic(using=self.db):
+-            self.lock_ticket_number_allocation(team.id)
+-            max_num = self.filter(team=team).aggregate(models.Max("ticket_number"))["ticket_number__max"] or 0
+-            kwargs["ticket_number"] = max_num + 1
+-            return self.create(**kwargs)
++        allocation = Ticket.all_objects
++        with transaction.atomic(using=allocation.db):
++            allocation.lock_ticket_number_allocation(team.id)
++            kwargs["ticket_number"] = allocation.highest_used_ticket_number(team.id) + 1
++            return allocation.create(**kwargs)
++
++
++class LiveTicketManager(TicketManager):
++    """Tickets a person can still open. Soft-deleted rows stay on ``all_objects``."""
++
++    def get_queryset(self) -> models.QuerySet:
++        return super().get_queryset().filter(deleted_at__isnull=True)
++
++
++def deleted_ticket_holds_thread(*, team_id: int, **lookup: Any) -> bool:
++    """Whether a soft-deleted or purged ticket still owns this inbound thread key.
++
++    Callers that create a ticket when no live row matches must check this first.
++    The unique keys stay on the deleted row until the sweeper, so a new ticket
++    would either violate that constraint or open a second copy of a deleted thread.
++    After the purge, a PurgedTicketThread row keeps the thread closed.
++    """
++    if not lookup:
++        return False
++    if Ticket.all_objects.filter(team_id=team_id, deleted_at__isnull=False, **lookup).exists():
++        return True
++    return PurgedTicketThread.objects.for_team(team_id).filter(thread_key=ticket_thread_key(**lookup)).exists()
+ 
+ 
+ class Ticket(Taggable, UUIDTModel):
+-    objects = TicketManager()
++    # Live rows are the default so a forgotten query cannot return a deleted ticket.
++    # ``all_objects`` is the unfiltered manager historical migrations already import.
++    objects = LiveTicketManager()
++    all_objects = TicketManager()
+ 
+     # Dynamic attribute set by TicketViewSet._attach_persons_to_tickets for serialization
+     person: "Person | None"
+@@ -133,6 +188,17 @@ class Ticket(Taggable, UUIDTModel):
+ 
+     created_at = models.DateTimeField(auto_now_add=True)
+     updated_at = models.DateTimeField(auto_now=True)
++    # Set together when a manager deletes the ticket. The sweeper hard-deletes
++    # once deleted_at is older than TICKET_HARD_DELETE_AFTER.
++    deleted_at = models.DateTimeField(null=True, blank=True)
++    deleted_by = models.ForeignKey(
++        "posthog.User",
++        null=True,
++        blank=True,
++        on_delete=models.SET_NULL,
++        db_constraint=False,
++        related_name="+",
++    )
+ 
+     class Meta:
+         db_table = "posthog_conversations_ticket"
+@@ -210,6 +276,12 @@ class Meta:
+                 name="posthog_con_compose_dedupe_idx",
+                 condition=models.Q(channel_source="email"),
+             ),
++            # Sweeper scans only soft-deleted rows, which are rare compared to the table.
++            models.Index(
++                fields=["deleted_at"],
++                name="posthog_con_ticket_deleted_idx",
++                condition=models.Q(deleted_at__isnull=False),
++            ),
+         ]
+         constraints = [
+             models.UniqueConstraint(fields=["team", "ticket_number"], name="unique_ticket_number_per_team"),
+@@ -227,3 +299,18 @@ class Meta:
+ 
+     def __str__(self):
+         return f"Ticket {self.id} - {self.widget_session_id[:8]}..."
++
++    def inbound_thread_keys(self) -> list[str]:
++        """Keys of the external threads that route inbound messages to this ticket."""
++        lookups: list[dict[str, Any]] = []
++        if self.slack_channel_id and self.slack_thread_ts:
++            lookups.append({"slack_channel_id": self.slack_channel_id, "slack_thread_ts": self.slack_thread_ts})
++        if self.teams_channel_id and self.teams_conversation_id:
++            lookups.append(
++                {"teams_channel_id": self.teams_channel_id, "teams_conversation_id": self.teams_conversation_id}
++            )
++        if self.github_repo and self.github_issue_number is not None:
++            lookups.append({"github_repo": self.github_repo, "github_issue_number": self.github_issue_number})
++        if self.zendesk_ticket_id is not None:
++            lookups.append({"zendesk_ticket_id": self.zendesk_ticket_id})
++        return [ticket_thread_key(**lookup) for lookup in lookups]
+diff --git a/products/conversations/backend/services/attachments.py b/products/conversations/backend/services/attachments.py
+index c959307e2bac..c888310077e4 100644
+--- a/products/conversations/backend/services/attachments.py
++++ b/products/conversations/backend/services/attachments.py
+@@ -14,6 +14,8 @@
+     save_content_to_object_storage,
+     sniff_image_content_type,
+ )
++from posthog.storage import object_storage
++from posthog.storage.object_storage import ObjectStorageError
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -25,6 +27,9 @@
+ # and "!" so an attacker-controlled filename can't inject markdown link/image
+ # syntax when we render it as `[name](url)` / `![name](url)`.
+ _FILENAME_STRIP_RE = re.compile(r"[^\w\s\-.,()]+")
++_REHOSTED_MEDIA_URL_RE = re.compile(
++    r"/uploaded_media/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
++)
+ 
+ 
+ def sanitize_attachment_filename(name: str | None) -> str:
+@@ -54,6 +59,11 @@ def resolve_attachment_content_type(content: bytes, declared_content_type: str)
+     return sniff_image_content_type(content)
+ 
+ 
++# Marks files that a support channel re-hosted. Ticket cleanup deletes only these, because a
++# team file can also have no created_by (its uploader was removed) and can be linked from a message.
++CONVERSATIONS_ATTACHMENT_MEDIA_PURPOSE = "conversations_attachment"
++
++
+ def save_file_to_uploaded_media(
+     team: Team,
+     file_name: str,
+@@ -84,6 +94,7 @@ def save_file_to_uploaded_media(
+         file_name=file_name,
+         content_type=content_type,
+         created_by=None,
++        purpose=CONVERSATIONS_ATTACHMENT_MEDIA_PURPOSE,
+     )
+     try:
+         save_content_to_object_storage(uploaded_media, content)
+@@ -170,3 +181,24 @@ def build_content_with_images(
+             }
+         )
+     return content, rich_content
++
++
++def discard_rehosted_attachments(team: Team, attachments: list[dict[str, Any]]) -> None:
++    """Delete files that were re-hosted for a message that no ticket comment will reference."""
++    media_ids = {
++        match.group(1)
++        for attachment in attachments
++        if (match := _REHOSTED_MEDIA_URL_RE.search(attachment.get("url") or ""))
++    }
++    if not media_ids:
++        return
++    for media in UploadedMedia.objects.filter(
++        team_id=team.id, id__in=media_ids, purpose=CONVERSATIONS_ATTACHMENT_MEDIA_PURPOSE
++    ):
++        if media.media_location:
++            try:
++                object_storage.delete(media.media_location)
++            except ObjectStorageError:
++                logger.warning("conversations_attachment_discard_failed", team_id=team.id, media_id=str(media.id))
++                continue
++        media.delete()
+diff --git a/products/conversations/backend/services/delivery.py b/products/conversations/backend/services/delivery.py
+index e46438b56a72..dd23a3f7d908 100644
+--- a/products/conversations/backend/services/delivery.py
++++ b/products/conversations/backend/services/delivery.py
+@@ -1045,3 +1045,38 @@ def redrive_failed_delivery_part(part_id: str, *, wake: DeliveryWake) -> Convers
+         part.refresh_from_db()
+         transaction.on_commit(lambda: _safe_wake(wake, part))
+     return part
++
++
++def delivery_ticket_is_live(delivery: ConversationDelivery) -> bool:
++    """Whether the delivery's ticket still exists and is not deleted, so a reply may go out."""
++    if delivery.ticket_id is None:
++        return True
++    # nosemgrep: idor-lookup-without-team (ticket id comes from the claimed delivery row)
++    return Ticket.objects.filter(id=delivery.ticket_id).exists()
++
++
++def cancel_open_deliveries_for_ticket(*, team_id: int, ticket_id: UUID | str) -> None:
++    """Stop outbound sends for a ticket that was just soft-deleted.
++
++    QuerySet.update skips the model save hook, so terminal_at is set here.
++    A failed row is what the worker treats as done.
++    """
++    now = timezone.now()
++    open_statuses = [ConversationDelivery.Status.PENDING, ConversationDelivery.Status.PROCESSING]
++    delivery_ids = list(
++        ConversationDelivery.objects.for_team(team_id)
++        .filter(ticket_id=ticket_id, status__in=open_statuses)
++        .values_list("id", flat=True)
++    )
++    if not delivery_ids:
++        return
++    failed = {
++        "status": ConversationDelivery.Status.FAILED,
++        "terminal_at": now,
++        "last_error_code": "ticket_deleted",
++        "updated_at": now,
++    }
++    ConversationDeliveryPart.objects.for_team(team_id).filter(
++        delivery_id__in=delivery_ids, status__in=open_statuses
++    ).update(**failed)
++    ConversationDelivery.objects.for_team(team_id).filter(id__in=delivery_ids).update(**failed)
+diff --git a/products/conversations/backend/services/mailgun_events.py b/products/conversations/backend/services/mailgun_events.py
+index d5c3b283294d..ddfc75efc6a3 100644
+--- a/products/conversations/backend/services/mailgun_events.py
++++ b/products/conversations/backend/services/mailgun_events.py
+@@ -718,6 +718,15 @@ def _process_support_email(
+         return
+ 
+     existing_ticket = _find_thread_ticket(team.id, email.in_reply_to, email.references)
++    if existing_ticket is not None and existing_ticket.deleted_at is not None:
++        # Threading headers point at a deleted ticket. A new ticket would split the thread.
++        logger.info(
++            "email_inbound_deleted_ticket",
++            team_id=team.id,
++            ticket_id=str(existing_ticket.id),
++            message_id=email.message_id,
++        )
++        return
+     sender_name = email.sender.name
+     sender_email = email.sender.email
+     cc_list = _collect_participants(
+@@ -743,15 +752,25 @@ def _process_support_email(
+ 
+     try:
+         with transaction.atomic():
+-            attachments = _extract_attachments(email.attachments, team)
+-            content, rich_content = _build_content_with_attachments(content, attachments)
+-
+             ticket: Ticket | None = None
+             if existing_ticket:
+                 ticket = Ticket.objects.select_for_update().filter(id=existing_ticket.id, team=team).first()
+                 if not ticket:
++                    # Deleted between the lookup and the lock. Do not open a second ticket.
++                    if Ticket.all_objects.filter(id=existing_ticket.id, team=team, deleted_at__isnull=False).exists():
++                        logger.info(
++                            "email_inbound_deleted_ticket",
++                            team_id=team.id,
++                            ticket_id=str(existing_ticket.id),
++                            message_id=email.message_id,
++                        )
++                        return
+                     existing_ticket = None
+ 
++            # After the deleted-ticket check, so a dropped email leaves no stored files behind.
++            attachments = _extract_attachments(email.attachments, team)
++            content, rich_content = _build_content_with_attachments(content, attachments)
++
+             if not ticket:
+                 ticket = Ticket.objects.create_with_number(
+                     team=team,
+diff --git a/products/conversations/backend/slack.py b/products/conversations/backend/slack.py
+index b981c05ab8bf..522ff2201c76 100644
+--- a/products/conversations/backend/slack.py
++++ b/products/conversations/backend/slack.py
+@@ -18,6 +18,7 @@
+ from urllib.request import HTTPRedirectHandler, Request, build_opener
+ 
+ from django.conf import settings
++from django.db import transaction
+ from django.db.models import F
+ 
+ import structlog
+@@ -49,6 +50,7 @@
+ )
+ from .models import Ticket
+ from .models.constants import Channel, ChannelDetail, Status
++from .models.ticket import deleted_ticket_holds_thread
+ from .services.attachments import (
+     CONVERSATIONS_MAX_IMAGE_BYTES,
+     MAX_ATTACHMENTS_PER_MESSAGE,
+@@ -483,6 +485,17 @@ def create_or_update_slack_ticket(
+         files_count=len(files or []),
+     )
+ 
++    # A deleted ticket holds its thread until the purge. Stop before files are re-hosted,
++    # or the stored copies have no comment that the purge can find them through.
++    if deleted_ticket_holds_thread(team_id=team.id, slack_channel_id=slack_channel_id, slack_thread_ts=thread_ts):
++        logger.info(
++            "slack_inbound_deleted_ticket",
++            team_id=team_id,
++            slack_channel_id=slack_channel_id,
++            thread_ts=thread_ts,
++        )
++        return None
++
+     # Extract attachments from Slack files, making them publicly accessible
+     attachments = split_slack_attachments(extract_slack_files(files, team, client))
+ 
+@@ -601,6 +614,14 @@ def create_or_update_slack_ticket(
+         # .exists() call and now.
+         if Ticket.objects.filter(team=team, slack_channel_id=slack_channel_id, slack_thread_ts=thread_ts).exists():
+             return None
++        if deleted_ticket_holds_thread(team_id=team.id, slack_channel_id=slack_channel_id, slack_thread_ts=thread_ts):
++            logger.info(
++                "slack_inbound_deleted_ticket",
++                team_id=team_id,
++                slack_channel_id=slack_channel_id,
++                thread_ts=thread_ts,
++            )
++            return None
+ 
+         ticket = Ticket.objects.create_with_number(
+             team=team,
+@@ -1420,6 +1441,9 @@ def _backfill_thread_replies(
+     ]
+     if not thread_replies:
+         return
++    # Stop before any file is re-hosted for a ticket that was deleted after it was created.
++    if Ticket.all_objects.filter(id=ticket.id, team=team, deleted_at__isnull=False).exists():
++        return
+ 
+     logger.info(
+         "slack_support_reaction_backfill_started",
+@@ -1515,20 +1539,25 @@ def _backfill_thread_replies(
+         )
+ 
+     if comments_to_create:
+-        # bulk_create intentionally skips post_save signals — backfilled historical
+-        # messages should not trigger activity log entries or Slack reply notifications.
+-        created_comments = Comment.objects.bulk_create(comments_to_create)
+-        last_comment = created_comments[-1]
+-        update_fields: dict[str, Any] = {
+-            "message_count": F("message_count") + len(comments_to_create),
+-            "last_message_at": last_comment.created_at,
+-            "last_message_text": (last_comment.content or "")[:500],
+-        }
+-        if customer_message_count:
+-            update_fields["unread_team_count"] = F("unread_team_count") + customer_message_count
+-        if team_message_count:
+-            update_fields["unread_customer_count"] = F("unread_customer_count") + team_message_count
+-        Ticket.objects.filter(id=ticket.id, team=team).update(**update_fields)
++        # The row lock makes the delete endpoint wait for these writes, or makes them see the delete.
++        with transaction.atomic():
++            locked = Ticket.all_objects.select_for_update().filter(id=ticket.id, team=team).first()
++            if locked is None or locked.deleted_at is not None:
++                return
++            # bulk_create intentionally skips post_save signals — backfilled historical
++            # messages should not trigger activity log entries or Slack reply notifications.
++            created_comments = Comment.objects.bulk_create(comments_to_create)
++            last_comment = created_comments[-1]
++            update_fields: dict[str, Any] = {
++                "message_count": F("message_count") + len(comments_to_create),
++                "last_message_at": last_comment.created_at,
++                "last_message_text": (last_comment.content or "")[:500],
++            }
++            if customer_message_count:
++                update_fields["unread_team_count"] = F("unread_team_count") + customer_message_count
++            if team_message_count:
++                update_fields["unread_customer_count"] = F("unread_customer_count") + team_message_count
++            Ticket.objects.filter(id=ticket.id, team=team).update(**update_fields)
+ 
+     logger.info(
+         "slack_support_reaction_backfill_completed",
+diff --git a/products/conversations/backend/tasks/email.py b/products/conversations/backend/tasks/email.py
+index a69acc5ba1d1..debaa32b435c 100644
+--- a/products/conversations/backend/tasks/email.py
++++ b/products/conversations/backend/tasks/email.py
+@@ -25,7 +25,7 @@
+     MailgunTransientError,
+     send_mime,
+ )
+-from products.conversations.backend.models import EmailMessageMapping, EmailOutboxMessage
++from products.conversations.backend.models import EmailMessageMapping, EmailOutboxMessage, Ticket
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -84,6 +84,32 @@ def _mark_outbox_failed(outbox: EmailOutboxMessage, error: str) -> None:
+     _set_comment_delivery_status(outbox.team_id, outbox.comment_id, "failed")
+ 
+ 
++def cancel_pending_email_replies_for_ticket(*, team_id: int, ticket_id: UUID | str) -> None:
++    """Stop queued replies for a ticket that was just soft-deleted.
++
++    Rows under an active send lease are left alone. Their worker checks the delete
++    right before it sends, and it owns the final status of the row.
++    """
++    now = timezone.now()
++    with transaction.atomic():
++        pending = list(
++            EmailOutboxMessage.objects.select_for_update(skip_locked=True)
++            .filter(team_id=team_id, ticket_id=ticket_id, status=EmailOutboxMessage.Status.PENDING)
++            .filter(models.Q(locked_until__isnull=True) | models.Q(locked_until__lte=now))
++            .only("id", "comment_id")
++        )
++        if not pending:
++            return
++        EmailOutboxMessage.objects.filter(id__in=[outbox.id for outbox in pending]).update(
++            status=EmailOutboxMessage.Status.FAILED_PERMANENT,
++            last_error="ticket deleted",
++            locked_until=None,
++            updated_at=now,
++        )
++    for comment_id in [outbox.comment_id for outbox in pending]:
++        _set_comment_delivery_status(team_id, comment_id, "failed")
++
++
+ def _schedule_outbox_retry(outbox: EmailOutboxMessage, error: str) -> None:
+     outbox.attempts += 1
+     backoff = min(
+@@ -107,6 +133,10 @@ def _process_outbox_row(outbox: EmailOutboxMessage) -> None:
+     config = ticket.email_config
+     comment = outbox.comment
+ 
++    # The FK loads soft-deleted tickets too. A reply must not reach the customer after the delete.
++    if ticket.deleted_at is not None:
++        _mark_outbox_failed(outbox, "ticket deleted")
++        return
+     settings_dict = ticket.team.conversations_settings or {}
+     if not settings_dict.get("email_enabled"):
+         _mark_outbox_failed(outbox, "email disabled for team")
+@@ -183,6 +213,12 @@ def _process_outbox_row(outbox: EmailOutboxMessage) -> None:
+     recipients = [ticket.email_from, *cc]
+     mime_bytes = email_message.message().as_bytes(linesep="\r\n")
+ 
++    # Check again right before the send. The delete can commit after the check at the top,
++    # and a row lock held across the Mailgun call would block every write to the ticket.
++    if Ticket.all_objects.filter(id=ticket.id, deleted_at__isnull=False).exists():
++        _mark_outbox_failed(outbox, "ticket deleted")
++        return
++
+     try:
+         send_mime(config.domain, mime_bytes, recipients=recipients)
+     except MailgunTransientError as e:
+diff --git a/products/conversations/backend/tasks/github.py b/products/conversations/backend/tasks/github.py
+index 01d42c285bc7..2a9a730bc194 100644
+--- a/products/conversations/backend/tasks/github.py
++++ b/products/conversations/backend/tasks/github.py
+@@ -19,7 +19,7 @@
+ from products.conversations.backend.events import capture_ticket_status_changed
+ from products.conversations.backend.models import GithubCommentMapping
+ from products.conversations.backend.models.constants import Status
+-from products.conversations.backend.models.ticket import Ticket
++from products.conversations.backend.models.ticket import Ticket, deleted_ticket_holds_thread
+ 
+ logger = structlog.get_logger(__name__)
+ SUPPORTHOG_EVENT_IDEMPOTENCY_TTL_SECONDS = 6 * 60
+@@ -44,15 +44,22 @@ def _find_github_ticket(team_id: int, repo: str, issue_number: int) -> Ticket |
+     ).first()
+ 
+ 
+-def _get_or_create_github_ticket(team: Team, repo: str, issue_number: int, payload: dict[str, Any]) -> Ticket:
++def _get_or_create_github_ticket(team: Team, repo: str, issue_number: int, payload: dict[str, Any]) -> Ticket | None:
+     """Find or create a ticket for a GitHub issue, safe against concurrent calls.
+ 
+     Uses transaction.atomic() + the DB unique constraint
+     posthog_con_github_issue_uniq to guarantee exactly one ticket per issue.
++    Returns None when a soft-deleted ticket still holds the issue, so a webhook
++    cannot open a second copy.
+     """
+     existing = _find_github_ticket(team.id, repo, issue_number)
+     if existing:
+         return existing
++    if deleted_ticket_holds_thread(team_id=team.id, github_repo=repo, github_issue_number=issue_number):
++        logger.info(
++            "github_inbound_deleted_ticket", team_id=team.id, github_repo=repo, github_issue_number=issue_number
++        )
++        return None
+ 
+     issue = payload.get("issue", {})
+     sender = payload.get("sender", {})
+@@ -90,6 +97,11 @@ def _get_or_create_github_ticket(team: Team, repo: str, issue_number: int, paylo
+         existing = _find_github_ticket(team.id, repo, issue_number)
+         if existing:
+             return existing
++        if deleted_ticket_holds_thread(team_id=team.id, github_repo=repo, github_issue_number=issue_number):
++            logger.info(
++                "github_inbound_deleted_ticket", team_id=team.id, github_repo=repo, github_issue_number=issue_number
++            )
++            return None
+         raise
+ 
+ 
+@@ -153,6 +165,8 @@ def _handle_github_issue_event(team: Team, repo: str, action: str, payload: dict
+             return
+ 
+         ticket = _get_or_create_github_ticket(team, repo, issue_number, payload)
++        if ticket is None:
++            return
+ 
+         # For "opened" events we have the full body — replace the title-only
+         # comment that _get_or_create_github_ticket may have created with a
+@@ -240,6 +254,8 @@ def _handle_github_comment_event(team: Team, repo: str, action: str, payload: di
+     ticket = _find_github_ticket(team.id, repo, issue_number)
+     if not ticket:
+         ticket = _get_or_create_github_ticket(team, repo, issue_number, payload)
++    if ticket is None:
++        return
+ 
+     comment_author = comment_data.get("user", {}).get("login", "")
+     body = comment_data.get("body", "") or ""
+diff --git a/products/conversations/backend/tasks/maintenance.py b/products/conversations/backend/tasks/maintenance.py
+index 1f23c7a176f0..b130228ffd14 100644
+--- a/products/conversations/backend/tasks/maintenance.py
++++ b/products/conversations/backend/tasks/maintenance.py
+@@ -1,18 +1,41 @@
+ """Cross-channel ticket maintenance."""
+ 
+-from datetime import datetime
++import re
++import json
++from datetime import datetime, timedelta
++from uuid import UUID
+ 
+-from django.db import transaction
++from django.db import IntegrityError, transaction
++from django.db.models import Q
+ from django.utils import timezone
+ 
+ import structlog
+ from celery import shared_task
+ 
+ from posthog.models.activity_logging.activity_log import Change, Detail, log_activity
++from posthog.models.comment import Comment
++from posthog.models.data_deletion_request import (
++    DataDeletionRequest,
++    RequestStatus,
++    RequestType,
++    compile_hogql_predicate,
++)
++from posthog.models.scoping.manager import resolve_effective_team_id
++from posthog.models.team.extensions import get_or_create_team_extension
++from posthog.models.uploaded_media import UploadedMedia
++from posthog.storage import object_storage
+ 
+-from products.conversations.backend.events import capture_ticket_status_changed
++from products.business_knowledge.backend.facade.api import purge_ticket_derived_rows
++from products.conversations.backend.events import CONVERSATION_ANALYTICS_EVENTS, capture_ticket_status_changed
++from products.conversations.backend.models import (
++    ConversationDelivery,
++    ConversationInboundEvent,
++    PurgedTicketThread,
++    TeamConversationsTicketConfig,
++)
+ from products.conversations.backend.models.constants import Status
+-from products.conversations.backend.models.ticket import Ticket
++from products.conversations.backend.models.ticket import TICKET_HARD_DELETE_AFTER, Ticket
++from products.conversations.backend.services.attachments import CONVERSATIONS_ATTACHMENT_MEDIA_PURPOSE
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -96,3 +119,227 @@ def wake_snoozed_tickets() -> None:
+ 
+     if total:
+         logger.info("wake_snoozed_tickets_completed", count=total)
++
++
++PURGE_BATCH_SIZE = 50
++_TICKET_COMMENT_SCOPES = ("conversations_ticket", "Ticket")
++_UPLOADED_MEDIA_RE = re.compile(
++    r"/uploaded_media/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
++)
++
++
++def _comment_media_ids(comments: list[Comment]) -> set[str]:
++    found: set[str] = set()
++    for comment in comments:
++        blob = comment.content or ""
++        if comment.rich_content is not None:
++            blob += json.dumps(comment.rich_content)
++        found.update(_UPLOADED_MEDIA_RE.findall(blob))
++    return found
++
++
++def _ticket_owned_media(*, team_id: int, ticket_id: str, media_ids: set[str]) -> list[UploadedMedia]:
++    """Media that this ticket's comments reference and nothing else can claim.
++
++    Only files that a support channel re-hosted are candidates. Any other team file can be
++    linked from a message, so a ticket comment that names it must not delete it. A re-hosted
++    file that another comment also references stays too.
++    """
++    if not media_ids:
++        return []
++    candidates = list(
++        UploadedMedia.objects.filter(team_id=team_id, id__in=media_ids, purpose=CONVERSATIONS_ATTACHMENT_MEDIA_PURPOSE)
++    )
++    if not candidates:
++        return []
++    mentions_candidate = Q()
++    for media in candidates:
++        mentions_candidate |= Q(content__contains=str(media.id)) | Q(rich_content__icontains=str(media.id))
++    other_comments = list(
++        Comment.objects.filter(team_id=team_id)
++        .filter(mentions_candidate)
++        .exclude(item_id=ticket_id, scope__in=_TICKET_COMMENT_SCOPES)
++        .only("content", "rich_content")
++    )
++    shared = {media_id.lower() for media_id in _comment_media_ids(other_comments)}
++    return [media for media in candidates if str(media.id) not in shared]
++
++
++def _delete_uploaded_media(media: list[UploadedMedia]) -> None:
++    # Runs as the last step of the purge transaction, so no later database write can roll
++    # back after an object is gone. A storage failure raises and the purge rolls back; the
++    # next run finds the object again from the comment. S3 deletes are idempotent.
++    for item in media:
++        item.delete()
++    for item in media:
++        if item.media_location:
++            object_storage.delete(item.media_location)
++
++
++def _retire_ticket_number(*, ticket: Ticket) -> None:
++    """Keep a purged ticket's number taken, so a link to it never opens a newer ticket."""
++    Ticket.all_objects.lock_ticket_number_allocation(ticket.team_id)
++    get_or_create_team_extension(ticket.team, TeamConversationsTicketConfig)
++    TeamConversationsTicketConfig.objects.filter(
++        team_id=ticket.team_id, retired_ticket_number__lt=ticket.ticket_number
++    ).update(retired_ticket_number=ticket.ticket_number)
++
++
++def _close_inbound_threads(*, ticket: Ticket) -> None:
++    """Keep the ticket's external threads closed, so a later message cannot import the deleted history again."""
++    keys = ticket.inbound_thread_keys()
++    if not keys:
++        return
++    team_id = resolve_effective_team_id(ticket.team_id)
++    PurgedTicketThread.objects.for_team(team_id, canonical=True).bulk_create(
++        [PurgedTicketThread(team_id=team_id, thread_key=key) for key in keys],
++        ignore_conflicts=True,
++    )
++
++
++def _file_ticket_event_deletion(ticket: Ticket) -> None:
++    """Ask the event-deletion sweep to remove this ticket's analytics events.
++
++    ``properties.ticket_id`` is compared to the ticket UUID. The value is hex and
++    hyphens only, so it cannot change the HogQL expression.
++    """
++    if ticket.deleted_at is None:
++        return
++    if DataDeletionRequest.objects.filter(team_id=ticket.team_id, submission_id=ticket.id).exists():
++        return
++    end_time = ticket.deleted_at + timedelta(days=1)
++    start_time = ticket.created_at
++    if start_time >= end_time:
++        start_time = end_time - timedelta(seconds=1)
++    # ticket.id is a UUID. Canonical form is hex and hyphens, so the predicate
++    # cannot pick up HogQL from the value.
++    ticket_uuid = UUID(str(ticket.id))
++    request = DataDeletionRequest(
++        team_id=ticket.team_id,
++        submission_id=ticket.id,
++        request_type=RequestType.EVENT_REMOVAL,
++        status=RequestStatus.PENDING,
++        requires_approval=False,
++        events=list(CONVERSATION_ANALYTICS_EVENTS),
++        hogql_predicate=f"properties.ticket_id = '{ticket_uuid}'",
++        start_time=start_time,
++        end_time=end_time,
++        created_by=ticket.deleted_by,
++    )
++    # Validates the predicate against the team's HogQL schema. full_clean also
++    # requires created_by, which a system purge does not have.
++    compile_hogql_predicate(request)
++    try:
++        request.save()
++    except IntegrityError:
++        return
++
++
++def _ticket_is_due(ticket: Ticket | None, cutoff: datetime) -> bool:
++    return ticket is not None and ticket.deleted_at is not None and ticket.deleted_at <= cutoff
++
++
++def _purge_ticket(ticket_id: UUID, cutoff: datetime) -> bool:
++    """Purge one ticket. Returns False when another worker holds the row."""
++    with transaction.atomic():
++        # of=("self",) so the team join below does not lock the Team row.
++        locked = (
++            Ticket.all_objects.select_related("team")
++            .select_for_update(skip_locked=True, of=("self",))
++            .filter(id=ticket_id)
++            .first()
++        )
++        if locked is None:
++            held = Ticket.all_objects.filter(id=ticket_id).exists()
++            if held:
++                return False
++            return True
++        if not _ticket_is_due(locked, cutoff):
++            return True
++
++        comments = list(
++            Comment.objects.filter(
++                team_id=locked.team_id,
++                item_id=str(locked.id),
++                scope__in=_TICKET_COMMENT_SCOPES,
++            )
++        )
++        from products.signals.backend.facade.api import (
++            retract_source_signals,  # noqa: PLC0415 — keeps signals and HogQL off the django.setup() path
++        )
++
++        # Signal copies go first, while the row is locked, so a ticket that is no longer
++        # due cannot lose them. A failure raises and leaves the row for retry.
++        retract_source_signals(
++            team=locked.team,
++            source_product="conversations",
++            source_type="ticket",
++            source_id=str(locked.id),
++        )
++        owned_media = _ticket_owned_media(
++            team_id=locked.team_id, ticket_id=str(locked.id), media_ids=_comment_media_ids(comments)
++        )
++        _file_ticket_event_deletion(locked)
++
++        Comment.objects.filter(
++            team_id=locked.team_id,
++            item_id=str(locked.id),
++            scope__in=_TICKET_COMMENT_SCOPES,
++        ).delete()
++        ConversationDelivery.objects.for_team(locked.team_id).filter(ticket_id=locked.id).delete()
++        ConversationInboundEvent.objects.for_team(locked.team_id).filter(ticket_id=locked.id).delete()
++        purge_ticket_derived_rows(team_id=locked.team_id, ticket_id=locked.id)
++        ticket_number = locked.ticket_number
++        organization_id = locked.team.organization_id
++        team_id = locked.team_id
++        item_id = str(locked.id)
++        _retire_ticket_number(ticket=locked)
++        _close_inbound_threads(ticket=locked)
++        locked.delete()
++        log_activity(
++            organization_id=organization_id,
++            team_id=team_id,
++            user=None,
++            was_impersonated=False,
++            item_id=item_id,
++            scope="Ticket",
++            activity="purged",
++            detail=Detail(name=f"Ticket #{ticket_number}"),
++        )
++        _delete_uploaded_media(owned_media)
++    return True
++
++
++@shared_task(
++    name="products.conversations.backend.tasks.purge_deleted_tickets",
++    ignore_result=True,
++)
++def purge_deleted_tickets() -> None:
++    """Hard-delete tickets whose soft-delete grace window has elapsed."""
++    cutoff = timezone.now() - TICKET_HARD_DELETE_AFTER
++    purged = 0
++    failed_ids: set[UUID] = set()
++
++    while True:
++        due = Ticket.all_objects.filter(deleted_at__isnull=False, deleted_at__lte=cutoff)
++        if failed_ids:
++            due = due.exclude(id__in=failed_ids)
++        batch = list(due.order_by("deleted_at").values_list("id", flat=True)[:PURGE_BATCH_SIZE])
++        if not batch:
++            break
++        for ticket_id in batch:
++            try:
++                finished = _purge_ticket(ticket_id, cutoff)
++            except Exception:
++                failed_ids.add(ticket_id)
++                logger.exception("purge_deleted_ticket_failed", ticket_id=str(ticket_id))
++                continue
++            if not finished:
++                # Another worker holds the row. Skip it this run so the loop cannot spin.
++                failed_ids.add(ticket_id)
++                continue
++            purged += 1
++        if len(batch) < PURGE_BATCH_SIZE:
++            break
++
++    logger.info("purge_deleted_tickets_completed", purged=purged, failed=len(failed_ids))
+diff --git a/products/conversations/backend/tasks/slack.py b/products/conversations/backend/tasks/slack.py
+index 6e6d30774cf5..84ffe3590cfe 100644
+--- a/products/conversations/backend/tasks/slack.py
++++ b/products/conversations/backend/tasks/slack.py
+@@ -48,6 +48,7 @@
+     cleanup_delivery_snapshots,
+     complete_slack_body_delivery,
+     defer_delivery_part,
++    delivery_ticket_is_live,
+     drain_delivery_retention,
+     due_delivery_part_ids,
+     fail_delivery_part,
+@@ -1051,6 +1052,10 @@ def _process_slack_delivery_part(delivery_part_id: str) -> None:
+     runtime = _load_slack_delivery_runtime(claim)
+     if runtime is None:
+         return
++    # The delete cancels open parts, but a part claimed before it can still reach this point.
++    if not delivery_ticket_is_live(part.delivery):
++        _fail_claimed_delivery_part(claim, error_code="ticket_deleted", error="The ticket was deleted")
++        return
+     try:
+         if part.part_key == DELIVERY_PART_KEY_BODY:
+             _deliver_slack_body(claim, runtime)
+diff --git a/products/conversations/backend/tasks/teams.py b/products/conversations/backend/tasks/teams.py
+index c3f5de11f7d0..4f104b37d77c 100644
+--- a/products/conversations/backend/tasks/teams.py
++++ b/products/conversations/backend/tasks/teams.py
+@@ -162,6 +162,10 @@ def post_reply_to_teams(
+         logger.warning("teams_reply_untrusted_service_url", ticket_id=ticket_id, service_url=teams_service_url)
+         return
+ 
++    if not Ticket.objects.filter(team_id=team_id, id=ticket_id).exists():
++        logger.info("teams_reply_ticket_gone", ticket_id=ticket_id)
++        return
++
+     if not Team.objects.filter(id=team_id).exists():
+         logger.warning("teams_reply_team_not_found", team_id=team_id)
+         return
+@@ -247,6 +251,10 @@ def post_reply_to_teams_via_graph(
+         logger.warning("teams_graph_reply_team_not_found", team_id=team_id)
+         return
+ 
++    if not Ticket.objects.filter(team_id=team_id, id=ticket_id).exists():
++        logger.info("teams_graph_reply_ticket_gone", ticket_id=ticket_id)
++        return
++
+     reply_html = build_teams_reply_html(rich_content, content, author_name)
+ 
+     status, _message_id = post_teams_channel_message_via_graph(
+diff --git a/products/conversations/backend/teams.py b/products/conversations/backend/teams.py
+index 930a7c44867a..fdca673672bf 100644
+--- a/products/conversations/backend/teams.py
++++ b/products/conversations/backend/teams.py
+@@ -27,7 +27,8 @@
+ from .cache import get_cached_teams_user, set_cached_teams_user
+ from .models import Ticket
+ from .models.constants import Channel, ChannelDetail, Status
+-from .services.attachments import build_content_with_images
++from .models.ticket import deleted_ticket_holds_thread
++from .services.attachments import build_content_with_images, discard_rehosted_attachments
+ from .support_teams import (
+     get_bot_framework_token,
+     get_bot_from_id,
+@@ -591,11 +592,22 @@ def create_or_update_teams_ticket(
+         ).first()
+ 
+         if not ticket:
+-            logger.debug(
+-                "teams_thread_reply_no_ticket",
+-                channel_id=channel_id,
+-                conversation_id=conversation_id,
+-            )
++            if deleted_ticket_holds_thread(
++                team_id=team.id, teams_channel_id=channel_id, teams_conversation_id=conversation_id
++            ):
++                logger.info(
++                    "teams_inbound_deleted_ticket",
++                    team_id=team_id,
++                    channel_id=channel_id,
++                    conversation_id=conversation_id,
++                )
++                discard_rehosted_attachments(team, attachments or [])
++            else:
++                logger.debug(
++                    "teams_thread_reply_no_ticket",
++                    channel_id=channel_id,
++                    conversation_id=conversation_id,
++                )
+             return None
+ 
+         if activity_id and is_teams_graph_message_seen(team_id, channel_id, activity_id):
+@@ -673,6 +685,17 @@ def create_or_update_teams_ticket(
+             ticket_id=str(existing_ticket.id),
+         )
+         return existing_ticket
++    if deleted_ticket_holds_thread(
++        team_id=team.id, teams_channel_id=channel_id, teams_conversation_id=thread_conversation_id
++    ):
++        logger.info(
++            "teams_inbound_deleted_ticket",
++            team_id=team_id,
++            channel_id=channel_id,
++            conversation_id=thread_conversation_id,
++        )
++        discard_rehosted_attachments(team, attachments or [])
++        return None
+ 
+     ticket = Ticket.objects.create_with_number(
+         team=team,
+diff --git a/products/conversations/backend/temporal/ai_reply/activities/build_context.py b/products/conversations/backend/temporal/ai_reply/activities/build_context.py
+index 26b9a3c46d66..53ba4889887a 100644
+--- a/products/conversations/backend/temporal/ai_reply/activities/build_context.py
++++ b/products/conversations/backend/temporal/ai_reply/activities/build_context.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from typing import TYPE_CHECKING
++from uuid import UUID
+ 
+ from temporalio import activity
+ 
+@@ -51,7 +52,17 @@ async def support_build_context_activity(input: SupportReplyInput) -> BuildConte
+ 
+ 
+ def _build_context_sync(team_id: int, ticket_id: str, clarification_round: int = 0) -> BuildContextOutput:
+-    ticket = Ticket.objects.select_related("team").get(id=ticket_id, team_id=team_id)
++    try:
++        UUID(str(ticket_id))
++    except (ValueError, TypeError, AttributeError):
++        raise Ticket.DoesNotExist from None
++    ticket = Ticket.objects.select_related("team").filter(id=ticket_id, team_id=team_id).first()
++    if ticket is None:
++        # A soft-deleted ticket is hidden from the live manager. Stop the workflow
++        # instead of retrying a lookup that will never succeed.
++        if Ticket.all_objects.filter(id=ticket_id, team_id=team_id, deleted_at__isnull=False).exists():
++            return BuildContextOutput(ticket_context="", ticket_title="", ticket_gone=True)
++        raise Ticket.DoesNotExist
+     team = ticket.team
+     comments = list(
+         Comment.objects.filter(
+diff --git a/products/conversations/backend/temporal/ai_reply/activities/persist_reply.py b/products/conversations/backend/temporal/ai_reply/activities/persist_reply.py
+index edc98a4c68ec..9885c85acb67 100644
+--- a/products/conversations/backend/temporal/ai_reply/activities/persist_reply.py
++++ b/products/conversations/backend/temporal/ai_reply/activities/persist_reply.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++from uuid import UUID
++
+ from django.db import transaction
+ from django.db.models import Q
+ 
+@@ -39,21 +41,41 @@ def _followup_already_posted(*, team_id: int, ticket_id: str) -> bool:
+     ).exists()
+ 
+ 
++def _lock_ticket(*, team_id: int, ticket_id: str) -> Ticket | None:
++    """Lock the ticket row, including a soft-deleted one, until the transaction ends.
++
++    The delete endpoint writes deleted_at on this row, so the lock keeps a delete from
++    committing between the deleted_at check and the comment insert.
++    """
++    try:
++        UUID(str(ticket_id))
++    except (ValueError, TypeError, AttributeError):
++        return None
++    # of=("self",) so select_related("team") does not FOR UPDATE the Team parent row.
++    return (
++        Ticket.all_objects.select_related("team")
++        .select_for_update(of=("self",))
++        .filter(team_id=team_id, id=ticket_id)
++        .first()
++    )
++
++
+ def _persist_reply_sync(input: PersistReplyInput) -> PersistReplyOutput:
+     input = coerce_dataclass(PersistReplyInput, input)
+     persist_as = input.persist_as
+     is_private = True
+ 
+     with transaction.atomic():
++        locked = _lock_ticket(team_id=input.team_id, ticket_id=input.ticket_id)
++        if locked is not None and locked.deleted_at is not None:
++            return PersistReplyOutput(posted=False)
++        # A purged ticket has no row, and Comment.item_id is a plain string, so the insert would
++        # leave an orphan note. The clarification path handles a missing row below.
++        if locked is None and not input.require_awaiting_clarification:
++            return PersistReplyOutput(posted=False)
+         ticket = None
+         if input.require_awaiting_clarification:
+-            # of=("self",) so select_related("team") does not FOR UPDATE the Team parent row.
+-            ticket = (
+-                Ticket.objects.select_related("team")
+-                .select_for_update(of=("self",))
+-                .filter(team_id=input.team_id, id=input.ticket_id)
+-                .first()
+-            )
++            ticket = locked
+             triage = ticket.ai_triage if ticket and isinstance(ticket.ai_triage, dict) else {}
+             if triage.get("status") != "awaiting_clarification":
+                 # Temporal can retry this activity after the first attempt already posted
+@@ -62,7 +84,7 @@ def _persist_reply_sync(input: PersistReplyInput) -> PersistReplyOutput:
+                     return PersistReplyOutput(posted=True)
+                 return PersistReplyOutput(posted=False)
+         elif persist_as != "findings" and input.allow_bot_reply:
+-            ticket = Ticket.objects.select_related("team").filter(team_id=input.team_id, id=input.ticket_id).first()
++            ticket = locked
+         # Only how_to replies may be published. diagnostic/account_billing draw on project data and
+         # must stay private regardless of the team's ai_reply_modes — guards against stale settings
+         # since validation now rejects bot_reply for those types. Controlled by team-level opt-in.
+diff --git a/products/conversations/backend/temporal/ai_reply/schemas.py b/products/conversations/backend/temporal/ai_reply/schemas.py
+index 55108f9e7088..f0ebaa6b8c80 100644
+--- a/products/conversations/backend/temporal/ai_reply/schemas.py
++++ b/products/conversations/backend/temporal/ai_reply/schemas.py
+@@ -50,6 +50,8 @@ class SupportReplyInput:
+ class BuildContextOutput:
+     ticket_context: str
+     ticket_title: str
++    # The ticket was soft-deleted between schedule and this activity. The workflow stops.
++    ticket_gone: bool = False
+     always_on_context: str = ""
+     # Team opted into letting the agent investigate the customer's own data (wider read scopes
+     # on diagnostic tickets). Off by default: a crafted ticket can't unlock those scopes alone.
+diff --git a/products/conversations/backend/temporal/pipeline.py b/products/conversations/backend/temporal/pipeline.py
+index 9c0b7105e9f9..a0bd6c0b5b23 100644
+--- a/products/conversations/backend/temporal/pipeline.py
++++ b/products/conversations/backend/temporal/pipeline.py
+@@ -182,6 +182,8 @@ async def _persist_gaps(gap_missing: list[str], gap_ticket_type: str, gap_outcom
+                 retry_policy=RetryPolicy(maximum_attempts=3),
+             ),
+         )
++        if ctx_output.ticket_gone:
++            return "skipped_ticket_deleted"
+         if input.clarification_round >= 1 and ctx_output.followup_cancelled:
+             return "skipped_human_engaged"
+ 
+diff --git a/products/conversations/backend/temporal/zendesk_import/activities.py b/products/conversations/backend/temporal/zendesk_import/activities.py
+index 0380fdff4186..302c1e5ec46a 100644
+--- a/products/conversations/backend/temporal/zendesk_import/activities.py
++++ b/products/conversations/backend/temporal/zendesk_import/activities.py
+@@ -16,7 +16,7 @@
+ # activity sync helpers touch them at runtime, so pass them through the sandbox unmodified.
+ with workflow.unsafe.imports_passed_through():
+     from django.db import transaction
+-    from django.db.models import F, Max
++    from django.db.models import F
+     from django.utils import timezone
+     from django.utils.dateparse import parse_datetime
+     from django.utils.html import strip_tags
+@@ -29,8 +29,15 @@
+     from posthog.sync import database_sync_to_async
+     from posthog.temporal.common.heartbeat import Heartbeater
+ 
+-    from products.conversations.backend.models import EmailChannel, EmailChannelKind, Ticket, ZendeskImportJob
++    from products.conversations.backend.models import (
++        EmailChannel,
++        EmailChannelKind,
++        PurgedTicketThread,
++        Ticket,
++        ZendeskImportJob,
++    )
+     from products.conversations.backend.models.constants import Status
++    from products.conversations.backend.models.purged_ticket_thread import ticket_thread_key
+     from products.conversations.backend.services.attachments import (
+         CONVERSATIONS_MAX_IMAGE_BYTES,
+         build_content_with_images,
+@@ -278,14 +285,26 @@ def _resolve_email_channels(
+ 
+ 
+ def _partition_new_tickets(team_id: int, ticket_ids: list[int]) -> _TicketPartition:
++    # all_objects so a soft-deleted import still counts as present. Re-inserting it
++    # would hit the zendesk ticket unique constraint, or reopen a deleted thread.
+     existing_ids = {
+         tid
+-        for tid in Ticket.objects.filter(team_id=team_id)
++        for tid in Ticket.all_objects.filter(team_id=team_id)
+         .filter(zendesk_ticket_id__in=ticket_ids)
+         .values_list("zendesk_ticket_id", flat=True)
+         if tid is not None
+     }
+-    to_import = [tid for tid in ticket_ids if tid not in existing_ids]
++    # A purged import stays out, so the next import does not bring the deleted ticket back.
++    purged_keys = set(
++        PurgedTicketThread.objects.for_team(team_id)
++        .filter(thread_key__in=[ticket_thread_key(zendesk_ticket_id=tid) for tid in ticket_ids])
++        .values_list("thread_key", flat=True)
++    )
++    to_import = [
++        tid
++        for tid in ticket_ids
++        if tid not in existing_ids and ticket_thread_key(zendesk_ticket_id=tid) not in purged_keys
++    ]
+     return _TicketPartition(existing_ids=existing_ids, to_import=to_import, skipped=len(ticket_ids) - len(to_import))
+ 
+ 
+@@ -632,8 +651,8 @@ def _persist_ticket_batch(team: Team, built: list[_BuiltTicket], tags_by_name: d
+     # Comment.objects.create(), or .save() would fire those signals for every imported row —
+     # triggering workflows and re-sending replies to real customers for years-old tickets. Don't.
+     with transaction.atomic():
+-        Ticket.objects.lock_ticket_number_allocation(team.id)
+-        max_num = Ticket.objects.filter(team_id=team.id).aggregate(Max("ticket_number"))["ticket_number__max"] or 0
++        Ticket.all_objects.lock_ticket_number_allocation(team.id)
++        max_num = Ticket.all_objects.highest_used_ticket_number(team.id)
+         tickets_to_create = [b.ticket for b in built]
+         for offset, ticket_to_number in enumerate(tickets_to_create):
+             ticket_to_number.ticket_number = max_num + 1 + offset
+diff --git a/products/conversations/frontend/generated/api.ts b/products/conversations/frontend/generated/api.ts
+index 075c743e2dfa..bacd8b4e7710 100644
+--- a/products/conversations/frontend/generated/api.ts
++++ b/products/conversations/frontend/generated/api.ts
+@@ -182,6 +182,9 @@ export const getConversationsTicketsDestroyUrl = (projectId: string, id: string)
+     return `/api/projects/${projectId}/conversations/tickets/${id}/`
+ }
+ 
++/**
++ * Soft-delete a ticket. A daily sweeper hard-deletes it after the grace window.
++ */
+ export const conversationsTicketsDestroy = async (
+     projectId: string,
+     id: string,
+diff --git a/products/conversations/frontend/scenes/ticket/SupportTicketScene.tsx b/products/conversations/frontend/scenes/ticket/SupportTicketScene.tsx
+index 0eaf6c856db9..1632c1083ba8 100644
+--- a/products/conversations/frontend/scenes/ticket/SupportTicketScene.tsx
++++ b/products/conversations/frontend/scenes/ticket/SupportTicketScene.tsx
+@@ -50,6 +50,7 @@ import { RelatedGroupsPanel } from './RelatedGroupsPanel'
+ import { SessionRecordingPanel } from './SessionRecordingPanel'
+ import { StaffActionsPanel } from './StaffActionsPanel'
+ import { supportTicketSceneLogic } from './supportTicketSceneLogic'
++import { SupportTicketSceneMenuBar } from './SupportTicketSceneMenuBar'
+ import { useDiscussionTimelineExtras } from './ThreadDiscussions'
+ import { reportTimelineExtras } from './ThreadReports'
+ import { TicketActivityPanel } from './TicketActivityPanel'
+@@ -124,6 +125,8 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
+         hasUnsavedChanges,
+         unsavedTicketChanges,
+         ticketUpdating,
++        ticketDeleting,
++        deleteDisabledReason,
+         draftContent,
+         draftIsPrivate,
+         draftModeEnabled,
+@@ -162,6 +165,7 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
+         startEditingMessage,
+         cancelEditingMessage,
+         deleteMessage,
++        deleteTicket,
+         loadFullEmail,
+         closeFullEmail,
+         applyAiDraft,
+@@ -258,6 +262,7 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
+ 
+     return (
+         <SceneContent className="flex-1 min-h-0 pb-4">
++            <SupportTicketSceneMenuBar ticketId={ticketId} />
+             <SceneTitleSection
+                 name={`Ticket: ${ticket?.ticket_number?.toString() || ticket?.id || ''}`}
+                 nameSuffix={
+@@ -606,7 +611,18 @@ export function SupportTicketScene({ ticketId }: { ticketId: string }): JSX.Elem
+                                 />
+                             </div>
+                         </div>
+-                        <div className="mt-3 pt-3 border-t flex justify-end">
++                        <div className="mt-3 pt-3 border-t flex justify-between gap-2">
++                            <LemonButton
++                                type="secondary"
++                                status="danger"
++                                size="small"
++                                onClick={() => deleteTicket()}
++                                loading={ticketDeleting}
++                                disabledReason={deleteDisabledReason}
++                                data-attr="ticket-delete"
++                            >
++                                Delete ticket
++                            </LemonButton>
+                             <AccessControlAction
+                                 resourceType={AccessControlResourceType.Ticket}
+                                 minAccessLevel={AccessControlLevel.Editor}
+diff --git a/products/conversations/frontend/scenes/ticket/SupportTicketSceneMenuBar.tsx b/products/conversations/frontend/scenes/ticket/SupportTicketSceneMenuBar.tsx
+new file mode 100644
+index 000000000000..5f319e83030a
+--- /dev/null
++++ b/products/conversations/frontend/scenes/ticket/SupportTicketSceneMenuBar.tsx
+@@ -0,0 +1,41 @@
++import { useActions, useValues } from 'kea'
++
++import { IconTrash } from '@posthog/icons'
++
++import { FEATURE_FLAGS } from 'lib/constants'
++import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
++
++import { SceneMenuBar, SceneMenuBarItem, SceneMenuBarMenu } from '~/layout/scenes/components/SceneMenuBar'
++
++import { supportTicketSceneLogic } from './supportTicketSceneLogic'
++
++export function SupportTicketSceneMenuBar({ ticketId }: { ticketId: string }): JSX.Element | null {
++    const { featureFlags } = useValues(featureFlagLogic)
++    if (!featureFlags[FEATURE_FLAGS.SCENE_MENU_BAR]) {
++        return null
++    }
++    return <SupportTicketSceneMenuBarInner ticketId={ticketId} />
++}
++
++function SupportTicketSceneMenuBarInner({ ticketId }: { ticketId: string }): JSX.Element {
++    const logic = supportTicketSceneLogic({ id: ticketId || 'new' })
++    const { ticket, ticketDeleting, deleteDisabledReason } = useValues(logic)
++    const { deleteTicket } = useActions(logic)
++
++    return (
++        <SceneMenuBar>
++            <SceneMenuBarMenu label="File" dataAttr="ticket-menubar-file">
++                <SceneMenuBarItem
++                    variant="destructive"
++                    disabled={!ticket || ticketDeleting || !!deleteDisabledReason}
++                    tooltip={deleteDisabledReason}
++                    onClick={() => deleteTicket()}
++                    data-attr="ticket-menubar-delete"
++                >
++                    <IconTrash />
++                    Delete ticket
++                </SceneMenuBarItem>
++            </SceneMenuBarMenu>
++        </SceneMenuBar>
++    )
++}
+diff --git a/products/conversations/frontend/scenes/ticket/supportTicketSceneLogic.ts b/products/conversations/frontend/scenes/ticket/supportTicketSceneLogic.ts
+index d3374c5cfabf..864be8ce4986 100644
+--- a/products/conversations/frontend/scenes/ticket/supportTicketSceneLogic.ts
++++ b/products/conversations/frontend/scenes/ticket/supportTicketSceneLogic.ts
+@@ -25,6 +25,7 @@ import { FEATURE_FLAGS } from 'lib/constants'
+ import { dayjs } from 'lib/dayjs'
+ import { LemonDialog } from 'lib/lemon-ui/LemonDialog'
+ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
++import { getAccessControlDisabledReason } from 'lib/utils/accessControlUtils'
+ import { getCurrentTeamId } from 'lib/utils/getAppContext'
+ import { isUUIDLike } from 'lib/utils/guards'
+ import { markdownToHtml } from 'lib/utils/markdown'
+@@ -43,11 +44,20 @@ import { tagsModel } from '~/models/tagsModel'
+ import { defaultDataTableColumns } from '~/queries/nodes/DataTable/utils'
+ import { DataTableNode, NodeKind } from '~/queries/schema/schema-general'
+ import type { Breadcrumb, CommentType, PersonType, UserType } from '~/types'
+-import { ActivityScope, PropertyFilterType, PropertyOperator, Region } from '~/types'
++import {
++    AccessControlLevel,
++    AccessControlResourceType,
++    ActivityScope,
++    AvailableFeature,
++    PropertyFilterType,
++    PropertyOperator,
++    Region,
++} from '~/types'
+ 
+ import {
+     conversationsTicketsAiFeedbackCreate,
+     conversationsTicketsAiHumanOutcomeCreate,
++    conversationsTicketsDestroy,
+     conversationsTicketsMessagesFullEmailRetrieve,
+     conversationsTicketsNotesDestroy,
+     conversationsTicketsNotesPartialUpdate,
+@@ -236,6 +246,7 @@ export interface supportTicketSceneLogicValues {
+     featureFlags: FeatureFlagsSet // featureFlagLogic
+     availableTags: string[] // tagsModel
+     currentTeam: TeamPublicType | TeamType | null // teamLogic
++    hasAvailableFeature: (feature: AvailableFeature, currentUsage?: number | undefined) => boolean // userLogic
+     user: UserType | null // userLogic
+     aiDraftApplying: boolean
+     assignee: TicketAssignee
+@@ -243,6 +254,7 @@ export interface supportTicketSceneLogicValues {
+     chatMessages: ChatMessage[]
+     chatPanelWidth: (desiredSize: number | null) => number
+     composerPrefillAt: number
++    deleteDisabledReason: string | undefined
+     deliveryStatusByMessageId: Map<string, MessageDeliveryStatus>
+     discussionsEnabled: boolean
+     draftContent: string | JSONContent | null
+@@ -280,6 +292,7 @@ export interface supportTicketSceneLogicValues {
+     status: TicketStatus | null
+     tags: string[]
+     ticket: Ticket | null
++    ticketDeleting: boolean
+     ticketLoading: boolean
+     ticketUpdating: boolean
+     unsavedTicketChanges: string[]
+@@ -314,6 +327,9 @@ export interface supportTicketSceneLogicActions {
+     deleteMessage: (messageId: string) => {
+         messageId: string
+     }
++    deleteTicket: () => {
++        value: true
++    }
+     incrementUnreadCustomerCount: () => {
+         value: true
+     }
+@@ -475,6 +491,9 @@ export interface supportTicketSceneLogicActions {
+     setTicket: (ticket: Ticket | null) => {
+         ticket: Ticket | null
+     }
++    setTicketDeleting: (deleting: boolean) => {
++        deleting: boolean
++    }
+     setTicketLoading: (loading: boolean) => {
+         loading: boolean
+     }
+@@ -522,6 +541,10 @@ export interface supportTicketSceneLogicMeta {
+         discussionsEnabled: (ticket: Ticket | null, featureFlags: FeatureFlagsSet) => boolean
+         sidePanelContext: (ticket: Ticket | null, discussionsEnabled: boolean) => SidePanelSceneContext | null
+         replyRecipientDescription: (ticket: Ticket | null) => string
++        deleteDisabledReason: (
++            ticket: Ticket | null,
++            hasAvailableFeature: (feature: AvailableFeature, currentUsage?: number | undefined) => boolean // userLogic
++        ) => string | undefined
+         unsavedTicketChanges: (
+             priority: TicketPriority | null,
+             assignee: TicketAssignee,
+@@ -573,7 +596,7 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+             tagsModel,
+             ['tags as availableTags'],
+             userLogic,
+-            ['user'],
++            ['user', 'hasAvailableFeature'],
+         ],
+     })),
+     actions({
+@@ -637,6 +660,8 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+         clearEditingMessage: true,
+         stashDraftForEdit: (content: string | JSONContent | null, isPrivate: boolean) => ({ content, isPrivate }),
+         deleteMessage: (messageId: string) => ({ messageId }),
++        deleteTicket: true,
++        setTicketDeleting: (deleting: boolean) => ({ deleting }),
+ 
+         submitAiReplyFeedback: (messageId: string, rating: AiReplyFeedbackRating, feedbackText?: string) => ({
+             messageId,
+@@ -874,6 +899,12 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+                 setMessageSending: (_, { sending }) => sending,
+             },
+         ],
++        ticketDeleting: [
++            false,
++            {
++                setTicketDeleting: (_, { deleting }) => deleting,
++            },
++        ],
+         aiDraftApplying: [
+             false,
+             {
+@@ -1008,6 +1039,21 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+                 }
+             },
+         ],
++        // Without the access control add-on there is no manager role, so the backend lets editors delete.
++        deleteDisabledReason: [
++            (s) => [s.ticket, s.hasAvailableFeature],
++            (
++                ticket: Ticket | null,
++                hasAvailableFeature: (feature: AvailableFeature, currentUsage?: number | undefined) => boolean // userLogic
++            ): string | undefined =>
++                hasAvailableFeature(AvailableFeature.ACCESS_CONTROL)
++                    ? (getAccessControlDisabledReason(
++                          AccessControlResourceType.Ticket,
++                          AccessControlLevel.Manager,
++                          ticket?.user_access_level
++                      ) ?? undefined)
++                    : undefined,
++        ],
+         // Human-readable list of unsaved edits other than status, shown in the send-and-set-status
+         // confirmation. Status is excluded because that action overrides it anyway.
+         unsavedTicketChanges: [
+@@ -1616,6 +1662,45 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+                 actions.cancelEditingMessage()
+             }
+         },
++        deleteTicket: () => {
++            const ticket = values.ticket
++            if (!ticket || values.ticketDeleting) {
++                return
++            }
++            LemonDialog.open({
++                title: `Delete ticket #${ticket.ticket_number}?`,
++                description:
++                    'The ticket and its messages disappear for your team and the customer right away, and are permanently deleted after 14 days. Messages already sent to Slack, Teams, email, or GitHub stay there.',
++                primaryButton: {
++                    children: 'Delete',
++                    status: 'danger',
++                    onClick: async () => {
++                        if (values.ticketDeleting) {
++                            return
++                        }
++                        actions.setTicketDeleting(true)
++                        try {
++                            await conversationsTicketsDestroy(String(getCurrentTeamId()), ticket.id)
++                            const listLogic = supportTicketsSceneLogic.findMounted()
++                            if (listLogic) {
++                                listLogic.actions.setTickets(
++                                    listLogic.values.tickets.filter((item) => item.id !== ticket.id)
++                                )
++                            }
++                            lemonToast.success('Ticket deleted')
++                            // The ticket is gone, so unsaved edits on it can no longer be saved.
++                            cache.skipUnsavedChangesPrompt = true
++                            router.actions.push(urls.supportTickets())
++                        } catch {
++                            lemonToast.error('Failed to delete ticket. Try again.')
++                        } finally {
++                            actions.setTicketDeleting(false)
++                        }
++                    },
++                },
++                secondaryButton: { children: 'Cancel' },
++            })
++        },
+         deleteMessage: async ({ messageId }) => {
+             if (!values.ticket?.id) {
+                 return
+@@ -1688,8 +1773,12 @@ export const supportTicketSceneLogic = kea<supportTicketSceneLogicType>([
+         // The message poller is registered through cache.disposables, which the plugin tears down.
+         impersonationNoticeLogic.findMounted()?.actions.setTicketContext(null)
+     }),
+-    beforeUnload(({ values, actions }) => ({
++    beforeUnload(({ values, actions, cache }) => ({
+         enabled: (newLocation) => {
++            if (cache.skipUnsavedChangesPrompt) {
++                cache.skipUnsavedChangesPrompt = false
++                return false
++            }
+             if (!values.hasPendingWork) {
+                 return false
+             }
+diff --git a/products/signals/backend/facade/api.py b/products/signals/backend/facade/api.py
+index 229465a738e3..306838f8110e 100644
+--- a/products/signals/backend/facade/api.py
++++ b/products/signals/backend/facade/api.py
+@@ -1362,6 +1362,20 @@ def repair_report_actionability_cache(
+     return repair_latest_actionability(team_id=team_id, batch_size=batch_size, after=after)
+ 
+ 
++def retract_source_signals(*, team: "Team", source_product: str, source_type: str, source_id: str) -> int:
++    """Replace a source record's signal embeddings with an empty deleted row.
++
++    Returns how many documents were re-emitted. Zero when the source never emitted.
++    """
++    from products.signals.backend.temporal.signal_queries import (  # noqa: PLC0415
++        retract_source_signals as _retract_source_signals,
++    )
++
++    return _retract_source_signals(
++        team=team, source_product=source_product, source_type=source_type, source_id=source_id
++    )
++
++
+ def scout_creation_available(*, team_id: int, user_id: int) -> bool:
+     """Whether to offer the user scout creation on the team's project.
+ 
+diff --git a/products/signals/backend/temporal/signal_queries.py b/products/signals/backend/temporal/signal_queries.py
+index 55d317dfb0d3..2c96f128728e 100644
+--- a/products/signals/backend/temporal/signal_queries.py
++++ b/products/signals/backend/temporal/signal_queries.py
+@@ -127,6 +127,69 @@ def soft_delete_report_signals(report_id: str, team_id: int, team: Team) -> None
+         )
+ 
+ 
++_RETRACT_PAGE_SIZE = 500
++
++
++def retract_source_signals(*, team: Team, source_product: str, source_type: str, source_id: str) -> int:
++    """Blank and mark deleted every signal embedding for one source record.
++
++    Re-emits each document at its original timestamp so the ReplacingMergeTree
++    row is replaced, not appended. Content is cleared because a deleted flag
++    alone leaves the text in ClickHouse.
++
++    Pages by document_id, because re-emitted rows land asynchronously and a
++    repeated or offset query can return them again or skip others.
++    """
++    if not source_id:
++        return 0
++    extra_where = """
++        JSONExtractString(metadata, 'source_product') = {source_product}
++        AND JSONExtractString(metadata, 'source_type') = {source_type}
++        AND JSONExtractString(metadata, 'source_id') = {source_id}
++    """
++    retracted = 0
++    after = ""
++    while True:
++        result = execute_hogql_query(
++            query_type="SignalsRetractSource",
++            query=f"""
++                SELECT document_id, content, metadata, timestamp
++                FROM ({_deduped_signals_subquery(extra_where=extra_where)})
++                WHERE document_id > {{after}}
++                ORDER BY document_id ASC
++                LIMIT {_RETRACT_PAGE_SIZE}
++            """,
++            team=team,
++            placeholders={
++                "model_name": ast.Constant(value=EMBEDDING_MODEL.value),
++                "source_product": ast.Constant(value=source_product),
++                "source_type": ast.Constant(value=source_type),
++                "source_id": ast.Constant(value=source_id),
++                "after": ast.Constant(value=after),
++            },
++        )
++        rows = result.results or []
++        for row in rows:
++            document_id, _content, metadata_str, timestamp_raw = row
++            metadata = json.loads(metadata_str) if isinstance(metadata_str, str) else dict(metadata_str or {})
++            metadata["deleted"] = True
++            emit_embedding_request(
++                content="",
++                team_id=team.id,
++                product=SIGNAL_DOCUMENT_PRODUCT,
++                document_type=SIGNAL_DOCUMENT_TYPE,
++                rendering=SIGNAL_DOCUMENT_RENDERING,
++                document_id=document_id,
++                models=[model.value for model in EmbeddingModelName],
++                timestamp=_ensure_tz_aware(timestamp_raw),
++                metadata=metadata,
++            )
++            retracted += 1
++        if len(rows) < _RETRACT_PAGE_SIZE:
++            return retracted
++        after = rows[-1][0]
++
++
+ def reassign_report_signals(*, source_report_id: str, survivor_report_id: str, team_id: int, team: Team) -> int:
+     """Re-emit a report's live ClickHouse signals under another report's id, and return how many.
+ 
+diff --git a/tach.toml b/tach.toml
+index 663da3541e99..a9c857494c64 100644
+--- a/tach.toml
++++ b/tach.toml
+@@ -273,6 +273,9 @@ path = "products.conversations"
+ depends_on = [
+     "ee",
+     "posthog", "products.tasks", "products.business_knowledge", "products.warehouse_sources", "products.customer_analytics", "products.access_control",
++    # Facade-only: the deleted-ticket purge retracts the ticket's signal embeddings. products.signals
++    # depends on products.conversations in turn, so keep this direction on the facade.
++    "products.signals",
+ ]
+ layer = "modules"
+ 
+@@ -1388,6 +1391,7 @@ from = [
+ 
+ [[interfaces]]
+ expose = [
++    "backend\\.facade.*",
+     "backend\\.routes.*",
+ ]
+ from = [

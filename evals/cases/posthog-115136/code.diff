@@ -1,0 +1,1114 @@
+diff --git a/docs/internal/ai-observability-judge-inputs.md b/docs/internal/ai-observability-judge-inputs.md
+index 887cfec1baaa..2f749de8b10f 100644
+--- a/docs/internal/ai-observability-judge-inputs.md
++++ b/docs/internal/ai-observability-judge-inputs.md
+@@ -60,6 +60,14 @@ The worker closes the connection when that read finishes or reaches the provider
+ ## Decision model judges
+ 
+ Decision models are available under the existing LLM judge option. They return typed answers without written reasoning.
++The evaluation editor separates **Judge method** from **Model**. Choose **LLM with explanation** for chat completions or **Decision model** for typed decisions.
++Each method lists models with the corresponding capability from the project's saved provider connections. API keys stay in AI provider settings.
++Switching methods keeps a compatible model and its saved connection; an incompatible model is cleared without changing the criteria or output settings.
++Changing the judge method marks the evaluation as edited, including when the selected model supports both methods.
++The selection is stored as `evaluation_config.judge_method` (`llm` or `decision`). Evaluations without this field keep automatic routing until a method or model is explicitly selected.
++Automatic OpenRouter routing selects decisions only for models without text output. Models supporting both methods keep chat routing unless decisions are explicitly selected.
++Prompt-only `evaluation_config` PATCH requests preserve the saved method; an explicit `judge_method: null` restores automatic routing.
++Explicit method selection requires a selected model, including for legacy evaluations that use the project's default connection.
+ The `llm-analytics-system-one-evaluations` project-group feature flag controls access in the browser and background workers.
+ Both use the project's UUID as its group key; the numeric project ID is a group property.
+ Deploy the ingestion and evaluation worker changes before enabling the flag.
+@@ -77,12 +85,13 @@ The picker does not exclude individual decision models. Listed models may not su
+ The catalogue does not expose supported question types. If a model rejects a request, the run is skipped without retrying, with a reason to check output-type and criteria compatibility.
+ Support added by a provider works on subsequent runs without a PostHog code change.
+ Chat models such as Jev Router keep using chat completions.
+-Decision models are excluded from the playground and tagger model pickers.
++Models without text output are excluded from the playground and tagger model pickers. Models supporting both text and decisions remain available for both judge methods and for chat.
+ The catalogue refreshes hourly and keeps its last successful response when a refresh fails, retrying refreshes after one minute.
+-For projects with this flag enabled, an unavailable catalogue makes OpenRouter runs retry only when no successful response is cached.
+-These projects also need the catalogue when changing a model or output configuration, changing the evaluation type, or enabling an evaluation.
++For projects with this flag enabled, an unavailable catalogue makes automatically routed OpenRouter runs retry only when no successful response is cached.
++Automatic routing and explicit decision selection also need the catalogue when changing a model or output configuration, changing the evaluation type, enabling an evaluation, or changing the judge method.
++Explicit LLM judging uses chat completions without a routing catalogue lookup, including for models supporting both methods.
+ Renaming or disabling an evaluation does not require the catalogue.
+-With the flag off or unavailable, cached decision models skip their runs without calling either API or disabling the evaluation.
++With the flag off or unavailable, cached decision-only models skip their runs without calling either API or disabling the evaluation.
+ Other OpenRouter models keep the existing chat path without a catalogue refresh. If a failed chat call identifies a decision model, that run also skips without disabling the evaluation.
+ An out-of-credits response disables the evaluation and marks its provider key as failing, as on the chat path.
+ For other compatible services, add a connection under **System One** in provider key settings.
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index a7c4a0a1d474..2e8f48188d5b 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -12266,6 +12266,26 @@ snapshots:
+         hash: v1.k794b7964.436dcd7ee00a47ccca4d46685c0066615f888983b15844ac3945b8e51a79e508.zpSy36nqAxQSuvSHzElPGHXJZgnJKRjQmxBwDamre9w
+     scenes-app-llm-observability-categoricalevaluationconfig--narrow--light:
+         hash: v1.k794b7964.8489284cc30b609b61e118a4c29d24a2ded7d4bd674c30cc5cba80d1cd97f76b.fbzkOm6zlJje7ju3NPx5a-8JiaQdshwaLbVhRvplR6E
++    scenes-app-llm-observability-evaluationmodelpicker--decision--dark:
++        hash: v1.k794b7964.5562145a41dea72f27ce564064efbeaa4908e281809a9b54a1571f7da7f3e2f9.cf6l4ZRZaxOvnn0n8C6hvt6HLQZcQO3uOzgtpszTAXU
++    scenes-app-llm-observability-evaluationmodelpicker--decision--light:
++        hash: v1.k794b7964.feb7b7a68b8621977f2095616077fbda6eaacf384f1bbd30195a81edf92521df.gDzACTp68b-hY1iXhORC-DiZWYTPtVc7TMJYnl5ur8c
++    scenes-app-llm-observability-evaluationmodelpicker--decision-narrow--dark:
++        hash: v1.k794b7964.2cc5a685b95d9b77556df85b606bdff8ccc0943a0294f12eef3ab1715dc862b1.3KlJ_Xzkp_yC9sRUZibDPQenEcuAOyQTpMS70b5CTXk
++    scenes-app-llm-observability-evaluationmodelpicker--decision-narrow--light:
++        hash: v1.k794b7964.d82135caba2d77824e328d0d7145e62ca92b14e0fada7be2055ae91552400d81.Ew4mZtChk02L66e1zEax2Je1nE664lwKmZp1M9vZk74
++    scenes-app-llm-observability-evaluationmodelpicker--flag-off--dark:
++        hash: v1.k794b7964.f74cda6699e5b141f87c19ff9c8321489d5d9270131af12048631b657204918c.z4Sg9qB6e3u7D1orq6Z022G_fp-mUcpluVnAnMZnGW4
++    scenes-app-llm-observability-evaluationmodelpicker--flag-off--light:
++        hash: v1.k794b7964.d04712113894120613c91816812cdf6d6ea55f1ca11ce91196e5fe00b0ec23b1.zZqV5OhiYrHekB5CZKdffc1mTb8Wu6lpe2FLJZ59px4
++    scenes-app-llm-observability-evaluationmodelpicker--llm--dark:
++        hash: v1.k794b7964.d7689fdc9f71084879154b5bc9e3e886539ed9f69e6f9c0334901a54fae4f72d.a-jcIwlvssNrK79TxURjANuh9k4xS4T5SGtvdqrYo5Q
++    scenes-app-llm-observability-evaluationmodelpicker--llm--light:
++        hash: v1.k794b7964.a65534589a6af5d20189fd7890fdca4f3466df3f32f3b408015e69fd557679a5.ABRZcOSSqQCoyQq6c_hOJQTzNnYewJrQ4BzAa0Si7DA
++    scenes-app-llm-observability-evaluationmodelpicker--no-decision-models--dark:
++        hash: v1.k794b7964.ad9ea73d0bf9e87acd8bb321aea9f56ffc55508c18e8810349c60ef2102451a0.o954YssNcVBqGXNxkT01pYc9Pu0RworI3n76Bd5FBn8
++    scenes-app-llm-observability-evaluationmodelpicker--no-decision-models--light:
++        hash: v1.k794b7964.1834f5cc526d4a4bf2b07700e4979c894a8fd258f7aef933d22baa8ec5b69a7e.mLxPbh59fznfia0oDqeuGf8QCzdZxsutVxYDXXP7qEo
+     scenes-app-llm-observability-evaluationreportconfig--lemon-ui--dark:
+         hash: v1.k794b7964.195aa4a5a39e8f947e17fe67f5c23303b7dd0579c278907761be24a08780be92.IkGQtAI95T60kJKVZcmmFBIWNCd4meuJv-bcNDoohwU
+     scenes-app-llm-observability-evaluationreportconfig--lemon-ui--light:
+diff --git a/posthog/temporal/ai_observability/evaluation_llm_judge.py b/posthog/temporal/ai_observability/evaluation_llm_judge.py
+index 7c15c3e218ef..880bfe0dfdda 100644
+--- a/posthog/temporal/ai_observability/evaluation_llm_judge.py
++++ b/posthog/temporal/ai_observability/evaluation_llm_judge.py
+@@ -599,9 +599,16 @@ def call_llm_judge(
+         openrouter_enabled = provider == "openrouter" and decision_evaluations_enabled(
+             team_id, base_url=OPENROUTER_DECISIONS_BASE_URL
+         )
+-        uses_decisions = is_decision_model(provider, model, openrouter_enabled=openrouter_enabled)
+-        if provider == "openrouter" and not openrouter_enabled:
+-            uses_decisions = model in (decision_model_ids(refresh=False) or ())
++        judge_method = evaluation["evaluation_config"].get("judge_method")
++        # Explicit selection takes precedence for models that support both methods.
++        # Models gaining decisions must not move existing chat evaluations onto a different API.
++        uses_decisions = (
++            judge_method == "decision"
++            if judge_method is not None
++            else is_decision_model(provider, model, openrouter_enabled=openrouter_enabled, decision_only=True)
++        )
++        if judge_method is None and provider == "openrouter" and not openrouter_enabled:
++            uses_decisions = model in (decision_model_ids(refresh=False, decision_only=True) or ())
+         if uses_decisions:
+             if output_type not in ("boolean", "categorical", "numeric"):
+                 return build_skipped_evaluation_result(
+@@ -876,7 +883,11 @@ def call_llm_judge(
+         )
+     except UnsupportedModelError:
+         # A failed chat call can populate a cold catalogue; a disabled flag must not disable the evaluation.
+-        if provider == "openrouter" and not openrouter_enabled and model in (decision_model_ids(refresh=False) or ()):
++        if (
++            provider == "openrouter"
++            and not openrouter_enabled
++            and model in (decision_model_ids(refresh=False, decision_only=True) or ())
++        ):
+             return build_skipped_evaluation_result(
+                 output_type=output_type,
+                 allows_na=allows_na,
+diff --git a/products/ai_observability/backend/api/evaluations.py b/products/ai_observability/backend/api/evaluations.py
+index 3f60f94a6646..9f4aeed7bedb 100644
+--- a/products/ai_observability/backend/api/evaluations.py
++++ b/products/ai_observability/backend/api/evaluations.py
+@@ -102,7 +102,13 @@
+                         "type": "string",
+                         "description": "Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.",
+                         "minLength": 1,
+-                    }
++                    },
++                    "judge_method": {
++                        "type": "string",
++                        "enum": ["llm", "decision"],
++                        "nullable": True,
++                        "description": "Judge method. Omit to keep the saved method; null restores automatic routing.",
++                    },
+                 },
+                 "additionalProperties": False,
+             },
+@@ -523,29 +529,65 @@ class Meta:
+         }
+ 
+     def _uses_decision_model(self, data: dict[str, object]) -> bool:
++        evaluation_type = data.get("evaluation_type") or getattr(self.instance, "evaluation_type", None)
++        if evaluation_type != EvaluationType.LLM_JUDGE.value:
++            return False
++
++        stored_config = getattr(self.instance, "evaluation_config", {})
++        evaluation_config = data.get("evaluation_config", stored_config)
++        judge_method = evaluation_config.get("judge_method") if isinstance(evaluation_config, dict) else None
++        method_changed = judge_method != stored_config.get("judge_method")
+         should_validate_model = (
+             self.instance is None
+             or bool({"model_configuration", "evaluation_type", "output_type", "output_config"} & data.keys())
+             or data.get("enabled", False)
++            or method_changed
+         )
+         if not should_validate_model:
+             return False
+ 
+         model_configuration = self._effective_model_configuration(data) or {}
++        if judge_method is not None and not model_configuration:
++            raise serializers.ValidationError(
++                {"model_configuration": "Select a provider and model for this LLM judge evaluation."}
++            )
+         model_provider = model_configuration.get("provider")
++        if judge_method == "llm":
++            if model_provider == "system_one":
++                raise serializers.ValidationError({"model_configuration": "Select a model that supports LLM judging."})
++            return False
+         try:
+-            return is_decision_model(
++            supports_decisions = is_decision_model(
+                 model_provider,
+                 model_configuration.get("model"),
++                decision_only=judge_method is None,
+                 openrouter_enabled=model_provider == "openrouter"
+                 and decision_evaluations_enabled(self.context["get_team"]().id, base_url=OPENROUTER_BASE_URL),
+             )
+         except ProviderConnectionError as e:
+             raise serializers.ValidationError({"model_configuration": str(e)}) from e
++        if judge_method == "decision" and not supports_decisions:
++            raise serializers.ValidationError(
++                {"model_configuration": "Select an available decision model for this judge method."}
++            )
++        return supports_decisions
+ 
+     def validate(self, data):
+         evaluation_type = data.get("evaluation_type") or getattr(self.instance, "evaluation_type", None)
+         output_type = data.get("output_type") or getattr(self.instance, "output_type", None)
++        if "evaluation_config" in data:
++            config = data["evaluation_config"]
++            if not isinstance(config, dict):
++                raise serializers.ValidationError({"evaluation_config": "Must be an object."})
++            if (
++                self.partial
++                and self.instance is not None
++                and evaluation_type == EvaluationType.LLM_JUDGE.value
++                and "judge_method" not in config
++                and "judge_method" in self.instance.evaluation_config
++            ):
++                # A prompt-only PATCH must not reset the saved routing choice.
++                data["evaluation_config"] = {"judge_method": self.instance.evaluation_config["judge_method"], **config}
+         if (
+             self.instance
+             and output_type != self.instance.output_type
+@@ -580,7 +622,10 @@ def validate(self, data):
+                     {"model_configuration": "Select a provider and model for this LLM judge evaluation."}
+                 )
+ 
+-        if data.get("model_configuration") or data.get("enabled"):
++        method_changed = "evaluation_config" in data and data["evaluation_config"].get("judge_method") != getattr(
++            self.instance, "evaluation_config", {}
++        ).get("judge_method")
++        if data.get("model_configuration") or data.get("enabled") or method_changed:
+             self._validate_chat_model(data, uses_decision_model=uses_decision_model)
+ 
+         should_validate_configs = (
+diff --git a/products/ai_observability/backend/api/proxy.py b/products/ai_observability/backend/api/proxy.py
+index b2830b984451..0305aaeca11b 100644
+--- a/products/ai_observability/backend/api/proxy.py
++++ b/products/ai_observability/backend/api/proxy.py
+@@ -60,7 +60,11 @@
+     ProviderHostUnresolvedError,
+     UnsupportedProviderError,
+ )
+-from products.ai_observability.backend.llm.providers.openrouter import OPENROUTER_BASE_URL, decision_model_ids
++from products.ai_observability.backend.llm.providers.openrouter import (
++    OPENROUTER_BASE_URL,
++    decision_model_ids,
++    non_chat_model_ids,
++)
+ from products.ai_observability.backend.models.provider_keys import (
+     LLMProvider,
+     LLMProviderKey,
+@@ -116,7 +120,10 @@ class LLMProxyModelInfoSerializer(serializers.Serializer):
+     description = serializers.CharField(allow_blank=True, help_text="Description of the model.")
+     is_recommended = serializers.BooleanField(help_text="Whether the provider recommends this model.")
+     supports_decisions = serializers.BooleanField(
+-        default=False, help_text="Whether this model supports decision questions instead of chat completions."
++        default=False, help_text="Whether this model supports decision questions."
++    )
++    supports_chat = serializers.BooleanField(
++        default=True, help_text="Whether this model supports chat completions with written reasoning."
+     )
+ 
+ 
+@@ -512,10 +519,12 @@ def models(self, request):
+                 recommended = Client.recommended_models(provider_key.provider)
+                 provider_display = PROVIDER_DISPLAY_NAMES.get(provider_key.provider, provider_key.provider.title())
+                 decision_models: frozenset[str] = frozenset()
++                non_chat_models: frozenset[str] = frozenset()
+                 if provider_key.provider == LLMProvider.OPENROUTER and decision_evaluations_enabled(
+                     provider_key.team_id, base_url=OPENROUTER_BASE_URL
+                 ):
+                     decision_models = decision_model_ids() or frozenset()
++                    non_chat_models = non_chat_model_ids() or frozenset()
+                     models = list(dict.fromkeys([*models, *sorted(decision_models)]))
+                 return Response(
+                     [
+@@ -526,6 +535,7 @@ def models(self, request):
+                             description="",
+                             is_recommended=m in recommended,
+                             supports_decisions=provider_key.provider == LLMProvider.SYSTEM_ONE or m in decision_models,
++                            supports_chat=provider_key.provider != LLMProvider.SYSTEM_ONE and m not in non_chat_models,
+                         )
+                         for m in models
+                     ]
+diff --git a/products/ai_observability/backend/llm/__init__.py b/products/ai_observability/backend/llm/__init__.py
+index b8195d39ea52..71b5e063149e 100644
+--- a/products/ai_observability/backend/llm/__init__.py
++++ b/products/ai_observability/backend/llm/__init__.py
+@@ -19,6 +19,7 @@ class ModelInfo(TypedDict):
+     description: str
+     is_recommended: bool
+     supports_decisions: NotRequired[bool]
++    supports_chat: NotRequired[bool]
+ 
+ 
+ # Single registry of providers. Add new providers here and everything else
+diff --git a/products/ai_observability/backend/llm/decisions.py b/products/ai_observability/backend/llm/decisions.py
+index ce90126bb5cd..b3c6aae4c015 100644
+--- a/products/ai_observability/backend/llm/decisions.py
++++ b/products/ai_observability/backend/llm/decisions.py
+@@ -38,13 +38,15 @@
+ from products.ai_observability.backend.llm.providers.openrouter import OPENROUTER_HEADERS, decision_model_ids
+ 
+ 
+-def is_decision_model(provider: str | None, model: str | None, *, openrouter_enabled: bool) -> bool:
++def is_decision_model(
++    provider: str | None, model: str | None, *, openrouter_enabled: bool, decision_only: bool = False
++) -> bool:
+     if provider == "system_one":
+         return True
+     # Disabled projects keep the chat path independent of catalogue availability.
+     if provider != "openrouter" or not model or not openrouter_enabled:
+         return False
+-    models = decision_model_ids()
++    models = decision_model_ids(decision_only=decision_only)
+     if models is None:
+         raise ProviderConnectionError("Could not load OpenRouter model capabilities. Try again.")
+     return model in models
+diff --git a/products/ai_observability/backend/llm/providers/openrouter.py b/products/ai_observability/backend/llm/providers/openrouter.py
+index c22a5f286d5e..ead3a364441a 100644
+--- a/products/ai_observability/backend/llm/providers/openrouter.py
++++ b/products/ai_observability/backend/llm/providers/openrouter.py
+@@ -35,55 +35,62 @@
+ 
+ # The default model list only has text-output models, so ask for every output modality.
+ OPENROUTER_ALL_MODELS_URL = f"{OPENROUTER_BASE_URL}/models?output_modalities=all"
+-NON_CHAT_MODELS_CACHE_KEY = "ai_observability:openrouter:non_chat_models:v2"
+-NON_CHAT_MODELS_LAST_GOOD_CACHE_KEY = f"{NON_CHAT_MODELS_CACHE_KEY}:last_good"
+-NON_CHAT_MODELS_CACHE_TTL_SECONDS = 60 * 60
+-NON_CHAT_MODELS_FETCH_TIMEOUT_SECONDS = 5.0
++# Older workers expect a non-chat-only snapshot, so use a separate cache namespace.
++MODEL_MODALITIES_CACHE_KEY = "ai_observability:openrouter:model_output_modalities:v1"
++MODEL_MODALITIES_LAST_GOOD_CACHE_KEY = f"{MODEL_MODALITIES_CACHE_KEY}:last_good"
++MODEL_MODALITIES_CACHE_TTL_SECONDS = 60 * 60
++MODEL_MODALITIES_FETCH_TIMEOUT_SECONDS = 5.0
+ # Short, so a catalogue outage adds the fetch timeout at most once a minute.
+-NON_CHAT_MODELS_UNAVAILABLE_TTL_SECONDS = 60
++MODEL_MODALITIES_UNAVAILABLE_TTL_SECONDS = 60
+ _CATALOGUE_UNAVAILABLE = "unavailable"
+ 
+ 
+-def _non_chat_models(*, refresh: bool = True) -> dict[str, list[str]] | None:
+-    """Output modalities of OpenRouter models that cannot produce text.
++def _model_output_modalities(*, refresh: bool = True) -> dict[str, list[str]] | None:
++    """Output modalities of OpenRouter models.
+ 
+     Returns the last successful catalogue during outages, or None before the first success.
+     """
+-    cached = cache.get(NON_CHAT_MODELS_CACHE_KEY)
++    cached = cache.get(MODEL_MODALITIES_CACHE_KEY)
+     if cached == _CATALOGUE_UNAVAILABLE:
+-        return cache.get(NON_CHAT_MODELS_LAST_GOOD_CACHE_KEY)
++        return cache.get(MODEL_MODALITIES_LAST_GOOD_CACHE_KEY)
+     if cached is not None:
+         return cached
+     if not refresh:
+-        return cache.get(NON_CHAT_MODELS_LAST_GOOD_CACHE_KEY)
++        return cache.get(MODEL_MODALITIES_LAST_GOOD_CACHE_KEY)
+     try:
+-        response = httpx.get(OPENROUTER_ALL_MODELS_URL, timeout=NON_CHAT_MODELS_FETCH_TIMEOUT_SECONDS)
++        response = httpx.get(OPENROUTER_ALL_MODELS_URL, timeout=MODEL_MODALITIES_FETCH_TIMEOUT_SECONDS)
+         response.raise_for_status()
+         models = response.json()["data"]
+         modalities = {
+-            model["id"]: model["architecture"]["output_modalities"]
+-            for model in models
+-            if "text" not in ((model.get("architecture") or {}).get("output_modalities") or ["text"])
++            model["id"]: (model.get("architecture") or {}).get("output_modalities") or ["text"] for model in models
+         }
+     except Exception:
+         logger.warning("Could not fetch the OpenRouter model catalogue", exc_info=True)
+-        cache.set(NON_CHAT_MODELS_CACHE_KEY, _CATALOGUE_UNAVAILABLE, NON_CHAT_MODELS_UNAVAILABLE_TTL_SECONDS)
+-        return cache.get(NON_CHAT_MODELS_LAST_GOOD_CACHE_KEY)
++        cache.set(MODEL_MODALITIES_CACHE_KEY, _CATALOGUE_UNAVAILABLE, MODEL_MODALITIES_UNAVAILABLE_TTL_SECONDS)
++        return cache.get(MODEL_MODALITIES_LAST_GOOD_CACHE_KEY)
+     # An outage must not discard the last successful catalogue.
+-    cache.set(NON_CHAT_MODELS_LAST_GOOD_CACHE_KEY, modalities, timeout=None)
+-    cache.set(NON_CHAT_MODELS_CACHE_KEY, modalities, NON_CHAT_MODELS_CACHE_TTL_SECONDS)
++    cache.set(MODEL_MODALITIES_LAST_GOOD_CACHE_KEY, modalities, timeout=None)
++    cache.set(MODEL_MODALITIES_CACHE_KEY, modalities, MODEL_MODALITIES_CACHE_TTL_SECONDS)
+     return modalities
+ 
+ 
+-def _non_chat_model_ids() -> frozenset[str] | None:
+-    models = _non_chat_models()
+-    return frozenset(models) if models is not None else None
++def non_chat_model_ids() -> frozenset[str] | None:
++    models = _model_output_modalities()
++    return (
++        frozenset(model for model, modalities in models.items() if "text" not in modalities)
++        if models is not None
++        else None
++    )
+ 
+ 
+-def decision_model_ids(*, refresh: bool = True) -> frozenset[str] | None:
+-    models = _non_chat_models(refresh=refresh)
++def decision_model_ids(*, refresh: bool = True, decision_only: bool = False) -> frozenset[str] | None:
++    models = _model_output_modalities(refresh=refresh)
+     return (
+-        frozenset(model for model, modalities in models.items() if "decisions" in modalities)
++        frozenset(
++            model
++            for model, modalities in models.items()
++            if "decisions" in modalities and (not decision_only or "text" not in modalities)
++        )
+         if models is not None
+         else None
+     )
+@@ -91,7 +98,7 @@ def decision_model_ids(*, refresh: bool = True) -> frozenset[str] | None:
+ 
+ def is_non_chat_model(model: str) -> bool:
+     """True only when OpenRouter lists the model and says it cannot produce text."""
+-    ids = _non_chat_model_ids()
++    ids = non_chat_model_ids()
+     return ids is not None and model in ids
+ 
+ 
+diff --git a/products/ai_observability/backend/models/evaluation_configs.py b/products/ai_observability/backend/models/evaluation_configs.py
+index 38a7a64eea30..86d374bc89c1 100644
+--- a/products/ai_observability/backend/models/evaluation_configs.py
++++ b/products/ai_observability/backend/models/evaluation_configs.py
+@@ -27,6 +27,9 @@ class LLMJudgeConfig(BaseModel):
+     """Configuration for LLM judge evaluations"""
+ 
+     prompt: str = Field(..., min_length=1, description="Evaluation criteria prompt")
++    judge_method: Literal["llm", "decision"] | None = Field(
++        default=None, description="Judge method. Omit to keep the saved method; null restores automatic routing."
++    )
+ 
+     @field_validator("prompt")
+     @classmethod
+diff --git a/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx b/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
+index 1c1a3c0196ca..b18d9c776589 100644
+--- a/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
++++ b/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
+@@ -35,13 +35,11 @@ import { AccessControlLevel, AccessControlResourceType } from '~/types'
+ 
+ import { useAttachedContext } from 'products/posthog_ai/frontend/api/logics'
+ 
+-import { ByokModelPickerNotice } from '../ByokModelPickerNotice'
+-import { getModelPickerFooterLink, ModelPicker } from '../ModelPicker'
+-import { modelPickerLogic } from '../modelPickerLogic'
+ import { providerKeyStateIssueDescription, providerLabel } from '../settings/providerKeyStateUtils'
+ import { CategoricalEvaluationConfig } from './components/CategoricalEvaluationConfig'
+ import { EvaluationBackfillsTab } from './components/EvaluationBackfillsTab'
+ import { EvaluationCodeEditor } from './components/EvaluationCodeEditor'
++import { EvaluationModelPicker } from './components/EvaluationModelPicker'
+ import { EvaluationPromptEditor } from './components/EvaluationPromptEditor'
+ import { EvaluationReportConfig } from './components/EvaluationReportConfig'
+ import { EvaluationReportsCallout } from './components/EvaluationReportsCallout'
+@@ -913,66 +911,6 @@ export function AIObservabilityEvaluation(): JSX.Element {
+     )
+ }
+ 
+-function EvaluationModelPicker(): JSX.Element {
+-    const { byokModels, evaluationProviderModelGroups, byokModelsLoading, providerKeysLoading } =
+-        useValues(modelPickerLogic)
+-    const { selectedModel, selectedPickerProviderKeyId, modelSelectionRequired, evaluation, usesDecisionModel } =
+-        useValues(llmEvaluationLogic)
+-    const { selectModelFromPicker } = useActions(llmEvaluationLogic)
+-
+-    // Evals always run on the team's own provider key, so only BYOK models are offered.
+-    const selectedModelName = byokModels.find((m) => m.id === selectedModel)?.name
+-    const groups = evaluationProviderModelGroups.filter(
+-        (group) =>
+-            evaluation?.output_type === 'boolean' ||
+-            evaluation?.output_type === 'categorical' ||
+-            evaluation?.output_type === 'numeric' ||
+-            group.provider !== 'system_one'
+-    )
+-    const loading = byokModelsLoading || providerKeysLoading
+-
+-    const footerLink = getModelPickerFooterLink(groups.some((group) => !group.disabledReason))
+-
+-    return (
+-        <div className="bg-bg-light border rounded p-6">
+-            <h3 className="text-lg font-semibold mb-2">Judge model</h3>
+-            <p className="text-muted text-sm mb-4">
+-                Select which LLM provider and model to use for running this evaluation.
+-            </p>
+-
+-            <div className="space-y-4">
+-                <LemonField.Pure label="Model">
+-                    <div>
+-                        <ModelPicker
+-                            model={selectedModel}
+-                            selectedProviderKeyId={selectedPickerProviderKeyId}
+-                            onSelect={selectModelFromPicker}
+-                            groups={groups}
+-                            loading={loading}
+-                            footerLink={footerLink}
+-                            selectedModelName={selectedModelName}
+-                            data-attr="evaluation-model-selector"
+-                        />
+-                        <ByokModelPickerNotice forEvaluation />
+-                        {evaluation && usesDecisionModel && (
+-                            <p className="text-sm text-muted mt-2">
+-                                {evaluation.output_type === 'categorical'
+-                                    ? 'This decision model selects categories without written reasoning. For multiple selections, each category is included when its probability is 50% or higher.'
+-                                    : evaluation.output_type === 'numeric'
+-                                      ? 'This decision model estimates a score between your minimum and maximum without written reasoning. Define what low and high scores mean in your evaluation prompt. Scores can be fractional.'
+-                                      : 'This decision model returns a probability without written reasoning. A probability of 50% or higher produces a true result.'}
+-                            </p>
+-                        )}
+-                        {modelSelectionRequired && !selectedModel && (
+-                            <p className="text-sm text-danger mt-1">Select a judge model.</p>
+-                        )}
+-                    </div>
+-                </LemonField.Pure>
+-            </div>
+-        </div>
+-    )
+-}
+-
+ export const scene: SceneExport<LLMEvaluationLogicProps> = {
+     component: AIObservabilityEvaluation,
+     logic: llmEvaluationLogic,
+diff --git a/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.stories.tsx b/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.stories.tsx
+new file mode 100644
+index 000000000000..0c0d508f9dd2
+--- /dev/null
++++ b/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.stories.tsx
+@@ -0,0 +1,91 @@
++import type { Meta, StoryObj } from '@storybook/react'
++import { BindLogic } from 'kea'
++
++import { FEATURE_FLAGS } from 'lib/constants'
++
++import { useStorybookMocks } from '~/mocks/browser'
++
++import { llmEvaluationLogic } from '../llmEvaluationLogic'
++import type { JudgeMethod } from '../types'
++import { EvaluationModelPicker } from './EvaluationModelPicker'
++
++const meta: Meta<{ method?: JudgeMethod; narrow?: boolean; empty?: boolean }> = {
++    title: 'Scenes-App/LLM observability/EvaluationModelPicker',
++    component: EvaluationModelPicker,
++    parameters: {
++        layout: 'padded',
++        featureFlags: [FEATURE_FLAGS.LLM_ANALYTICS_SYSTEM_ONE_EVALUATIONS],
++    },
++    render: ({ method = 'llm', narrow = false, empty = false }) => {
++        useStorybookMocks({
++            get: {
++                '/api/environments/:team_id/llm_analytics/provider_keys/': {
++                    results: [
++                        { id: 'example-openrouter-key', name: 'OpenRouter', provider: 'openrouter', state: 'ok' },
++                    ],
++                },
++                '/api/environments/:team_id/llm_analytics/evaluation_config/': { active_provider_key: null },
++                '/api/llm_proxy/models/': ({ request }) => [
++                    200,
++                    new URL(request.url).searchParams.has('provider_key_id')
++                        ? [
++                              {
++                                  id: 'example/chat-model',
++                                  name: 'example/chat-model',
++                                  provider: 'OpenRouter',
++                                  supports_chat: true,
++                                  supports_decisions: false,
++                              },
++                              ...(!empty
++                                  ? [
++                                        {
++                                            id: 'example/decision-model',
++                                            name: 'example/decision-model',
++                                            provider: 'OpenRouter',
++                                            supports_chat: false,
++                                            supports_decisions: true,
++                                        },
++                                        {
++                                            id: 'example/dual-model',
++                                            name: 'example/dual-model',
++                                            provider: 'OpenRouter',
++                                            supports_chat: true,
++                                            supports_decisions: true,
++                                        },
++                                    ]
++                                  : []),
++                          ]
++                        : [],
++                ],
++                '/api/projects/:team_id/evaluations/example-evaluation/': {
++                    id: 'example-evaluation',
++                    name: 'Response quality',
++                    enabled: false,
++                    evaluation_type: 'llm_judge',
++                    evaluation_config: { prompt: 'Does the response answer the question?', judge_method: method },
++                    output_type: 'boolean',
++                    output_config: {},
++                    conditions: [],
++                    target: 'generation',
++                    target_config: {},
++                    model_configuration: null,
++                },
++            },
++        })
++        return (
++            <BindLogic logic={llmEvaluationLogic} props={{ evaluationId: 'example-evaluation' }}>
++                <div className={narrow ? 'max-w-lg' : 'max-w-4xl'}>
++                    <EvaluationModelPicker />
++                </div>
++            </BindLogic>
++        )
++    },
++}
++export default meta
++type Story = StoryObj<typeof meta>
++
++export const LLM: Story = { args: { method: 'llm' } }
++export const Decision: Story = { args: { method: 'decision' } }
++export const DecisionNarrow: Story = { args: { method: 'decision', narrow: true } }
++export const NoDecisionModels: Story = { args: { method: 'decision', empty: true } }
++export const FlagOff: Story = { parameters: { featureFlags: [] } }
+diff --git a/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.tsx b/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.tsx
+new file mode 100644
+index 000000000000..f16686cd9fd2
+--- /dev/null
++++ b/products/ai_observability/frontend/evaluations/components/EvaluationModelPicker.tsx
+@@ -0,0 +1,97 @@
++import { useActions, useValues } from 'kea'
++
++import { LemonSegmentedButton } from '@posthog/lemon-ui'
++
++import { FEATURE_FLAGS } from 'lib/constants'
++import { LemonField } from 'lib/lemon-ui/LemonField'
++import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
++
++import { ByokModelPickerNotice } from '../../ByokModelPickerNotice'
++import { getModelPickerFooterLink, ModelPicker } from '../../ModelPicker'
++import { modelPickerLogic } from '../../modelPickerLogic'
++import { llmEvaluationLogic } from '../llmEvaluationLogic'
++import type { JudgeMethod } from '../types'
++
++export function EvaluationModelPicker(): JSX.Element {
++    const { byokModels, byokModelsLoading, providerKeysLoading } = useValues(modelPickerLogic)
++    const {
++        selectedModel,
++        selectedPickerProviderKeyId,
++        modelSelectionRequired,
++        evaluation,
++        usesDecisionModel,
++        judgeMethod,
++        judgeModelGroups: groups,
++    } = useValues(llmEvaluationLogic)
++    const { selectModelFromPicker, setJudgeMethod } = useActions(llmEvaluationLogic)
++    const { featureFlags } = useValues(featureFlagLogic)
++
++    // Evals always run on the team's own provider key, so only BYOK models are offered.
++    const selectedModelName = byokModels.find(
++        (m) => m.id === selectedModel && m.providerKeyId === selectedPickerProviderKeyId
++    )?.name
++    const loading = byokModelsLoading || providerKeysLoading
++
++    const footerLink = getModelPickerFooterLink(groups.some((group) => !group.disabledReason))
++
++    return (
++        <div className="bg-bg-light border rounded p-6">
++            <h3 className="text-lg font-semibold mb-2">Judge model</h3>
++            <p className="text-muted text-sm mb-4">
++                Choose how to judge responses, then select a model from your configured AI providers.
++            </p>
++
++            <div className="space-y-4">
++                <LemonField.Pure label="Judge method">
++                    <LemonSegmentedButton<JudgeMethod>
++                        value={judgeMethod}
++                        onChange={setJudgeMethod}
++                        disabledReason={loading ? 'Loading model capabilities.' : undefined}
++                        options={[
++                            { value: 'llm', label: 'LLM with explanation' },
++                            {
++                                value: 'decision',
++                                label: 'Decision model',
++                                disabledReason: !featureFlags[FEATURE_FLAGS.LLM_ANALYTICS_SYSTEM_ONE_EVALUATIONS]
++                                    ? 'Decision model evaluations are not enabled for this project.'
++                                    : undefined,
++                            },
++                        ]}
++                    />
++                </LemonField.Pure>
++                <LemonField.Pure label="Model">
++                    <div>
++                        <ModelPicker
++                            model={selectedModel}
++                            selectedProviderKeyId={selectedPickerProviderKeyId}
++                            onSelect={selectModelFromPicker}
++                            groups={groups}
++                            loading={loading}
++                            footerLink={footerLink}
++                            selectedModelName={selectedModelName}
++                            data-attr="evaluation-model-selector"
++                        />
++                        <ByokModelPickerNotice forEvaluation />
++                        {usesDecisionModel && !loading && !groups.some((group) => group.models.length > 0) && (
++                            <p className="text-sm text-muted mt-2">
++                                No decision models are available from your configured AI providers.
++                            </p>
++                        )}
++                        {evaluation && usesDecisionModel && (
++                            <p className="text-sm text-muted mt-2">
++                                {evaluation.output_type === 'categorical'
++                                    ? 'This decision model selects categories without written reasoning. For multiple selections, each category is included when its probability is 50% or higher.'
++                                    : evaluation.output_type === 'numeric'
++                                      ? 'This decision model estimates a score between your minimum and maximum without written reasoning. Define what low and high scores mean in your evaluation prompt. Scores can be fractional.'
++                                      : 'This decision model returns a probability without written reasoning. A probability of 50% or higher produces a true result.'}
++                            </p>
++                        )}
++                        {modelSelectionRequired && !selectedModel && (
++                            <p className="text-sm text-danger mt-1">Select a judge model.</p>
++                        )}
++                    </div>
++                </LemonField.Pure>
++            </div>
++        </div>
++    )
++}
+diff --git a/products/ai_observability/frontend/evaluations/llmEvaluationLogic.ts b/products/ai_observability/frontend/evaluations/llmEvaluationLogic.ts
+index fb0717145b77..3a6081379855 100644
+--- a/products/ai_observability/frontend/evaluations/llmEvaluationLogic.ts
++++ b/products/ai_observability/frontend/evaluations/llmEvaluationLogic.ts
+@@ -23,7 +23,7 @@ import {
+ import type { EvaluationBackfillApi, TestHogRequestApi, TestHogResultItemApi } from '../generated/api.schemas'
+ import type { EvaluationApiOutputConfig } from '../generated/api.schemas'
+ import { parsePlaygroundProviderKeyId } from '../ModelPicker'
+-import { modelPickerLogic, type ModelOption } from '../modelPickerLogic'
++import { modelPickerLogic, type ModelOption, type ProviderModelGroup } from '../modelPickerLogic'
+ import { LLMProviderKey, llmProviderKeysLogic, toLLMProvider } from '../settings/llmProviderKeysLogic'
+ import type { EvaluationConfig as TeamEvaluationConfig } from '../settings/llmProviderKeysLogic'
+ import { getUnhealthyProviderKey } from '../settings/providerKeyStateUtils'
+@@ -69,6 +69,7 @@ import type {
+     EvaluationType,
+     HogEvaluation,
+     LLMJudgeEvaluation,
++    JudgeMethod,
+     ModelConfiguration,
+     SentimentEvaluation,
+ } from './types'
+@@ -305,6 +306,7 @@ export interface llmEvaluationLogicValues {
+     providerKeysLoading: boolean // llmProviderKeysLogic
+     requiresProviderKey: boolean // llmProviderKeysLogic
+     byokModels: ModelOption[] // modelPickerLogic
++    evaluationProviderModelGroups: ProviderModelGroup[] // modelPickerLogic
+     activeTab: string
+     breadcrumbs: Breadcrumb[]
+     canEnable: boolean
+@@ -328,6 +330,8 @@ export interface llmEvaluationLogicValues {
+     isForceRefresh: boolean
+     isNewEvaluation: boolean
+     isReportableEvaluation: boolean
++    judgeMethod: JudgeMethod
++    judgeModelGroups: ProviderModelGroup[]
+     maxContext: MaxContextInput[]
+     modelSelectionRequired: boolean
+     numericBoundsRequired: boolean
+@@ -502,6 +506,9 @@ export interface llmEvaluationLogicActions {
+     setHogTestMessage: (message: string | null) => {
+         message: string | null
+     }
++    setJudgeMethod: (judgeMethod: JudgeMethod) => {
++        judgeMethod: JudgeMethod
++    }
+     setModelConfiguration: (modelConfiguration: ModelConfiguration | null) => {
+         modelConfiguration: ModelConfiguration | null
+     }
+@@ -563,7 +570,12 @@ export interface llmEvaluationLogicMeta {
+             originalEvaluation: EvaluationConfig | null,
+             evaluationId: string
+         ) => boolean
+-        usesDecisionModel: (evaluation: EvaluationConfig | null, byokModels: ModelOption[]) => boolean
++        judgeMethod: (evaluation: EvaluationConfig | null, byokModels: ModelOption[]) => JudgeMethod
++        usesDecisionModel: (judgeMethod: JudgeMethod) => boolean
++        judgeModelGroups: (
++            evaluationProviderModelGroups: ProviderModelGroup[],
++            judgeMethod: JudgeMethod
++        ) => ProviderModelGroup[]
+         numericBoundsRequired: (evaluation: EvaluationConfig | null, usesDecisionModel: boolean) => boolean
+         formValid: (
+             evaluation: EvaluationConfig | null,
+@@ -631,7 +643,7 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+             llmProviderKeysLogic,
+             ['providerKeys', 'providerKeysLoading', 'requiresProviderKey', 'activeProviderKey'],
+             modelPickerLogic,
+-            ['byokModels'],
++            ['byokModels', 'evaluationProviderModelGroups'],
+         ],
+         actions: [llmProviderKeysLogic, ['loadProviderKeys', 'loadEvaluationConfigSuccess']],
+     })),
+@@ -652,6 +664,7 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+         setTrueIsFailure: (trueIsFailure: boolean) => ({ trueIsFailure }),
+         setTriggerConditions: (conditions: EvaluationConditionSet[]) => ({ conditions }),
+         setModelConfiguration: (modelConfiguration: ModelConfiguration | null) => ({ modelConfiguration }),
++        setJudgeMethod: (judgeMethod: JudgeMethod) => ({ judgeMethod }),
+         setEvaluationType: (evaluationType: EvaluationType) => ({ evaluationType }),
+         setEvaluationTarget: (target: EvaluationTarget) => ({ target }),
+         setSettleStrategy: (strategy: EvaluationSettleStrategy) => ({ strategy }),
+@@ -960,6 +973,10 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+                     state && isLLMJudgeEvaluation(state)
+                         ? { ...state, model_configuration: modelConfiguration }
+                         : state,
++                setJudgeMethod: (state, { judgeMethod }) =>
++                    state && isLLMJudgeEvaluation(state)
++                        ? { ...state, evaluation_config: { ...state.evaluation_config, judge_method: judgeMethod } }
++                        : state,
+                 setEvaluationType: (state, { evaluationType }) => {
+                     if (!state) {
+                         return null
+@@ -1099,6 +1116,7 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+                 setTrueIsFailure: () => true,
+                 setTriggerConditions: () => true,
+                 setModelConfiguration: () => true,
++                setJudgeMethod: () => true,
+                 setEvaluationType: () => true,
+                 setEvaluationTarget: () => true,
+                 setSettleStrategy: () => true,
+@@ -1439,6 +1457,7 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+             }
+             const playgroundProvider = parsePlaygroundProviderKeyId(providerKeyId)
+             if (playgroundProvider) {
++                actions.setJudgeMethod(values.judgeMethod)
+                 actions.setModelConfiguration({
+                     provider: playgroundProvider,
+                     model: modelId,
+@@ -1448,6 +1467,7 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+             }
+             const key = values.providerKeys.find((k: LLMProviderKey) => k.id === providerKeyId)
+             if (key) {
++                actions.setJudgeMethod(values.judgeMethod)
+                 actions.setModelConfiguration({
+                     provider: key.provider,
+                     model: modelId,
+@@ -1455,6 +1475,28 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+                 })
+             }
+         },
++        setJudgeMethod: () => {
++            const config = values.evaluation?.model_configuration
++            if (!config) {
++                return
++            }
++            const model = values.byokModels.find(
++                (model) =>
++                    model.id === config.model &&
++                    toLLMProvider(model.provider) === config.provider &&
++                    (!config.provider_key_id || model.providerKeyId === config.provider_key_id)
++            )
++            const compatible = model
++                ? values.judgeMethod === 'decision'
++                    ? model.supportsDecisions
++                    : (model.supportsChat ?? !model.supportsDecisions)
++                : config.provider === 'system_one'
++                  ? values.judgeMethod === 'decision'
++                  : values.judgeMethod === 'llm'
++            if (!compatible) {
++                actions.setModelConfiguration(null)
++            }
++        },
+         setEvaluationType: () => {
+             if (!values.isReportableEvaluation && values.activeTab === 'reports') {
+                 actions.setActiveTab('configuration')
+@@ -1562,30 +1604,58 @@ export const llmEvaluationLogic = kea<llmEvaluationLogicType>([
+                 if (!isLLMJudgeEvaluation(evaluation)) {
+                     return false
+                 }
+-                if (evaluationId === 'new' || originalEvaluation?.evaluation_type !== 'llm_judge') {
++                if (
++                    evaluationId === 'new' ||
++                    originalEvaluation?.evaluation_type !== 'llm_judge' ||
++                    evaluation.evaluation_config?.judge_method != null
++                ) {
+                     return true
+                 }
+                 return originalEvaluation.model_configuration != null
+             },
+         ],
+ 
+-        usesDecisionModel: [
++        judgeMethod: [
+             (s) => [s.evaluation, s.byokModels],
+-            (evaluation: EvaluationConfig | null, models: ModelOption[]): boolean => {
++            (evaluation: EvaluationConfig | null, models: ModelOption[]): JudgeMethod => {
++                if (isLLMJudgeEvaluation(evaluation) && evaluation.evaluation_config?.judge_method) {
++                    return evaluation.evaluation_config.judge_method
++                }
+                 const config = evaluation?.model_configuration
+-                return (
+-                    config?.provider === 'system_one' ||
++                return config?.provider === 'system_one' ||
+                     (config?.provider === 'openrouter' &&
+                         models.some(
+                             (model) =>
+                                 model.id === config.model &&
+                                 toLLMProvider(model.provider) === 'openrouter' &&
+                                 (!config.provider_key_id || model.providerKeyId === config.provider_key_id) &&
+-                                model.supportsDecisions
++                                model.supportsDecisions &&
++                                !model.supportsChat
+                         ))
+-                )
++                    ? 'decision'
++                    : 'llm'
+             },
+         ],
++        usesDecisionModel: [(s) => [s.judgeMethod], (judgeMethod: JudgeMethod): boolean => judgeMethod === 'decision'],
++        judgeModelGroups: [
++            (s) => [s.evaluationProviderModelGroups, s.judgeMethod],
++            (groups: ProviderModelGroup[], judgeMethod: JudgeMethod): ProviderModelGroup[] =>
++                groups
++                    .map((group) => ({
++                        ...group,
++                        models: group.models.filter((model) =>
++                            judgeMethod === 'decision'
++                                ? model.supportsDecisions
++                                : (model.supportsChat ?? !model.supportsDecisions)
++                        ),
++                    }))
++                    .filter(
++                        (group) =>
++                            group.models.length > 0 ||
++                            group.disabledReason ||
++                            (judgeMethod === 'llm' && group.allowsCustomModel)
++                    ),
++        ],
+         numericBoundsRequired: [
+             (s) => [s.evaluation, s.usesDecisionModel],
+             (evaluation: EvaluationConfig | null, usesDecisionModel: boolean): boolean =>
+diff --git a/products/ai_observability/frontend/evaluations/types.ts b/products/ai_observability/frontend/evaluations/types.ts
+index ddb68dcd533a..0f011c7cd732 100644
+--- a/products/ai_observability/frontend/evaluations/types.ts
++++ b/products/ai_observability/frontend/evaluations/types.ts
+@@ -1,6 +1,7 @@
+ import { AccessControlLevel, AnyPropertyFilter, UserBasicType } from '~/types'
+ 
+ import type {
++    EvaluationApiEvaluationConfig,
+     EvaluationApiOutputConfig,
+     EvaluationReportCitationApi,
+     EvaluationReportMetricsApi,
+@@ -50,9 +51,8 @@ export interface EvaluationTargetConfig {
+     max_age_seconds?: number
+ }
+ 
+-export interface LLMJudgeEvaluationConfig {
+-    prompt: string
+-}
++export type LLMJudgeEvaluationConfig = Extract<EvaluationApiEvaluationConfig, { prompt: string }>
++export type JudgeMethod = NonNullable<LLMJudgeEvaluationConfig['judge_method']>
+ 
+ export interface HogEvaluationConfig {
+     source: string
+diff --git a/products/ai_observability/frontend/generated/api.schemas.ts b/products/ai_observability/frontend/generated/api.schemas.ts
+index a81852fda0d3..df8016f738a3 100644
+--- a/products/ai_observability/frontend/generated/api.schemas.ts
++++ b/products/ai_observability/frontend/generated/api.schemas.ts
+@@ -1967,6 +1967,11 @@ export type EvaluationApiEvaluationConfig =
+            * @minLength 1
+            */
+           prompt: string
++          /**
++           * Judge method. Omit to keep the saved method; null restores automatic routing.
++           * @nullable
++           */
++          judge_method?: 'llm' | 'decision' | null
+       }
+     | {
+           /**
+@@ -2277,6 +2282,11 @@ export type PatchedEvaluationApiEvaluationConfig =
+            * @minLength 1
+            */
+           prompt: string
++          /**
++           * Judge method. Omit to keep the saved method; null restores automatic routing.
++           * @nullable
++           */
++          judge_method?: 'llm' | 'decision' | null
+       }
+     | {
+           /**
+diff --git a/products/ai_observability/frontend/generated/api.zod.ts b/products/ai_observability/frontend/generated/api.zod.ts
+index 35919a91757b..7d70c6e03a3f 100644
+--- a/products/ai_observability/frontend/generated/api.zod.ts
++++ b/products/ai_observability/frontend/generated/api.zod.ts
+@@ -564,6 +564,10 @@ export const EvaluationsCreateBody = /* @__PURE__ */ zod
+                         .string()
+                         .min(1)
+                         .describe('Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.'),
++                    judge_method: zod
++                        .enum(['llm', 'decision'])
++                        .nullish()
++                        .describe('Judge method. Omit to keep the saved method; null restores automatic routing.'),
+                 }),
+                 zod.object({
+                     source: zod
+@@ -949,6 +953,10 @@ export const EvaluationsUpdateBody = /* @__PURE__ */ zod
+                         .string()
+                         .min(1)
+                         .describe('Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.'),
++                    judge_method: zod
++                        .enum(['llm', 'decision'])
++                        .nullish()
++                        .describe('Judge method. Omit to keep the saved method; null restores automatic routing.'),
+                 }),
+                 zod.object({
+                     source: zod
+@@ -1237,6 +1245,10 @@ export const EvaluationsPartialUpdateBody = /* @__PURE__ */ zod
+                         .string()
+                         .min(1)
+                         .describe('Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.'),
++                    judge_method: zod
++                        .enum(['llm', 'decision'])
++                        .nullish()
++                        .describe('Judge method. Omit to keep the saved method; null restores automatic routing.'),
+                 }),
+                 zod.object({
+                     source: zod
+diff --git a/products/ai_observability/frontend/modelPickerLogic.ts b/products/ai_observability/frontend/modelPickerLogic.ts
+index 1e904221126e..4b271dc86841 100644
+--- a/products/ai_observability/frontend/modelPickerLogic.ts
++++ b/products/ai_observability/frontend/modelPickerLogic.ts
+@@ -21,6 +21,7 @@ export interface ModelOption {
+     providerKeyId?: string
+     isRecommended?: boolean
+     supportsDecisions?: boolean
++    supportsChat?: boolean
+ }
+ 
+ export interface ProviderModelGroup {
+@@ -287,6 +288,7 @@ export const modelPickerLogic = kea<modelPickerLogicType>([
+                             )) as (Omit<ModelOption, 'providerKeyId' | 'isRecommended'> & {
+                                 is_recommended?: boolean
+                                 supports_decisions?: boolean
++                                supports_chat?: boolean
+                             })[]
+                             return rawModels.map((m) => ({
+                                 id: m.id,
+@@ -295,6 +297,7 @@ export const modelPickerLogic = kea<modelPickerLogicType>([
+                                 description: m.description,
+                                 isRecommended: m.is_recommended ?? false,
+                                 supportsDecisions: m.supports_decisions ?? false,
++                                supportsChat: m.supports_chat ?? !m.supports_decisions,
+                                 providerKeyId: key.id,
+                             }))
+                         } catch {
+@@ -377,7 +380,7 @@ export const modelPickerLogic = kea<modelPickerLogicType>([
+             (models: ModelOption[], keys: LLMProviderKey[]): ModelOption[] =>
+                 models.filter(
+                     (model) =>
+-                        !model.supportsDecisions &&
++                        (model.supportsChat ?? !model.supportsDecisions) &&
+                         !keys.some((key) => key.id === model.providerKeyId && key.provider === 'system_one')
+                 ),
+         ],
+@@ -450,7 +453,10 @@ export const modelPickerLogic = kea<modelPickerLogicType>([
+             (groups: ProviderModelGroup[]): ProviderModelGroup[] =>
+                 groups
+                     .filter((group) => group.provider !== 'system_one')
+-                    .map((group) => ({ ...group, models: group.models.filter((model) => !model.supportsDecisions) }))
++                    .map((group) => ({
++                        ...group,
++                        models: group.models.filter((model) => model.supportsChat ?? !model.supportsDecisions),
++                    }))
+                     .filter((group) => group.models.length > 0 || group.disabledReason || group.allowsCustomModel),
+         ],
+         // The playground runs only listed models, so it does not offer typed deployment names.
+diff --git a/products/desktop/packages/api-client/src/generated.ts b/products/desktop/packages/api-client/src/generated.ts
+index 0fa442fbdf43..e33244d767e0 100644
+--- a/products/desktop/packages/api-client/src/generated.ts
++++ b/products/desktop/packages/api-client/src/generated.ts
+@@ -9267,6 +9267,9 @@ export namespace Schemas {
+                          * Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.
+                          */
+                         prompt: string;
++                        judge_method?:
++                            | (("llm" | "decision") | null)
++                            | undefined;
+                     }
+                   | {
+                         /**
+@@ -19182,7 +19185,10 @@ export namespace Schemas {
+         status_reason_detail: string | null;
+         evaluation_type: EvaluationTypeEnum;
+         evaluation_config:
+-            | { prompt: string }
++            | {
++                  prompt: string;
++                  judge_method?: (("llm" | "decision") | null) | undefined;
++              }
+             | { source: string }
+             | Partial<{ source: "user_messages" }>;
+         output_type: OutputTypeEnum;
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 973a2579bda5..3249e3efe580 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -42245,6 +42245,11 @@ export namespace Schemas {
+          * @minLength 1
+          */
+       prompt: string;
++      /**
++         * Judge method. Omit to keep the saved method; null restores automatic routing.
++         * @nullable
++         */
++      judge_method?: 'llm' | 'decision' | null;
+     } | {
+       /**
+          * Hog source code. Return a boolean, finite number, or category keys matching output_type. Categorical single selection accepts one key or a one-item list; multiple selection accepts a list, including []. Return null only for allowed N/A. Output settings determine which boolean counts as a failure.
+@@ -80013,6 +80018,11 @@ export namespace Schemas {
+          * @minLength 1
+          */
+       prompt: string;
++      /**
++         * Judge method. Omit to keep the saved method; null restores automatic routing.
++         * @nullable
++         */
++      judge_method?: 'llm' | 'decision' | null;
+     } | {
+       /**
+          * Hog source code. Return a boolean, finite number, or category keys matching output_type. Categorical single selection accepts one key or a one-item list; multiple selection accepts a list, including []. Return null only for allowed N/A. Output settings determine which boolean counts as a failure.
+diff --git a/services/mcp/src/generated/ai_observability/api.ts b/services/mcp/src/generated/ai_observability/api.ts
+index 231ca638e2fb..a9f229649b53 100644
+--- a/services/mcp/src/generated/ai_observability/api.ts
++++ b/services/mcp/src/generated/ai_observability/api.ts
+@@ -1334,6 +1334,10 @@ export const EvaluationsCreateBody = () => zod
+                         .string()
+                         .min(1)
+                         .describe('Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.'),
++                    judge_method: zod
++                        .enum(['llm', 'decision'])
++                        .nullish()
++                        .describe('Judge method. Omit to keep the saved method; null restores automatic routing.'),
+                 }),
+                 zod.object({
+                     source: zod
+@@ -1799,6 +1803,10 @@ export const EvaluationsPartialUpdateBody = () => zod
+                         .string()
+                         .min(1)
+                         .describe('Evaluation criteria for the LLM judge. Describe what makes a good vs bad response.'),
++                    judge_method: zod
++                        .enum(['llm', 'decision'])
++                        .nullish()
++                        .describe('Judge method. Omit to keep the saved method; null restores automatic routing.'),
+                 }),
+                 zod.object({
+                     source: zod

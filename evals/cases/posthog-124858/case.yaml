@@ -1,0 +1,9 @@
+id: posthog-124858
+codePr: 124858
+mergeSha: f2c364d224aacce4fe844d9651666a789353c489
+docsPr: 21699
+docsBaseSha: da1ec0fbba1fcb4bf5d6bbe345d1eaaae4753fd7
+section: workflows
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/workflows/import-customerio-optouts.mdx

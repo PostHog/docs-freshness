@@ -1,0 +1,10 @@
+id: posthog-110396
+codePr: 110396
+mergeSha: 5c59d4851957d7d00c9abcf8c3137fe6641e5a41
+docsPr: 20705
+docsBaseSha: b663522a2bcd80bd448fb6cba87e121f49320d76
+section: session-replay
+referenceKind: carbon-unit
+pages:
+  - contents/docs/session-replay/troubleshooting.mdx
+  - contents/docs/toolbar/heatmaps.mdx

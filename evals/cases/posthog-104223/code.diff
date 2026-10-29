@@ -1,0 +1,869 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 5bc3547e9dff..15c44a4ecacb 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -7083,7 +7083,7 @@ snapshots:
+     products-workflows-editor-graph--with-navigation--dark:
+         hash: v1.k794b7964.41531f0e4a9cb728232b50eb53a6615cbf117ec55824bccc6e42dca1c0f03d81.imMllz-NkrBb2FZ2YCA5vn3lmY8D5b933oS2mF0itww
+     products-workflows-editor-graph--with-navigation--light:
+-        hash: v1.k794b7964.6d17dbab3ca3a7422ddcc58effbf489d7191bb9ef15db2d65fa405e27922a921.AsAyuHILJW39r69f-JHKnQKnqm1T5kf66hr2CkX-QNo
++        hash: v1.k794b7964.0fdf474dddc11301e3167eb837b7be32ec852b6ab80e4e542164fc6f8c62e4b1.fapyeo_mKsAHugzfiWdvD2lWWY6odUxkVszayn76y0s
+     products-workflows-editor-tree--add-on-promotion-emails--dark:
+         hash: v1.k794b7964.f28f743921b108a3d7ce5c5f7f373407609e4f131790261d27afd7107909381f.Ji6HKS277Nou8dc2Ow4IG0TDdXKMQOCiNg6StWNB1Kc
+     products-workflows-editor-tree--add-on-promotion-emails--light:
+diff --git a/posthog/temporal/ai_observability/__init__.py b/posthog/temporal/ai_observability/__init__.py
+index b0498bf25972..03414e86b9ae 100644
+--- a/posthog/temporal/ai_observability/__init__.py
++++ b/posthog/temporal/ai_observability/__init__.py
+@@ -23,6 +23,7 @@
+     advance_evaluation_backfill_cursor_activity,
+     fail_evaluation_backfill_activity,
+     find_evaluation_backfill_candidates_activity,
++    measure_evaluation_backfill_remainder_activity,
+     prepare_evaluation_backfill_tick_activity,
+ )
+ from posthog.temporal.ai_observability.evaluation_clustering import (
+@@ -197,6 +198,7 @@
+     # Evaluation backfill activities
+     prepare_evaluation_backfill_tick_activity,
+     find_evaluation_backfill_candidates_activity,
++    measure_evaluation_backfill_remainder_activity,
+     advance_evaluation_backfill_cursor_activity,
+     fail_evaluation_backfill_activity,
+     # Keep eval activities registered here temporarily so orphaned workflows on general-purpose queue can complete
+diff --git a/posthog/temporal/ai_observability/evaluation_backfill.py b/posthog/temporal/ai_observability/evaluation_backfill.py
+index dbae5f7007b1..fe48f1a16177 100644
+--- a/posthog/temporal/ai_observability/evaluation_backfill.py
++++ b/posthog/temporal/ai_observability/evaluation_backfill.py
+@@ -16,6 +16,7 @@
+ from django.db.models import F
+ from django.utils import timezone
+ 
++import structlog
+ import temporalio
+ from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+ from temporalio.exceptions import WorkflowAlreadyStartedError, is_cancelled_exception
+@@ -34,7 +35,7 @@
+ )
+ from posthog.temporal.common.base import PostHogWorkflow
+ 
+-from products.ai_observability.backend.backfill_candidates import fetch_backfill_candidates
++from products.ai_observability.backend.backfill_candidates import count_backfill_candidates, fetch_backfill_candidates
+ from products.ai_observability.backend.models.evaluation_backfill import (
+     ACTIVE_BACKFILL_STATUSES,
+     EvaluationBackfill,
+@@ -42,6 +43,8 @@
+ )
+ from products.ai_observability.backend.models.evaluations import EvaluationTarget
+ 
++logger = structlog.get_logger(__name__)
++
+ BACKFILL_WORKFLOW_NAME = "llma-evaluation-backfill"
+ BACKFILL_TICK_INTERVAL = timedelta(seconds=60)
+ # Long enough for the slowest child: a trace evaluation can settle for its 2 hour maximum age
+@@ -151,6 +154,13 @@ class AdvanceCursorInputs:
+     exhausted: bool
+ 
+ 
++@frozen
++class MeasureRemainderInputs:
++    backfill_id: str
++    team_id: int
++    in_flight: int
++
++
+ @frozen
+ class AdvanceCursorOutput:
+     finished: bool
+@@ -262,7 +272,7 @@ def _find_backfill_candidates(inputs: FindCandidatesInputs) -> FindCandidatesOut
+         cursor_unit_id=row.cursor_unit_id,
+         limit=inputs.limit,
+     )
+-    return FindCandidatesOutput(
++    output = FindCandidatesOutput(
+         candidates=[
+             CandidatePayload(
+                 unit_id=candidate.unit_id,
+@@ -283,6 +293,15 @@ def _find_backfill_candidates(inputs: FindCandidatesInputs) -> FindCandidatesOut
+         started_from_cursor_timestamp=row.cursor_timestamp.isoformat() if row.cursor_timestamp else None,
+         started_from_cursor_unit_id=row.cursor_unit_id,
+     )
++    logger.info(
++        "llma.evaluation_backfill_page",
++        backfill_id=inputs.backfill_id,
++        team_id=inputs.team_id,
++        candidates=len(page.candidates),
++        limit=inputs.limit,
++        exhausted=page.exhausted,
++    )
++    return output
+ 
+ 
+ @temporalio.activity.defn
+@@ -314,6 +333,15 @@ def _advance_backfill_cursor(inputs: AdvanceCursorInputs) -> AdvanceCursorOutput
+         cursor_timestamp=expected_timestamp,
+         cursor_unit_id=inputs.expected_cursor_unit_id,
+     ).update(**updates)
++    logger.info(
++        "llma.evaluation_backfill_advance",
++        backfill_id=inputs.backfill_id,
++        team_id=inputs.team_id,
++        dispatched=inputs.dispatched_delta,
++        skipped=inputs.skipped_delta,
++        exhausted=inputs.exhausted,
++        applied=bool(updated),
++    )
+     if updated:
+         return AdvanceCursorOutput(finished=inputs.exhausted)
+     # Zero rows has two causes that end differently. If the row is no longer RUNNING, someone
+@@ -329,6 +357,49 @@ async def advance_evaluation_backfill_cursor_activity(inputs: AdvanceCursorInput
+     return await database_sync_to_async(_advance_backfill_cursor, thread_sensitive=False)(inputs)
+ 
+ 
++def _measure_backfill_remainder(inputs: MeasureRemainderInputs) -> None:
++    """Count what the window still owes, once, when the walk ends.
++
++    The walk cannot see a unit the live path judged while it worked: the unit simply stops being a
++    candidate, so a run can finish below its total with nothing to show for the difference.
++    Counting the remainder here says whether anything was left behind, and the one query it costs
++    runs per backfill rather than per tick.
++
++    `start_child_workflow` returns once a child has started, so the last page's verdicts are still
++    travelling through the judge and ingestion while this counts. Discounting them is what keeps a
++    backfill small enough to finish in one tick from reporting every unit it evaluated as owed.
++    """
++    row = EvaluationBackfill.objects.for_team(inputs.team_id).select_related("evaluation").get(pk=inputs.backfill_id)
++    team = Team.objects.get(pk=inputs.team_id)
++    scope = count_backfill_candidates(
++        team=team,
++        evaluation_id=str(row.evaluation_id),
++        target=row.target,
++        settle_horizon=settle_horizon(row.target, row.evaluation.target_config),
++        conditions=row.conditions,
++        window_start=row.window_start,
++        window_end=row.window_end,
++        # Always the deduped count: on a rerun the units this run graded are judged now, and the
++        # question is what holds no result at all.
++        rerun_existing=False,
++    )
++    remaining = max(0, scope.to_evaluate - inputs.in_flight)
++    EvaluationBackfill.objects.for_team(inputs.team_id).filter(pk=inputs.backfill_id).update(remaining_count=remaining)
++    logger.info(
++        "llma.evaluation_backfill_remainder",
++        backfill_id=inputs.backfill_id,
++        team_id=inputs.team_id,
++        remaining=remaining,
++        counted=scope.to_evaluate,
++        in_flight=inputs.in_flight,
++    )
++
++
++@temporalio.activity.defn
++async def measure_evaluation_backfill_remainder_activity(inputs: MeasureRemainderInputs) -> None:
++    await database_sync_to_async(_measure_backfill_remainder, thread_sensitive=False)(inputs)
++
++
+ @temporalio.workflow.defn(name=BACKFILL_WORKFLOW_NAME)
+ class EvaluationBackfillWorkflow(PostHogWorkflow):
+     inputs_cls = EvaluationBackfillInputs
+@@ -402,6 +473,28 @@ async def _dispatch_batch(self, inputs: EvaluationBackfillInputs, tick: PrepareT
+             schedule_to_close_timeout=ACTIVITY_SCHEDULE_TO_CLOSE,
+             retry_policy=ACTIVITY_RETRY_POLICY,
+         )
++        if advance.finished:
++            # After the advance, never before it: inserting an activity ahead of one an in-flight
++            # history already recorded breaks replay. The row therefore completes with no count
++            # for a moment, and a null count states that rather than claiming full coverage.
++            try:
++                await temporalio.workflow.execute_activity(
++                    measure_evaluation_backfill_remainder_activity,
++                    MeasureRemainderInputs(
++                        backfill_id=inputs.backfill_id, team_id=inputs.team_id, in_flight=dispatched
++                    ),
++                    start_to_close_timeout=timedelta(seconds=120),
++                    schedule_to_close_timeout=ACTIVITY_SCHEDULE_TO_CLOSE,
++                    retry_policy=ACTIVITY_RETRY_POLICY,
++                )
++            except Exception as error:
++                # The walk is done either way, so failing the tick here would spend a consecutive
++                # failure and log at exception level over a number the row can live without.
++                if is_cancelled_exception(error):
++                    raise
++                temporalio.workflow.logger.warning(
++                    "llma.evaluation_backfill_remainder_failed", extra={"backfill_id": inputs.backfill_id}
++                )
+         return advance.finished
+ 
+     async def _handle_failed_tick(self, inputs: EvaluationBackfillInputs) -> None:
+diff --git a/products/ai_observability/backend/api/evaluation_backfills.py b/products/ai_observability/backend/api/evaluation_backfills.py
+index 86e42f91cecb..b44a56547de3 100644
+--- a/products/ai_observability/backend/api/evaluation_backfills.py
++++ b/products/ai_observability/backend/api/evaluation_backfills.py
+@@ -55,7 +55,7 @@
+ 
+ from products.access_control.backend.property_access_control import get_restricted_properties_for_team
+ from products.ai_observability.backend.api.evaluations import EvaluationConditionSerializer
+-from products.ai_observability.backend.backfill_candidates import count_backfill_candidates
++from products.ai_observability.backend.backfill_candidates import BackfillScope, count_backfill_candidates
+ from products.ai_observability.backend.models.evaluation_backfill import ACTIVE_BACKFILL_STATUSES, EvaluationBackfill
+ from products.ai_observability.backend.models.evaluations import Evaluation, EvaluationTarget
+ 
+@@ -169,6 +169,12 @@ def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+ 
+ class EvaluationBackfillEstimateSerializer(serializers.Serializer):
+     total_units = serializers.IntegerField(help_text="Units that would be evaluated.")
++    already_evaluated_units = serializers.IntegerField(
++        help_text=(
++            "Units in the range this evaluation has already judged. They are excluded from "
++            "total_units unless rerun_existing is set."
++        )
++    )
+     unit = serializers.ChoiceField(
+         choices=EvaluationTarget.choices,
+         help_text="What one unit is: a generation, a trace, or a session.",
+@@ -219,6 +225,7 @@ class Meta:
+             "total_count",
+             "dispatched_count",
+             "skipped_count",
++            "remaining_count",
+             "created_by",
+             "created_at",
+             "finished_at",
+@@ -233,6 +240,12 @@ class Meta:
+             "total_count": {"help_text": "Units matched at creation; the ceiling on dispatched_count."},
+             "dispatched_count": {"help_text": "Units the backfill has started an evaluation for so far."},
+             "skipped_count": {"help_text": "Units the live path had already covered, so nothing was dispatched."},
++            "remaining_count": {
++                "help_text": (
++                    "Units still holding no result when the run finished, counted at that moment. "
++                    "Zero means the window is covered, whoever graded it."
++                )
++            },
+             "created_at": {"help_text": "When the backfill was created."},
+             "finished_at": {"help_text": "When the backfill reached a terminal status; null while it runs."},
+         }
+@@ -428,7 +441,7 @@ def _count(
+         window_start: datetime,
+         window_end: datetime,
+         rerun_existing: bool,
+-    ) -> int:
++    ) -> BackfillScope:
+         try:
+             return count_backfill_candidates(
+                 team=self.team,
+@@ -455,10 +468,11 @@ def estimate(self, request: Request, **kwargs: Any) -> Response:
+         data = self._validated_request(request)
+         window = self._clamped_window(evaluation, data)
+         conditions = self._conditions(evaluation, data)
+-        total = self._count(evaluation, conditions, window.start, window.end, data["rerun_existing"])
++        scope = self._count(evaluation, conditions, window.start, window.end, data["rerun_existing"])
+         response = EvaluationBackfillEstimateSerializer(
+             {
+-                "total_units": total,
++                "total_units": scope.to_evaluate,
++                "already_evaluated_units": scope.already_judged,
+                 "unit": evaluation.target,
+                 "window_start": window.start,
+                 "window_end": window.end,
+@@ -543,9 +557,13 @@ def create(self, request: Request, **kwargs: Any) -> Response:
+ 
+         conditions = self._conditions(evaluation, data)
+         rerun_existing = data["rerun_existing"]
+-        total = self._count(evaluation, conditions, window.start, window.end, rerun_existing)
+-        if total == 0:
+-            raise ValidationError(f"No {evaluation.target}s in this range match these conditions. Try a wider range.")
++        scope = self._count(evaluation, conditions, window.start, window.end, rerun_existing)
++        if scope.to_evaluate == 0:
++            raise ValidationError(
++                f"Every {evaluation.target} in this range already has a result."
++                if scope.already_judged
++                else f"No {evaluation.target}s in this range match these conditions. Try a wider range."
++            )
+ 
+         try:
+             backfill = EvaluationBackfill.objects.for_team(self.team_id).create(
+@@ -556,7 +574,7 @@ def create(self, request: Request, **kwargs: Any) -> Response:
+                 target=evaluation.target,
+                 conditions=conditions,
+                 rerun_existing=rerun_existing,
+-                total_count=total,
++                total_count=scope.to_evaluate,
+                 created_by=cast(User, request.user),
+             )
+         except IntegrityError:
+diff --git a/products/ai_observability/backend/backfill_candidates.py b/products/ai_observability/backend/backfill_candidates.py
+index ba107c06ded1..ffb71afbdd59 100644
+--- a/products/ai_observability/backend/backfill_candidates.py
++++ b/products/ai_observability/backend/backfill_candidates.py
+@@ -398,6 +398,25 @@ def _heavy_matches(
+     return {str(row[0]) for row in rows}
+ 
+ 
++@frozen
++class BackfillScope:
++    """What a window holds, split by whether the evaluation has judged the unit already.
++
++    `to_evaluate` is what the run would grade, so the toggle decides which side of the split it
++    takes. `already_judged` is reported either way: a zero estimate means nothing is left, and
++    without that second number the surface cannot tell that apart from an empty range.
++    """
++
++    to_evaluate: int
++    already_judged: int
++
++
++def _scope_from_counts(rows: list[tuple[Any, ...]], rerun_existing: bool) -> BackfillScope:
++    """Turn the `(total, judged)` pair both count queries return into a scope."""
++    total, judged = (int(rows[0][0]), int(rows[0][1])) if rows else (0, 0)
++    return BackfillScope(to_evaluate=total if rerun_existing else total - judged, already_judged=judged)
++
++
+ def count_backfill_candidates(
+     *,
+     team: Team,
+@@ -408,7 +427,9 @@ def count_backfill_candidates(
+     window_start: datetime,
+     window_end: datetime,
+     rerun_existing: bool,
+-) -> int:
++) -> BackfillScope:
++    # The scan is the expensive half, so both numbers come out of one pass: the dedupe moves from
++    # the filter into a pair of conditional counts over the same units.
+     units = _units_query(
+         team=team,
+         evaluation_id=evaluation_id,
+@@ -418,12 +439,27 @@ def count_backfill_candidates(
+         scan_start=window_start,
+         window_start=window_start,
+         window_end=window_end,
+-        rerun_existing=rerun_existing,
++        rerun_existing=True,
+     )
++    judged = ast.Call(
++        name="not",
++        args=[
++            _not_already_evaluated(
++                unit_key=ast.Field(chain=["unit_id"]),
++                evaluation_id=evaluation_id,
++                target=target,
++                window_start=window_start,
++                window_end=window_end,
++                settle_horizon=settle_horizon,
++            )
++        ],
++    )
++    # `countIf` over the judged half only, because negating it would put the whole dedupe subquery
++    # in the statement a second time. The other half is the difference from the total.
++    counts: list[ast.Expr] = [ast.Call(name="count", args=[]), ast.Call(name="countIf", args=[judged])]
+     if not reads_heavy_properties(conditions):
+-        query = ast.SelectQuery(select=[ast.Call(name="count", args=[])], select_from=ast.JoinExpr(table=units))
+-        rows = _run(query, team=team, query_type=COUNT_QUERY_TYPE)
+-        return int(rows[0][0]) if rows else 0
++        query = ast.SelectQuery(select=counts, select_from=ast.JoinExpr(table=units))
++        return _scope_from_counts(_run(query, team=team, query_type=COUNT_QUERY_TYPE), rerun_existing)
+ 
+     # `events` cannot judge a heavy filter, and the traces to ask ai_events about are exactly what
+     # is being counted, so the count asks ai_events for all of it and comes back with one number.
+@@ -433,28 +469,19 @@ def count_backfill_candidates(
+     ai_units = parse_select(_AI_UNITS_SQL)
+     assert isinstance(ai_units, ast.SelectQuery)
+     rows = _run_on_ai_events(
+-        ast.SelectQuery(select=[ast.Call(name="count", args=[])], select_from=ast.JoinExpr(table=ai_units)),
++        ast.SelectQuery(select=counts, select_from=ast.JoinExpr(table=ai_units)),
+         {
+             "unit_key": ai_unit_key,
+             "max_id_bytes": ast.Constant(value=MAX_CANDIDATE_ID_BYTES),
+             "window_start": ast.Constant(value=window_start),
+             "window_end": ast.Constant(value=window_end),
+             "condition_filter": build_condition_filter(conditions, team, ai_unit_key) or ast.Constant(value=True),
+-            "not_already_evaluated": ast.Constant(value=True)
+-            if rerun_existing
+-            else _not_already_evaluated(
+-                unit_key=ai_unit_key,
+-                evaluation_id=evaluation_id,
+-                target=target,
+-                window_start=window_start,
+-                window_end=window_end,
+-                settle_horizon=settle_horizon,
+-            ),
++            "not_already_evaluated": ast.Constant(value=True),
+         },
+         team=team,
+         query_type=COUNT_QUERY_TYPE,
+     )
+-    return int(rows[0][0]) if rows else 0
++    return _scope_from_counts(rows, rerun_existing)
+ 
+ 
+ def fetch_backfill_candidates(
+diff --git a/products/ai_observability/backend/migrations/0057_evaluationbackfill_remaining_count.py b/products/ai_observability/backend/migrations/0057_evaluationbackfill_remaining_count.py
+new file mode 100644
+index 000000000000..e0f5c0712076
+--- /dev/null
++++ b/products/ai_observability/backend/migrations/0057_evaluationbackfill_remaining_count.py
+@@ -0,0 +1,22 @@
++# Generated by Django 5.2.17 on 2026-09-24 12:03
++
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("ai_observability", "0056_alter_evaluationbackfill_options"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="evaluationbackfill",
++            name="remaining_count",
++            field=models.PositiveIntegerField(
++                blank=True,
++                default=None,
++                help_text="Units the run finished without a result for, counted when it ended rather than inferred, and discounting the evaluations it had just started. A run leaves one behind when its evaluation could not start or came back unusable, and running the backfill again picks it up. Null means nothing counted the window.",
++                null=True,
++            ),
++        ),
++    ]
+diff --git a/products/ai_observability/backend/migrations/max_migration.txt b/products/ai_observability/backend/migrations/max_migration.txt
+index 9c676ca33294..335b55997bcc 100644
+--- a/products/ai_observability/backend/migrations/max_migration.txt
++++ b/products/ai_observability/backend/migrations/max_migration.txt
+@@ -1 +1 @@
+-0056_alter_evaluationbackfill_options
++0057_evaluationbackfill_remaining_count
+diff --git a/products/ai_observability/backend/models/evaluation_backfill.py b/products/ai_observability/backend/models/evaluation_backfill.py
+index 2fbfc4c7d958..c1c6ff2dcc42 100644
+--- a/products/ai_observability/backend/models/evaluation_backfill.py
++++ b/products/ai_observability/backend/models/evaluation_backfill.py
+@@ -49,6 +49,17 @@ class EvaluationBackfill(TeamScopedRootMixin, UUIDModel):
+     skipped_count = models.PositiveIntegerField(
+         default=0, help_text="Units whose child workflow already existed, so the live path had them."
+     )
++    remaining_count = models.PositiveIntegerField(
++        null=True,
++        blank=True,
++        default=None,
++        help_text=(
++            "Units the run finished without a result for, counted when it ended rather than "
++            "inferred, and discounting the evaluations it had just started. A run leaves one "
++            "behind when its evaluation could not start or came back unusable, and running the "
++            "backfill again picks it up. Null means nothing counted the window."
++        ),
++    )
+ 
+     created_by = models.ForeignKey(
+         "posthog.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+", db_constraint=False
+diff --git a/products/ai_observability/frontend/evaluations/backfillConditions.ts b/products/ai_observability/frontend/evaluations/backfillConditions.ts
+index 12c6c47dfdd9..7f7860d77227 100644
+--- a/products/ai_observability/frontend/evaluations/backfillConditions.ts
++++ b/products/ai_observability/frontend/evaluations/backfillConditions.ts
+@@ -1,6 +1,7 @@
+ import { dayjs } from 'lib/dayjs'
++import { clamp } from 'lib/utils/numbers'
+ 
+-import type { EvaluationBackfillConditionApi } from '../generated/api.schemas'
++import type { EvaluationBackfillApi, EvaluationBackfillConditionApi } from '../generated/api.schemas'
+ 
+ export function backfillSamplingLabel(condition: EvaluationBackfillConditionApi): string {
+     const percent = condition.rollout_percentage ?? 100
+@@ -18,3 +19,14 @@ export function backfillRangeDateFormat(start: string, end: string, now: dayjs.D
+     const sameYear = dayjs(start).isSame(now, 'year') && dayjs(end).isSame(now, 'year')
+     return sameYear ? 'MMM D' : 'MMM D, YYYY'
+ }
++
++export function backfillCoveredCount(backfill: EvaluationBackfillApi): number {
++    // A finished run knows what the window still owed. Until then, coverage is what the walk itself
++    // handled. The total is the estimate taken at creation while the remainder is counted later, so
++    // an event arriving in between can leave more owed than the total ever held.
++    const covered =
++        backfill.status === 'completed' && backfill.remaining_count !== null
++            ? backfill.total_count - backfill.remaining_count
++            : backfill.dispatched_count + backfill.skipped_count
++    return clamp(covered, 0, backfill.total_count)
++}
+diff --git a/products/ai_observability/frontend/evaluations/components/EvaluationBackfillsTab.tsx b/products/ai_observability/frontend/evaluations/components/EvaluationBackfillsTab.tsx
+index 98c41eb12f5b..1af9457e247d 100644
+--- a/products/ai_observability/frontend/evaluations/components/EvaluationBackfillsTab.tsx
++++ b/products/ai_observability/frontend/evaluations/components/EvaluationBackfillsTab.tsx
+@@ -31,7 +31,7 @@ import type {
+     EvaluationBackfillConditionApi,
+     EvaluationBackfillStatusEnumApi,
+ } from '../../generated/api.schemas'
+-import { backfillRangeDateFormat, backfillSamplingLabel } from '../backfillConditions'
++import { backfillCoveredCount, backfillRangeDateFormat, backfillSamplingLabel } from '../backfillConditions'
+ import { evaluationBackfillsLogic } from '../evaluationBackfillsLogic'
+ import { EvaluationTriggers } from './EvaluationTriggers'
+ 
+@@ -51,6 +51,15 @@ const BACKFILL_STATUS_TAG: Record<EvaluationBackfillStatusEnumApi, { label: stri
+ 
+ const WINDOW_TIME_FORMAT = { formatDate: 'MMM D, YYYY', formatTime: 'HH:mm' }
+ 
++function backfillLeftBehindLabel(backfill: EvaluationBackfillApi): string | null {
++    // Null coverage means nothing counted the window, and a covered run is already told by the
++    // full bar, so only a run that left work behind has something to say.
++    if (!backfill.remaining_count) {
++        return null
++    }
++    return `${pluralize(backfill.remaining_count, backfill.target)} weren't evaluated. Start another backfill over this range to retry them.`
++}
++
+ function backfillUnitPlural(backfill: EvaluationBackfillApi): string {
+     return pluralize(2, backfill.target, undefined, false)
+ }
+@@ -94,6 +103,7 @@ export function EvaluationBackfillsTab({
+         estimate,
+         estimateError,
+         estimateLoading,
++        estimateSummary,
+         expandedBackfillIds,
+         rerunExisting,
+         settleWait,
+@@ -244,29 +254,36 @@ export function EvaluationBackfillsTab({
+             },
+         },
+         {
+-            title: 'Started',
++            title: 'Covered',
+             key: 'progress',
+             render: (_, backfill) => {
+-                // The walk has handled a unit once it started it, or skipped it because the live
+-                // path had covered it already. A rerun over a window that keeps growing can hand
+-                // back more than the total it started from, so the bar stops at that total.
+-                const handled = Math.min(backfill.dispatched_count + backfill.skipped_count, backfill.total_count)
++                // While the walk runs, coverage is what it has handled: started, or skipped because
++                // the live path had the unit already. Once it ends, the measured remainder is the
++                // truer number, because a unit the live path judged mid-run is covered too and the
++                // walk never saw it.
++                const measured = backfill.status === 'completed' && backfill.remaining_count !== null
++                const covered = backfillCoveredCount(backfill)
+                 return (
+-                    <Tooltip title="How many units this backfill has started evaluating. It does not track which of them have finished.">
++                    <Tooltip
++                        title={
++                            measured
++                                ? `How many ${backfillUnitPlural(backfill)} hold a result, counted when the run ended. The evaluation grades new data on its own, so it covers some of them without this run.`
++                                : `How many ${backfillUnitPlural(backfill)} this backfill has started evaluating or skipped because the evaluation already had them. It does not track which of them have finished.`
++                        }
++                    >
+                         <div className="min-w-24">
+                             <span className="whitespace-nowrap" translate="no">
+-                                {backfill.dispatched_count.toLocaleString('en-US')} /{' '}
+-                                {backfill.total_count.toLocaleString('en-US')}
++                                {covered.toLocaleString('en-US')} / {backfill.total_count.toLocaleString('en-US')}
+                             </span>
+-                            {backfill.skipped_count > 0 && (
++                            {backfill.dispatched_count > 0 && (
+                                 <span className="text-muted whitespace-nowrap">
+                                     {' '}
+-                                    · {backfill.skipped_count.toLocaleString('en-US')} skipped
++                                    · {backfill.dispatched_count.toLocaleString('en-US')} started
+                                 </span>
+                             )}
+                             <LemonProgress
+                                 className="mt-1"
+-                                percent={backfill.total_count > 0 ? (handled / backfill.total_count) * 100 : 0}
++                                percent={backfill.total_count > 0 ? (covered / backfill.total_count) * 100 : 0}
+                                 strokeColor={backfill.status === 'running' ? undefined : 'var(--border)'}
+                             />
+                         </div>
+@@ -374,8 +391,8 @@ export function EvaluationBackfillsTab({
+                             ? 'Counting…'
+                             : estimateError
+                               ? estimateError
+-                              : estimate
+-                                ? `${pluralize(estimate.total_units, estimate.unit)} would be evaluated${
++                              : estimateSummary
++                                ? `${estimateSummary}${
+                                       clampedWindow ? ` between ${clampedWindow.start} and ${clampedWindow.end}` : ''
+                                   }`
+                                 : null}
+@@ -425,60 +442,63 @@ export function EvaluationBackfillsTab({
+                     isRowExpanded: (backfill) => (expandedBackfillIds.includes(backfill.id) ? 1 : -1),
+                     onRowExpand: (backfill) => expandBackfill(backfill.id),
+                     onRowCollapse: (backfill) => collapseBackfill(backfill.id),
+-                    expandedRowRender: (backfill) => (
+-                        <div className="flex items-center justify-between gap-4 px-2 py-3">
+-                            <div className="flex flex-col gap-2 min-w-0">
+-                                {backfill.conditions.map((condition, index) => (
+-                                    <div key={index} className="flex items-center gap-1 flex-wrap">
+-                                        <ConditionSetScope
+-                                            condition={condition}
+-                                            unitPlural={backfillUnitPlural(backfill)}
+-                                        />
+-                                        <span className="text-muted whitespace-nowrap">
+-                                            {backfillSamplingLabel(condition)}
++                    expandedRowRender: (backfill) => {
++                        const leftBehind = backfillLeftBehindLabel(backfill)
++                        return (
++                            <div className="flex items-center justify-between gap-4 px-2 py-3">
++                                <div className="flex flex-col gap-2 min-w-0">
++                                    {backfill.conditions.map((condition, index) => (
++                                        <div key={index} className="flex items-center gap-1 flex-wrap">
++                                            <ConditionSetScope
++                                                condition={condition}
++                                                unitPlural={backfillUnitPlural(backfill)}
++                                            />
++                                            <span className="text-muted whitespace-nowrap">
++                                                {backfillSamplingLabel(condition)}
++                                            </span>
++                                        </div>
++                                    ))}
++                                    <div className="flex items-center gap-2 flex-wrap text-muted">
++                                        <span className="flex items-center gap-1">
++                                            <TZLabel
++                                                time={backfill.window_start}
++                                                timestampStyle="absolute"
++                                                {...WINDOW_TIME_FORMAT}
++                                            />
++                                            <span>→</span>
++                                            <TZLabel
++                                                time={backfill.window_end}
++                                                timestampStyle="absolute"
++                                                {...WINDOW_TIME_FORMAT}
++                                            />
++                                        </span>
++                                        <span>·</span>
++                                        <span>
++                                            {backfill.dispatched_count.toLocaleString('en-US')} started,{' '}
++                                            {backfill.skipped_count.toLocaleString('en-US')} skipped, out of{' '}
++                                            {pluralize(backfill.total_count, backfill.target)}
++                                            {backfill.rerun_existing ? ' in range' : ' that had no result'}
+                                         </span>
+                                     </div>
+-                                ))}
+-                                <div className="flex items-center gap-2 flex-wrap text-muted">
+-                                    <span className="flex items-center gap-1">
+-                                        <TZLabel
+-                                            time={backfill.window_start}
+-                                            timestampStyle="absolute"
+-                                            {...WINDOW_TIME_FORMAT}
+-                                        />
+-                                        <span>→</span>
+-                                        <TZLabel
+-                                            time={backfill.window_end}
+-                                            timestampStyle="absolute"
+-                                            {...WINDOW_TIME_FORMAT}
+-                                        />
+-                                    </span>
+-                                    <span>·</span>
+-                                    <span>
+-                                        {backfill.dispatched_count.toLocaleString('en-US')} started,{' '}
+-                                        {backfill.skipped_count.toLocaleString('en-US')} skipped, out of{' '}
+-                                        {pluralize(backfill.total_count, backfill.target)} in range
+-                                        {backfill.rerun_existing &&
+-                                            `, including ${backfillUnitPlural(backfill)} that already had a result`}
+-                                    </span>
++                                    {leftBehind && <div className="text-warning">{leftBehind}</div>}
+                                 </div>
++                                <LemonButton
++                                    size="xsmall"
++                                    type="secondary"
++                                    to={
++                                        combineUrl(router.values.location.pathname, {
++                                            ...router.values.searchParams,
++                                            evaluation_tab: 'runs',
++                                            backfill_id: backfill.id,
++                                        }).url
++                                    }
++                                    data-attr="llma-eval-backfill-view-results"
++                                >
++                                    View results from this run
++                                </LemonButton>
+                             </div>
+-                            <LemonButton
+-                                size="xsmall"
+-                                type="secondary"
+-                                to={
+-                                    combineUrl(router.values.location.pathname, {
+-                                        ...router.values.searchParams,
+-                                        evaluation_tab: 'runs',
+-                                        backfill_id: backfill.id,
+-                                    }).url
+-                                }
+-                                data-attr="llma-eval-backfill-view-results"
+-                            >
+-                                View results from this run
+-                            </LemonButton>
+-                        </div>
+-                    ),
++                        )
++                    },
+                 }}
+                 emptyState={
+                     backfillsError ? (
+diff --git a/products/ai_observability/frontend/evaluations/evaluationBackfillsLogic.ts b/products/ai_observability/frontend/evaluations/evaluationBackfillsLogic.ts
+index 0f39bb1c8eb4..e548be2b6b4a 100644
+--- a/products/ai_observability/frontend/evaluations/evaluationBackfillsLogic.ts
++++ b/products/ai_observability/frontend/evaluations/evaluationBackfillsLogic.ts
+@@ -5,6 +5,7 @@ import { dayjs } from 'lib/dayjs'
+ import { lemonToast } from 'lib/lemon-ui/LemonToast'
+ import { dateStringToDayJs } from 'lib/utils/dateFilters'
+ import { humanFriendlyDuration } from 'lib/utils/durations'
++import { pluralize } from 'lib/utils/strings'
+ import { teamLogic } from 'scenes/teamLogic'
+ 
+ import {
+@@ -89,6 +90,10 @@ function backfillErrorMessage(error: unknown, fallback: string): string {
+     return evaluationErrorMessage(error, fallback)
+ }
+ 
++// How long a finished run keeps refreshing while its coverage count is still on its way. It
++// matches the counting activity's own schedule-to-close, so a retried count is not missed.
++const COVERAGE_GRACE_SECONDS = 600
++
+ /** Each consecutive list failure doubles the wait, so an API that is already struggling is not
+  * polled at full rate. The wait returns to the base interval as soon as one load succeeds. */
+ function pollDelayMs(consecutiveFailures: number): number {
+@@ -112,12 +117,14 @@ export interface evaluationBackfillsLogicValues {
+     estimate: EvaluationBackfillEstimateApi | null
+     estimateError: string | null
+     estimateLoading: boolean
++    estimateSummary: string | null
+     expandedBackfillIds: string[]
+     hasActiveBackfill: boolean
+     pollFailures: number
+     requestedWindow: BackfillWindow | null
+     rerunExisting: boolean
+     settleWait: string | null
++    shouldPoll: boolean
+     startDisabledReason: string | undefined
+     transitioningIds: string[]
+     unit: EvaluationTargetEnumApi
+@@ -197,6 +204,7 @@ export interface evaluationBackfillsLogicMeta {
+     key: string
+     __keaTypeGenInternalSelectorTypes: {
+         hasActiveBackfill: (backfills: EvaluationBackfillApi[]) => boolean
++        shouldPoll: (backfills: EvaluationBackfillApi[], hasActiveBackfill: boolean) => boolean
+         unit: (
+             estimate: EvaluationBackfillEstimateApi | null,
+             evaluation: EvaluationConfig | null
+@@ -208,6 +216,7 @@ export interface evaluationBackfillsLogicMeta {
+             estimateLoading: boolean,
+             estimateError: string | null
+         ) => string | undefined
++        estimateSummary: (estimate: EvaluationBackfillEstimateApi | null) => string | null
+         settleWait: (estimate: EvaluationBackfillEstimateApi | null) => string | null
+         clampedWindow: (
+             estimate: EvaluationBackfillEstimateApi | null,
+@@ -349,6 +358,22 @@ export const evaluationBackfillsLogic = kea<evaluationBackfillsLogicType>([
+             (s) => [s.backfills],
+             (backfills: EvaluationBackfillApi[]): boolean => backfills.some((b) => b.status === 'running'),
+         ],
++        // A row completes just before its coverage is counted, so polling has to outlive the run
++        // itself or the table keeps the number it had in that gap. The age bound is what stops a
++        // row that will never be counted, from before coverage was recorded or after a failed
++        // count, from polling forever.
++        shouldPoll: [
++            (s) => [s.backfills, s.hasActiveBackfill],
++            (backfills: EvaluationBackfillApi[], hasActiveBackfill: boolean): boolean =>
++                hasActiveBackfill ||
++                backfills.some(
++                    (b) =>
++                        b.status === 'completed' &&
++                        b.remaining_count === null &&
++                        !!b.finished_at &&
++                        dayjs().diff(dayjs(b.finished_at), 'second') < COVERAGE_GRACE_SECONDS
++                ),
++        ],
+         unit: [
+             (s) => [s.estimate, s.evaluation],
+             (
+@@ -382,11 +407,29 @@ export const evaluationBackfillsLogic = kea<evaluationBackfillsLogicType>([
+                     return 'Pick a time range to see how many units match'
+                 }
+                 if (estimate.total_units === 0) {
+-                    return 'Nothing in this range matches these conditions'
++                    return estimate.already_evaluated_units > 0
++                        ? `Every ${estimate.unit} in this range already has a result`
++                        : 'Nothing in this range matches these conditions'
+                 }
+                 return undefined
+             },
+         ],
++        // A zero count has two causes the user cannot tell apart, and an evaluation that runs
++        // live covers its own range, so the judged count is what makes the second one readable.
++        estimateSummary: [
++            (s) => [s.estimate],
++            (estimate: EvaluationBackfillEstimateApi | null): string | null => {
++                if (!estimate) {
++                    return null
++                }
++                if (estimate.total_units > 0) {
++                    return `${pluralize(estimate.total_units, estimate.unit)} would be evaluated`
++                }
++                return estimate.already_evaluated_units > 0
++                    ? `All ${pluralize(estimate.already_evaluated_units, estimate.unit)} in this range already have a result`
++                    : `No ${pluralize(0, estimate.unit, undefined, false)} in this range match these conditions`
++            },
++        ],
+         // The server holds the window back by the evaluation's wait, so the gap between the
+         // counted end and now is that wait. Reading it back keeps one definition of the rule.
+         settleWait: [
+@@ -429,7 +472,7 @@ export const evaluationBackfillsLogic = kea<evaluationBackfillsLogicType>([
+         /** Arms the next poll off the list the logic last saw, so a failed request keeps the poll
+          * alive instead of ending it. */
+         const schedulePoll = (): void => {
+-            if (!values.hasActiveBackfill) {
++            if (!values.shouldPoll) {
+                 cache.disposables.dispose(POLL_KEY)
+                 return
+             }
+@@ -464,7 +507,7 @@ export const evaluationBackfillsLogic = kea<evaluationBackfillsLogicType>([
+                         limit: BACKFILL_PAGE_SIZE,
+                     })
+                     actions.loadBackfillsSuccess(response.results ?? [])
+-                    if (values.hasActiveBackfill) {
++                    if (values.shouldPoll) {
+                         cache.recountWhenIdle = true
+                     } else if (cache.recountWhenIdle) {
+                         // A finished run changed which units already have a result, so the count is
+diff --git a/products/ai_observability/frontend/generated/api.schemas.ts b/products/ai_observability/frontend/generated/api.schemas.ts
+index 1456850cd9d6..b89a6d2bd522 100644
+--- a/products/ai_observability/frontend/generated/api.schemas.ts
++++ b/products/ai_observability/frontend/generated/api.schemas.ts
+@@ -1129,6 +1129,11 @@ export interface EvaluationBackfillApi {
+     readonly dispatched_count: number
+     /** Units the live path had already covered, so nothing was dispatched. */
+     readonly skipped_count: number
++    /**
++     * Units still holding no result when the run finished, counted at that moment. Zero means the window is covered, whoever graded it.
++     * @nullable
++     */
++    readonly remaining_count: number | null
+     /** User who started the backfill. */
+     readonly created_by: UserBasicApi | null
+     /** When the backfill was created. */
+@@ -1163,6 +1168,8 @@ export interface EvaluationBackfillRequestApi {
+ export interface EvaluationBackfillEstimateApi {
+     /** Units that would be evaluated. */
+     total_units: number
++    /** Units in the range this evaluation has already judged. They are excluded from total_units unless rerun_existing is set. */
++    already_evaluated_units: number
+     /** What one unit is: a generation, a trace, or a session.
+      *
+      * * `generation` - Generation
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index e99e103af767..18e4371ca127 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -38007,6 +38007,11 @@ export namespace Schemas {
+       readonly dispatched_count: number;
+       /** Units the live path had already covered, so nothing was dispatched. */
+       readonly skipped_count: number;
++      /**
++         * Units still holding no result when the run finished, counted at that moment. Zero means the window is covered, whoever graded it.
++         * @nullable
++         */
++      readonly remaining_count: number | null;
+       /** User who started the backfill. */
+       readonly created_by: UserBasic | null;
+       /** When the backfill was created. */
+@@ -38021,6 +38026,8 @@ export namespace Schemas {
+     export interface EvaluationBackfillEstimate {
+       /** Units that would be evaluated. */
+       total_units: number;
++      /** Units in the range this evaluation has already judged. They are excluded from total_units unless rerun_existing is set. */
++      already_evaluated_units: number;
+       /** What one unit is: a generation, a trace, or a session.
+        *
+        * * `generation` - Generation

@@ -1,0 +1,203 @@
+diff --git a/frontend/src/mocks/fixtures/api/projects/team_id/insights/trendsBoxPlot.json b/frontend/src/mocks/fixtures/api/projects/team_id/insights/trendsBoxPlot.json
+index b3b3b91b5f93..99b710920e86 100644
+--- a/frontend/src/mocks/fixtures/api/projects/team_id/insights/trendsBoxPlot.json
++++ b/frontend/src/mocks/fixtures/api/projects/team_id/insights/trendsBoxPlot.json
+@@ -16,6 +16,7 @@
+         {
+             "day": "2022-03-05",
+             "label": "5-Mar-2022",
++            "count": 12,
+             "min": 12.5,
+             "p25": 45.0,
+             "median": 78.3,
+@@ -26,6 +27,7 @@
+         {
+             "day": "2022-03-06",
+             "label": "6-Mar-2022",
++            "count": 9,
+             "min": 8.0,
+             "p25": 35.0,
+             "median": 62.0,
+@@ -36,6 +38,7 @@
+         {
+             "day": "2022-03-07",
+             "label": "7-Mar-2022",
++            "count": 15,
+             "min": 20.0,
+             "p25": 55.0,
+             "median": 95.0,
+@@ -46,6 +49,7 @@
+         {
+             "day": "2022-03-08",
+             "label": "8-Mar-2022",
++            "count": 11,
+             "min": 5.0,
+             "p25": 28.0,
+             "median": 50.0,
+@@ -56,6 +60,7 @@
+         {
+             "day": "2022-03-09",
+             "label": "9-Mar-2022",
++            "count": 13,
+             "min": 15.0,
+             "p25": 42.0,
+             "median": 72.0,
+@@ -66,6 +71,7 @@
+         {
+             "day": "2022-03-10",
+             "label": "10-Mar-2022",
++            "count": 18,
+             "min": 30.0,
+             "p25": 65.0,
+             "median": 105.0,
+@@ -76,6 +82,7 @@
+         {
+             "day": "2022-03-11",
+             "label": "11-Mar-2022",
++            "count": 14,
+             "min": 18.0,
+             "p25": 50.0,
+             "median": 88.0,
+diff --git a/frontend/src/queries/schema.json b/frontend/src/queries/schema.json
+index 044649ebebb6..e853c5bb152c 100644
+--- a/frontend/src/queries/schema.json
++++ b/frontend/src/queries/schema.json
+@@ -6973,6 +6973,9 @@
+         "BoxPlotDatum": {
+             "additionalProperties": false,
+             "properties": {
++                "count": {
++                    "$ref": "#/definitions/integer"
++                },
+                 "day": {
+                     "type": "string"
+                 },
+diff --git a/frontend/src/queries/schema/schema-general.ts b/frontend/src/queries/schema/schema-general.ts
+index 997abcaaa7b0..a8226ad2b319 100644
+--- a/frontend/src/queries/schema/schema-general.ts
++++ b/frontend/src/queries/schema/schema-general.ts
+@@ -1989,6 +1989,7 @@ export const TRENDS_FILTER_PROPERTIES = new Set<keyof TrendsFilter>([
+ export interface BoxPlotDatum {
+     day: string
+     label: string
++    count?: integer
+     min: number
+     p25: number
+     median: number
+diff --git a/posthog/schema.py b/posthog/schema.py
+index e155fba4204a..3c9bd336c5e9 100644
+--- a/posthog/schema.py
++++ b/posthog/schema.py
+@@ -5279,6 +5279,7 @@ class BoxPlotDatum(BaseModel):
+     model_config = ConfigDict(
+         extra="forbid",
+     )
++    count: int | None = None
+     day: str
+     label: str
+     max: float
+diff --git a/products/dashboards/frontend/generated/api.schemas.ts b/products/dashboards/frontend/generated/api.schemas.ts
+index 318ed813cc73..80a565b21322 100644
+--- a/products/dashboards/frontend/generated/api.schemas.ts
++++ b/products/dashboards/frontend/generated/api.schemas.ts
+@@ -2503,6 +2503,7 @@ export interface PropertyGroupFilterApi {
+ }
+ 
+ export interface BoxPlotDatumApi {
++    count?: number | null
+     day: string
+     label: string
+     max: number
+diff --git a/products/desktop/packages/api-client/src/generated.ts b/products/desktop/packages/api-client/src/generated.ts
+index bffda9d998ba..9fec9351d7e5 100644
+--- a/products/desktop/packages/api-client/src/generated.ts
++++ b/products/desktop/packages/api-client/src/generated.ts
+@@ -1954,6 +1954,7 @@ export namespace Schemas {
+         values: Array<PropertyGroupFilterValue>;
+     };
+     export type BoxPlotDatum = {
++        count?: (number | null) | undefined;
+         day: string;
+         label: string;
+         max: number;
+diff --git a/products/persons/frontend/generated/api.schemas.ts b/products/persons/frontend/generated/api.schemas.ts
+index aff144798b88..2b3864ddec4b 100644
+--- a/products/persons/frontend/generated/api.schemas.ts
++++ b/products/persons/frontend/generated/api.schemas.ts
+@@ -1594,6 +1594,7 @@ export interface PropertyGroupFilterApi {
+ }
+ 
+ export interface BoxPlotDatumApi {
++    count?: number | null
+     day: string
+     label: string
+     max: number
+diff --git a/products/product_analytics/backend/hogql_queries/trends/boxplot_trends_query_runner.py b/products/product_analytics/backend/hogql_queries/trends/boxplot_trends_query_runner.py
+index 7d39856ae69b..5b219678a51f 100644
+--- a/products/product_analytics/backend/hogql_queries/trends/boxplot_trends_query_runner.py
++++ b/products/product_analytics/backend/hogql_queries/trends/boxplot_trends_query_runner.py
+@@ -130,6 +130,7 @@ def _calculate(self):
+                 results_by_day[key] = BoxPlotDatum(
+                     day=key,
+                     label=format_label_date(day_val, self.query_date_range, self.team.week_start_day),
++                    count=int(row[7]),
+                     min=float(row[1]) if row[1] is not None else 0.0,
+                     p25=float(row[2]) if row[2] is not None else 0.0,
+                     median=float(row[3]) if row[3] is not None else 0.0,
+@@ -149,6 +150,7 @@ def _calculate(self):
+                         BoxPlotDatum(
+                             day=key,
+                             label=format_label_date(dt, self.query_date_range, self.team.week_start_day),
++                            count=0,
+                             min=0.0,
+                             p25=0.0,
+                             median=0.0,
+@@ -198,6 +200,7 @@ def _boxplot_stats_select(field_expr: ast.Expr) -> list[ast.Expr]:
+             ),
+             ast.Alias(alias="max_val", expr=ast.Call(name="max", args=[field_expr])),
+             ast.Alias(alias="mean_val", expr=ast.Call(name="avg", args=[field_expr])),
++            ast.Alias(alias="count_val", expr=ast.Call(name="count", args=[field_expr])),
+         ]
+ 
+     def _build_standard_query(self, query_builder, agg_ops, series_node, events_filter, day_start) -> ast.SelectQuery:
+diff --git a/products/product_analytics/frontend/generated/api.schemas.ts b/products/product_analytics/frontend/generated/api.schemas.ts
+index 2495033fd9e5..6c2c41fa6559 100644
+--- a/products/product_analytics/frontend/generated/api.schemas.ts
++++ b/products/product_analytics/frontend/generated/api.schemas.ts
+@@ -1329,6 +1329,7 @@ export interface PropertyGroupFilterApi {
+ }
+ 
+ export interface BoxPlotDatumApi {
++    count?: number | null
+     day: string
+     label: string
+     max: number
+diff --git a/products/product_analytics/frontend/insights/trends/BoxPlot/BoxPlotResultsTable.tsx b/products/product_analytics/frontend/insights/trends/BoxPlot/BoxPlotResultsTable.tsx
+index 86a89a577682..958828f526b0 100644
+--- a/products/product_analytics/frontend/insights/trends/BoxPlot/BoxPlotResultsTable.tsx
++++ b/products/product_analytics/frontend/insights/trends/BoxPlot/BoxPlotResultsTable.tsx
+@@ -48,6 +48,12 @@ export function BoxPlotResultsTable(): JSX.Element | null {
+                     key: 'label',
+                     render: (_, datum: BoxPlotDatum) => datum.label,
+                 },
++                {
++                    title: 'Count',
++                    key: 'count',
++                    align: 'right',
++                    render: (_, datum: BoxPlotDatum) => datum.count?.toLocaleString() ?? '-',
++                },
+                 {
+                     title: 'Min',
+                     key: 'min',
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 507fa1732ce9..cde3bd4b47ef 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -5733,6 +5733,7 @@ export namespace Schemas {
+     }
+ 
+     export interface BoxPlotDatum {
++      count?: number | null;
+       day: string;
+       label: string;
+       max: number;

@@ -1,0 +1,56 @@
+diff --git a/docker-compose.hobby.yml b/docker-compose.hobby.yml
+index 756113017749..d43b6c80514e 100644
+--- a/docker-compose.hobby.yml
++++ b/docker-compose.hobby.yml
+@@ -123,6 +123,8 @@ services:
+             # AI provider keys for PostHog's AI features. Blank unless set in .env.
+             ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+             OPENAI_API_KEY: ${OPENAI_API_KEY:-}
++            OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
++            OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+         image: $REGISTRY_URL:$POSTHOG_APP_TAG
+         depends_on:
+             db:
+@@ -186,6 +188,8 @@ services:
+             # AI provider keys for PostHog's AI features. Blank unless set in .env.
+             ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+             OPENAI_API_KEY: ${OPENAI_API_KEY:-}
++            OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
++            OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+         depends_on:
+             - db
+             - redis7
+@@ -522,6 +526,8 @@ services:
+             # AI provider keys for PostHog's AI features. Blank unless set in .env.
+             ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+             OPENAI_API_KEY: ${OPENAI_API_KEY:-}
++            OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
++            OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+         depends_on:
+             - db
+             - redis7
+diff --git a/ee/settings.py b/ee/settings.py
+index 3ba1522ea699..61fa72e93c5a 100644
+--- a/ee/settings.py
++++ b/ee/settings.py
+@@ -96,6 +96,7 @@
+ ANTHROPIC_API_KEY = get_from_env("ANTHROPIC_API_KEY", "")
+ OPENAI_API_KEY = get_from_env("OPENAI_API_KEY", "")
+ OPENAI_BASE_URL = get_from_env("OPENAI_BASE_URL", "https://api.openai.com/v1")
++OPENAI_MODEL = get_from_env("OPENAI_MODEL", "gpt-4.1-mini")
+ 
+ # LLM Gateway (internal service for proxying LLM requests with rate limiting and attribution)
+ LLM_GATEWAY_URL = get_from_env("LLM_GATEWAY_URL", "http://localhost:3308" if DEBUG else "")
+diff --git a/posthog/llm/completions.py b/posthog/llm/completions.py
+index d17cbe891c87..376936758ae4 100644
+--- a/posthog/llm/completions.py
++++ b/posthog/llm/completions.py
+@@ -45,7 +45,7 @@ def hit_openai(
+         optional_params["response_format"] = response_format
+ 
+     result = openai_client.chat.completions.create(
+-        model="gpt-4.1-mini",
++        model=settings.OPENAI_MODEL,
+         temperature=0,
+         messages=messages,
+         user=user,  # The user ID is for tracking within OpenAI in case of overuse/abuse

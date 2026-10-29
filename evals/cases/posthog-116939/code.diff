@@ -1,0 +1,470 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 30e9bf31cfba..cc30fb8467de 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -13583,21 +13583,21 @@ snapshots:
+     scenes-app-replay-vision--experiment-variants-waiting-for-observations--light:
+         hash: v1.k794b7964.a1555dab4c0006028e8c240451c56c6aed5e31c8a8e68c893e3d6a07b562bba6.VYeYPsjZ_p0Rt4cbZzF7lbxjxurMjLXff9kJRsy49gU
+     scenes-app-replay-vision--home-watch-feed--dark:
+-        hash: v1.k794b7964.2f49725f7fc8058939b56b25742619a3b02a8e0e485258b09b3038fd647e1581.2ziFn3a3_CJk7A_YbZJqqn-jOlTJangjfnLcyHp0BBw
++        hash: v1.k794b7964.1781f0b3640482554b64106cfa5d2151143e1301d329a78bd6d053ec284cd50a.7JkhgjlkBl6Dl9j6uI2_ZHR3Uq9xT5qWrCaBBHJKLQo
+     scenes-app-replay-vision--home-watch-feed--light:
+         hash: v1.k794b7964.7119fa5e588c2763bbeee5e5bdb76b621f8d8609291dba0d9c065e8860a3ee6d.TDf10qFfSYUJohljt-AGKzhlPBv6e8q-fXq30frva5c
+     scenes-app-replay-vision--home-watch-feed-empty--dark:
+-        hash: v1.k794b7964.926bab41fb78cabf70493f52b629520842bcdb6fd7e0a838babb178ad948c67f.6Q9grGAgt0DLOh0YWKUgIOuHlFvn0gDCeHHOrqdav7g
++        hash: v1.k794b7964.326052a0a0811e06149d4ce16661c1079dd4c3ea3989b9fc380f6ea6ad332964.fbb9IzE045MNm7rezEvrawyQy0D8MHwTfxwNVlpKKMI
+     scenes-app-replay-vision--home-watch-feed-empty--light:
+-        hash: v1.k794b7964.71ae84e0d38203d5860ee8feb2a633a339e79de59b03b514807c7493517486fb.3NLgnN7g1YbjscaN_XzQhxSoqltm99utfh3_1E_29J8
++        hash: v1.k794b7964.12fbcb5782edcde470bc066c7679270b5dad44ce31fc70197a61d2bf259eabc5.ODXEus08mjP34GTt0Ji95tYjEz-wxAkK_T1dpDdCHK8
+     scenes-app-replay-vision--home-watch-feed-jev-arm--dark:
+-        hash: v1.k794b7964.f1ddd21726c2a6464c6734a43d55d6f1cb3938607c120e59405c84aee9750203.VH9Ne1pCl3SvraNkfcQizTMUOFzY5J2WrIRNLA6itqE
++        hash: v1.k794b7964.62f35a459a0eeb91322af2777799392cb516ef90c4e27b53e9747fe092507e23.wEoRu_mVlBExqdXk6mhTEvm56V33CPJBhAqfGfXLQi4
+     scenes-app-replay-vision--home-watch-feed-jev-arm--light:
+-        hash: v1.k794b7964.10c14bad4b7111fb176e5bc4f8fa56c7edc9bc7d97756ba772d86180fb53a2e2.4F19ofQPZuJqqHdqZiBgHYfLMVhFZNcqoDCbQ0tfLtE
++        hash: v1.k794b7964.fa346ffdf211a49a261d381d5837163eb6d1af35cba25ae22ca29b43bbfc6078.WYM_DL1M4g_78GRE16pWL9LP2Dzf3fdOB6HVrwDjGV0
+     scenes-app-replay-vision--home-watch-feed-only-newest--dark:
+-        hash: v1.k794b7964.a08092f004c07051bbdc5e85710f2c146e717dcd5c62ac1de2f74957b2f665fc.73h8-FXjGYrbmE7uoiIIty2DSmeJ5JNCmD6_jaIUEWc
++        hash: v1.k794b7964.25c40d1f0700190ce2401de7d59db7305084f379bf6a2d3947e9e852c583c819.APZ4PoLYFBmtgKX2EIcqHVpAz9euVvIk40vd3LHRlGg
+     scenes-app-replay-vision--home-watch-feed-only-newest--light:
+-        hash: v1.k794b7964.68e1efa2832251afd6354e66319e5bee18ecc25c3c636c6e4a52465a80113a85.mh7o0KC4GUS0HPNTp1eiNh8eptNnA80TPgDhE5n4VFI
++        hash: v1.k794b7964.c4ca67c86a3a5efc11c123b656e82878052f4e2c348237403a975cc2649524fd.PX6UtkIMGc0gr7LHmrCUgwPPP2Xo0J2hJDOyV7RlOl8
+     scenes-app-replay-vision--monitor-observations--dark:
+         hash: v1.k794b7964.9ec7ef6c17074e9547647fe71aa2613100208fa0c7ba87a3d97897b4f183a5c8.-UKB-w06mWDRH2yNgzIBhn3Qhn2MYlFTNXjhMce1hh4
+     scenes-app-replay-vision--monitor-observations--light:
+diff --git a/products/replay_vision/backend/api/scanners.py b/products/replay_vision/backend/api/scanners.py
+index 83b01bac14b2..01d29a570b8f 100644
+--- a/products/replay_vision/backend/api/scanners.py
++++ b/products/replay_vision/backend/api/scanners.py
+@@ -1704,6 +1704,10 @@ class WatchFeedQuerySerializer(serializers.Serializer):
+             "follow one area without naming every scanner in it."
+         ),
+     )
++    created_by = serializers.CharField(
++        required=False,
++        help_text="Comma-separated user IDs. Restrict the feed to observations from scanners those users created.",
++    )
+     search = serializers.CharField(
+         required=False,
+         help_text=(
+@@ -1736,6 +1740,14 @@ def validate_scanner_ids(self, value: str) -> list[UUID]:
+         except ValueError:
+             raise serializers.ValidationError("Scanner ids must be UUIDs.")
+ 
++    def validate_created_by(self, value: str) -> list[int]:
++        raw_ids = split_csv(value)
++        if not raw_ids:
++            raise serializers.ValidationError("At least one user id is required when the filter is set.")
++        if any(not raw_id.isdecimal() for raw_id in raw_ids):
++            raise serializers.ValidationError("User ids must be integers.")
++        return [int(raw_id) for raw_id in raw_ids]
++
+ 
+ class WatchFeedSignalSerializer(serializers.Serializer):
+     """One signal an observation raised, named rather than counted."""
+@@ -2545,6 +2557,13 @@ def watch_feed(self, request: Request, **kwargs: Any) -> Response:
+                 .values_list("id", flat=True)
+             )
+             allowed_ids = [scanner_id for scanner_id in allowed_ids if scanner_id in tagged_ids]
++        if params.get("created_by"):
++            created_ids = set(
++                ReplayScanner.objects.filter(
++                    team_id=self.team_id, id__in=allowed_ids, created_by_id__in=params["created_by"]
++                ).values_list("id", flat=True)
++            )
++            allowed_ids = [scanner_id for scanner_id in allowed_ids if scanner_id in created_ids]
+         candidates = ReplayObservation.objects.filter(
+             team_id=self.team_id,
+             scanner_id__in=allowed_ids,
+diff --git a/products/replay_vision/frontend/components/FilterPill.tsx b/products/replay_vision/frontend/components/FilterPill.tsx
+index 9795ccbd688b..c8a8648ae055 100644
+--- a/products/replay_vision/frontend/components/FilterPill.tsx
++++ b/products/replay_vision/frontend/components/FilterPill.tsx
+@@ -1,6 +1,6 @@
+ import { useState } from 'react'
+ 
+-import { LemonButton, LemonButtonWithDropdown, LemonCheckbox, LemonInput } from '@posthog/lemon-ui'
++import { LemonButton, LemonButtonWithDropdown, LemonCheckbox, LemonDivider, LemonInput } from '@posthog/lemon-ui'
+ 
+ export function FilterPill<T extends string>({
+     label,
+@@ -9,6 +9,7 @@ export function FilterPill<T extends string>({
+     onChange,
+     searchable = false,
+     searchPlaceholder,
++    selectAllLabel,
+     dataAttr,
+ }: {
+     label: string
+@@ -17,12 +18,15 @@ export function FilterPill<T extends string>({
+     onChange: (next: T[]) => void
+     searchable?: boolean
+     searchPlaceholder?: string
++    selectAllLabel?: string
+     dataAttr: string
+ }): JSX.Element {
+     const [searchTerm, setSearchTerm] = useState('')
+     const filteredOptions = searchTerm
+         ? options.filter((option) => option.label.toLowerCase().includes(searchTerm.toLowerCase()))
+         : options
++    const allSelected = options.length > 0 && options.every((option) => value.includes(option.value))
++    const showSelectAll = !!selectAllLabel && !searchTerm && options.length > 0
+     const toggle = (v: T): void => {
+         onChange(value.includes(v) ? value.filter((x) => x !== v) : [...value, v])
+     }
+@@ -52,6 +56,22 @@ export function FilterPill<T extends string>({
+                                 className="mb-1"
+                             />
+                         )}
++                        {showSelectAll && (
++                            <>
++                                <LemonButton
++                                    data-attr={`${dataAttr}-select-all`}
++                                    fullWidth
++                                    onClick={() => onChange(allSelected ? [] : options.map((option) => option.value))}
++                                >
++                                    <LemonCheckbox
++                                        checked={allSelected ? true : value.length > 0 ? 'indeterminate' : false}
++                                        className="pointer-events-none mr-2"
++                                    />
++                                    {selectAllLabel}
++                                </LemonButton>
++                                <LemonDivider className="my-1" />
++                            </>
++                        )}
+                         {filteredOptions.map((opt) => (
+                             <LemonButton
+                                 data-attr={`${dataAttr}-option`}
+diff --git a/products/replay_vision/frontend/generated/api.schemas.ts b/products/replay_vision/frontend/generated/api.schemas.ts
+index 9badd80e7948..75adac48e378 100644
+--- a/products/replay_vision/frontend/generated/api.schemas.ts
++++ b/products/replay_vision/frontend/generated/api.schemas.ts
+@@ -3617,6 +3617,11 @@ export type VisionScannersObservationsStatsRetrieveParams = {
+ }
+ 
+ export type VisionScannersWatchFeedRetrieveParams = {
++    /**
++     * Comma-separated user IDs. Restrict the feed to observations from scanners those users created.
++     * @minLength 1
++     */
++    created_by?: string
+     /**
+      * Only observations created at or after this time. Accepts ISO 8601, a relative date like `-7d`, or `now`; values without an explicit offset are interpreted in the project's timezone. The window between `date_from` and `date_to` may span at most 90 days.
+      * @minLength 1
+diff --git a/products/replay_vision/frontend/replay_scanners/components/WatchFeedTab.tsx b/products/replay_vision/frontend/replay_scanners/components/WatchFeedTab.tsx
+index 4c9a8bbc35d2..9d826a02e367 100644
+--- a/products/replay_vision/frontend/replay_scanners/components/WatchFeedTab.tsx
++++ b/products/replay_vision/frontend/replay_scanners/components/WatchFeedTab.tsx
+@@ -52,6 +52,8 @@ export function WatchFeedTab(): JSX.Element {
+         scannerIdsFilter,
+         tagsFilter,
+         tagOptions,
++        createdByFilter,
++        createdByOptions,
+         search,
+         hasFeedFilters,
+         emptyReason,
+@@ -61,6 +63,7 @@ export function WatchFeedTab(): JSX.Element {
+         setScannerTypeFilter,
+         setScannerIdsFilter,
+         setTagsFilter,
++        setCreatedByFilter,
+         setSearch,
+         clearFeedFilters,
+         loadFeed,
+@@ -73,7 +76,8 @@ export function WatchFeedTab(): JSX.Element {
+ 
+     const items = feedItems ?? []
+     // Only the scanner picker narrows *which* scanners are in scope; the others narrow within them.
+-    const narrowedToScanners = scannerIdsFilter.length
++    const narrowedToScanners =
++        scannerIdsFilter.length > 0 && scannerIdsFilter.length < allScanners.length ? scannerIdsFilter.length : 0
+     const scannerCount = new Set(items.map((item) => item.observation.scanner_id)).size
+     // Every card carrying a no-evidence reason means the window produced no findings. A feed that mixes a
+     // finding with padding needs no explaining, so this stays off unless the whole feed is padding.
+@@ -82,7 +86,7 @@ export function WatchFeedTab(): JSX.Element {
+     return (
+         <div className="@container flex flex-col gap-4">
+             <div className="flex flex-wrap items-end justify-between gap-2">
+-                <div className="flex flex-col gap-1">
++                <div className="flex flex-col gap-1 flex-1 min-w-[16rem]">
+                     <h2 className="text-xl font-semibold m-0">
+                         {items.length === 0 ? 'What to watch' : `Top ${pluralize(items.length, 'session')}`}
+                     </h2>
+@@ -110,10 +114,18 @@ export function WatchFeedTab(): JSX.Element {
+                         dataAttr="vision-watch-feed-scanners-filter"
+                         searchable
+                         searchPlaceholder="Search scanners..."
++                        selectAllLabel="All scanners"
+                         options={scannerOptions}
+                         value={scannerIdsFilter}
+                         onChange={setScannerIdsFilter}
+                     />
++                    <FilterPill<string>
++                        label="Created by"
++                        dataAttr="vision-watch-feed-created-by-filter"
++                        options={createdByOptions}
++                        value={createdByFilter}
++                        onChange={setCreatedByFilter}
++                    />
+                     <FilterPill<string>
+                         label="Tags"
+                         dataAttr="vision-watch-feed-tags-filter"
+diff --git a/products/replay_vision/frontend/replay_scanners/watchFeedLogic.ts b/products/replay_vision/frontend/replay_scanners/watchFeedLogic.ts
+index 6cd34bc61afd..49a3625c940a 100644
+--- a/products/replay_vision/frontend/replay_scanners/watchFeedLogic.ts
++++ b/products/replay_vision/frontend/replay_scanners/watchFeedLogic.ts
+@@ -19,7 +19,7 @@ import type { RankerEnumApi } from '../generated/api.schemas'
+ import { visionQuotaLogic } from '../logics/visionQuotaLogic'
+ import { visionScannersListLogic } from '../logics/visionScannersListLogic'
+ import { csvParam, parseCsvParam } from '../utils/urlParams'
+-import { ScannerType } from './types'
++import { ScannerType, createdByLabel } from './types'
+ import { type WatchFeedEmptyReason, resolveWatchFeedEmptyReason } from './watchFeedEmptyState'
+ 
+ // Generated by kea-typegen. Update if you're an agent, ignore if you're human.
+@@ -29,6 +29,11 @@ export interface watchFeedLogicValues {
+     quotaLoading: boolean // visionQuotaLogic
+     scanners: ReplayScannerApi[] // visionScannersListLogic
+     scannersLoading: boolean // visionScannersListLogic
++    createdByFilter: string[]
++    createdByOptions: {
++        label: string
++        value: string
++    }[]
+     dateFrom: string
+     dateTo: string | null
+     emptyReason: WatchFeedEmptyReason | null
+@@ -80,12 +85,17 @@ export interface watchFeedLogicActions {
+     restoreFeedFilters: (
+         search: string,
+         scannerIds: string[],
+-        tags: string[]
++        tags: string[],
++        createdBy: string[]
+     ) => {
++        createdBy: string[]
+         scannerIds: string[]
+         search: string
+         tags: string[]
+     }
++    setCreatedByFilter: (userIds: string[]) => {
++        userIds: string[]
++    }
+     setDateRange: (
+         dateFrom: string | null,
+         dateTo: string | null
+@@ -127,9 +137,17 @@ export interface watchFeedLogicMeta {
+         hasFeedFilters: (
+             scannerIdsFilter: string[],
+             tagsFilter: string[],
++            createdByFilter: string[],
+             scannerTypeFilter: ScannerTypeEnumApi | null,
+             search: string
+         ) => boolean
++        createdByOptions: (
++            scanners: ReplayScannerApi[],
++            createdByFilter: string[]
++        ) => {
++            label: string
++            value: string
++        }[]
+         tagOptions: (
+             allTags: string[],
+             tagsFilter: string[]
+@@ -164,6 +182,7 @@ function reportFiltered(values: watchFeedLogicValues): void {
+         scanner_type: values.scannerTypeFilter,
+         scanner_ids_count: values.scannerIdsFilter.length,
+         tags_count: values.tagsFilter.length,
++        created_by_count: values.createdByFilter.length,
+         has_search: values.search.trim().length > 0,
+     })
+ }
+@@ -192,9 +211,15 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+         setSearch: (search: string) => ({ search }),
+         setScannerIdsFilter: (scannerIds: string[]) => ({ scannerIds }),
+         setTagsFilter: (tags: string[]) => ({ tags }),
++        setCreatedByFilter: (userIds: string[]) => ({ userIds }),
+         // Restores every shared-link filter at once so one request runs and every recipient sees the
+         // same feed, regardless of the scanner/tag selections their browser remembered.
+-        restoreFeedFilters: (search: string, scannerIds: string[], tags: string[]) => ({ search, scannerIds, tags }),
++        restoreFeedFilters: (search: string, scannerIds: string[], tags: string[], createdBy: string[]) => ({
++            search,
++            scannerIds,
++            tags,
++            createdBy,
++        }),
+         clearFeedFilters: true,
+         loadFeed: true,
+         setFeedRanker: (ranker: WatchFeedRanker, variant: string | null) => ({ ranker, variant }),
+@@ -224,6 +249,9 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+                     if (values.tagsFilter.length > 0) {
+                         params.tags = values.tagsFilter.join(',')
+                     }
++                    if (values.createdByFilter.length > 0) {
++                        params.created_by = values.createdByFilter.join(',')
++                    }
+                     const trimmedSearch = values.search.trim()
+                     if (trimmedSearch) {
+                         params.search = trimmedSearch
+@@ -288,6 +316,15 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+                 clearFeedFilters: () => [],
+             },
+         ],
++        createdByFilter: [
++            [] as string[],
++            { persist: true, prefix: `${getCurrentTeamIdOrNone() ?? 'unknown'}__` },
++            {
++                setCreatedByFilter: (_, { userIds }) => userIds,
++                restoreFeedFilters: (_, { createdBy }) => createdBy,
++                clearFeedFilters: () => [],
++            },
++        ],
+         feedFailed: [
+             false,
+             {
+@@ -327,6 +364,10 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+             reportFiltered(values)
+             actions.loadFeed()
+         },
++        setCreatedByFilter: () => {
++            reportFiltered(values)
++            actions.loadFeed()
++        },
+         clearFeedFilters: () => {
+             reportFiltered(values)
+             actions.loadFeed()
+@@ -382,9 +423,38 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+                     : resolveWatchFeedEmptyReason({ scanners, quota, hasFeedFilters }),
+         ],
+         hasFeedFilters: [
+-            (s) => [s.scannerIdsFilter, s.tagsFilter, s.scannerTypeFilter, s.search],
+-            (scannerIds: string[], tags: string[], scannerType: ScannerType | null, search: string): boolean =>
+-                scannerIds.length > 0 || tags.length > 0 || !!scannerType || search.trim().length > 0,
++            (s) => [s.scannerIdsFilter, s.tagsFilter, s.createdByFilter, s.scannerTypeFilter, s.search],
++            (
++                scannerIds: string[],
++                tags: string[],
++                createdBy: string[],
++                scannerType: ScannerType | null,
++                search: string
++            ): boolean =>
++                scannerIds.length > 0 ||
++                tags.length > 0 ||
++                createdBy.length > 0 ||
++                !!scannerType ||
++                search.trim().length > 0,
++        ],
++        createdByOptions: [
++            (s) => [s.scanners, s.createdByFilter],
++            (scanners: ReplayScannerApi[], createdByFilter: string[]): { value: string; label: string }[] => {
++                const byId = new Map<string, string>()
++                for (const scanner of scanners) {
++                    if (scanner.created_by) {
++                        byId.set(String(scanner.created_by.id), createdByLabel(scanner.created_by))
++                    }
++                }
++                for (const id of createdByFilter) {
++                    if (!byId.has(id)) {
++                        byId.set(id, `User ${id}`)
++                    }
++                }
++                return Array.from(byId, ([value, label]) => ({ value, label })).sort((a, b) =>
++                    a.label.localeCompare(b.label)
++                )
++            },
+         ],
+         tagOptions: [
+             (s) => [s.allTags, s.tagsFilter],
+@@ -404,6 +474,7 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+                 feed_search: values.search.trim() || undefined,
+                 feed_scanners: csvParam(values.scannerIdsFilter),
+                 feed_tags: csvParam(values.tagsFilter),
++                feed_created_by: csvParam(values.createdByFilter),
+             },
+             undefined,
+             { replace: true },
+@@ -412,32 +483,36 @@ export const watchFeedLogic = kea<watchFeedLogicType>([
+             setSearch: buildUrl,
+             setScannerIdsFilter: buildUrl,
+             setTagsFilter: buildUrl,
++            setCreatedByFilter: buildUrl,
+             clearFeedFilters: buildUrl,
+         }
+     }),
+ 
+     urlToAction(({ actions, values }) => ({
+         [urls.replayVision()]: (_, searchParams) => {
+-            // A link that carries any feed_* param is a full filter snapshot, so restore all three and
++            // A link that carries any feed_* param is a full filter snapshot, so restore all of them and
+             // clear the ones it omits — otherwise the reader's remembered scanner/tag picks would leak
+             // in and the same link would show different feeds to different people. A link with no feed_*
+             // param leaves those remembered picks alone rather than widening the feed to the whole fleet.
+             const hasFeedParams =
+                 searchParams.feed_search !== undefined ||
+                 searchParams.feed_scanners !== undefined ||
+-                searchParams.feed_tags !== undefined
++                searchParams.feed_tags !== undefined ||
++                searchParams.feed_created_by !== undefined
+             if (!hasFeedParams) {
+                 return
+             }
+             const search = typeof searchParams.feed_search === 'string' ? searchParams.feed_search : ''
+             const scanners = parseCsvParam(searchParams.feed_scanners)
+             const tags = parseCsvParam(searchParams.feed_tags)
++            const createdBy = parseCsvParam(searchParams.feed_created_by)
+             const unchanged =
+                 search === values.search &&
+                 objectsEqual(scanners, values.scannerIdsFilter) &&
+-                objectsEqual(tags, values.tagsFilter)
++                objectsEqual(tags, values.tagsFilter) &&
++                objectsEqual(createdBy, values.createdByFilter)
+             if (!unchanged) {
+-                actions.restoreFeedFilters(search, scanners, tags)
++                actions.restoreFeedFilters(search, scanners, tags, createdBy)
+             }
+         },
+     })),
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 77fd023a4e58..0d34ae0e612d 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -130855,6 +130855,11 @@ export namespace Schemas {
+     };
+ 
+     export type VisionScannersWatchFeedRetrieveParams = {
++    /**
++     * Comma-separated user IDs. Restrict the feed to observations from scanners those users created.
++     * @minLength 1
++     */
++    created_by?: string;
+     /**
+      * Only observations created at or after this time. Accepts ISO 8601, a relative date like `-7d`, or `now`; values without an explicit offset are interpreted in the project's timezone. The window between `date_from` and `date_to` may span at most 90 days.
+      * @minLength 1
+diff --git a/services/mcp/src/generated/replay_vision/api.ts b/services/mcp/src/generated/replay_vision/api.ts
+index 84c479dca879..85d0a8099616 100644
+--- a/services/mcp/src/generated/replay_vision/api.ts
++++ b/services/mcp/src/generated/replay_vision/api.ts
+@@ -2324,6 +2324,11 @@ export const visionScannersWatchFeedRetrieveQueryLimitDefault = 20
+ export const visionScannersWatchFeedRetrieveQueryLimitMax = 50
+ 
+ export const VisionScannersWatchFeedRetrieveQueryParams = () => zod.object({
++    created_by: zod
++        .string()
++        .min(1)
++        .optional()
++        .describe('Comma-separated user IDs. Restrict the feed to observations from scanners those users created.'),
+     date_from: zod
+         .string()
+         .min(1)
+diff --git a/services/mcp/src/tools/generated/replay_vision.ts b/services/mcp/src/tools/generated/replay_vision.ts
+index 109b01d5d69c..120e6746a80b 100644
+--- a/services/mcp/src/tools/generated/replay_vision.ts
++++ b/services/mcp/src/tools/generated/replay_vision.ts
+@@ -1681,6 +1681,7 @@ const visionScannersWatchFeed = (): ToolBase<
+             method: 'GET',
+             path: `/api/projects/${encodeURIComponent(String(projectId))}/vision/scanners/watch_feed/`,
+             query: {
++                created_by: params.created_by,
+                 date_from: params.date_from,
+                 date_to: params.date_to,
+                 limit: params.limit,

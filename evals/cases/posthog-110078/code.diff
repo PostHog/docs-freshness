@@ -1,0 +1,649 @@
+diff --git a/products/ai_observability/frontend/playground/PlaygroundSaveMenu.tsx b/products/ai_observability/frontend/playground/PlaygroundSaveMenu.tsx
+index d3bfe21e3230..4044f54f540e 100644
+--- a/products/ai_observability/frontend/playground/PlaygroundSaveMenu.tsx
++++ b/products/ai_observability/frontend/playground/PlaygroundSaveMenu.tsx
+@@ -20,7 +20,14 @@ import {
+ 
+ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.Element | null {
+     const { effectiveModelOptions } = useValues(llmPlaygroundModelLogic)
+-    const { linkedSource, saving } = useValues(llmPlaygroundPromptsLogic)
++    const {
++        linkedSource,
++        saving,
++        promptConfigs,
++        pendingTargetModel,
++        pendingTargetProvider,
++        pendingTargetProviderKeyId,
++    } = useValues(llmPlaygroundPromptsLogic)
+     const { clearLinkedSource, saveToLinkedPrompt, saveToLinkedEvaluation, saveAsNewPrompt, saveAsNewEvaluation } =
+         useActions(llmPlaygroundPromptsLogic)
+     const { searchParams } = useValues(router)
+@@ -31,13 +38,34 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+     const hasLinkedSource = !!linkedPromptName || !!linkedEvaluationId
+     const linkedLabel = getLinkedSourceLabel(linkedSource)
+ 
+-    const modelConfig = selectedModel
++    // Evaluations need a resolvable provider, so their config requires a matched option.
++    // Prompt saves keep the panel's model even while options load or when it has no match,
++    // so a save never silently drops the selection.
++    const evaluationModelConfig = selectedModel
+         ? {
+               model: prompt.model,
+               provider: selectedModel.provider?.toLowerCase() ?? '',
+               provider_key_id: prompt.selectedProviderKeyId ?? null,
+           }
+         : null
++    // A freshly loaded selection sits in pendingTarget* until the model loaders settle,
++    // while the panel still shows its previous model. Prefer the pending selection so a
++    // save in that window publishes the loaded model, not the stale panel one.
++    const isFirstPanel = promptConfigs[0]?.id === prompt.id
++    const promptModelConfig =
++        isFirstPanel && pendingTargetModel
++            ? {
++                  model: pendingTargetModel,
++                  provider: pendingTargetProvider ?? '',
++                  provider_key_id: pendingTargetProviderKeyId,
++              }
++            : prompt.model
++              ? (evaluationModelConfig ?? {
++                    model: prompt.model,
++                    provider: '',
++                    provider_key_id: prompt.selectedProviderKeyId ?? null,
++                })
++              : null
+ 
+     const openSaveAsNewPromptDialog = (): void => {
+         LemonDialog.openForm({
+@@ -49,7 +77,7 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+                 </LemonField>
+             ),
+             errors: { name: (name) => (!name ? 'A name is required' : undefined) },
+-            onSubmit: ({ name }) => saveAsNewPrompt(prompt.id, name),
++            onSubmit: ({ name }) => saveAsNewPrompt(prompt.id, name, promptModelConfig),
+         })
+     }
+ 
+@@ -63,7 +91,7 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+                 </LemonField>
+             ),
+             errors: { name: (name) => (!name ? 'A name is required' : undefined) },
+-            onSubmit: ({ name }) => saveAsNewEvaluation(prompt.id, name, modelConfig),
++            onSubmit: ({ name }) => saveAsNewEvaluation(prompt.id, name, evaluationModelConfig),
+         })
+     }
+ 
+@@ -75,13 +103,15 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+         LemonDialog.open({
+             title: `Save to ${linkedLabel}?`,
+             description: isPrompt
+-                ? 'This will publish a new version of the prompt with the system prompt from the playground.'
++                ? 'This will publish a new version of the prompt with the current playground state: system prompt, messages, tools, and model settings.'
+                 : 'This will update the evaluation prompt and model configuration with the current playground state.',
+             primaryButton: {
+                 children: isPrompt ? 'Publish version' : 'Save',
+                 type: 'primary',
+                 onClick: () =>
+-                    isPrompt ? saveToLinkedPrompt(prompt.id) : saveToLinkedEvaluation(prompt.id, modelConfig),
++                    isPrompt
++                        ? saveToLinkedPrompt(prompt.id, promptModelConfig)
++                        : saveToLinkedEvaluation(prompt.id, evaluationModelConfig),
+             },
+             secondaryButton: { children: 'Cancel', type: 'secondary' },
+         })
+@@ -99,7 +129,7 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+ 
+     const isLinkedSourceEnabled =
+         (linkedSource.type === 'prompt' && linkedPromptName) ||
+-        (linkedSource.type === 'evaluation' && linkedEvaluationId && modelConfig)
++        (linkedSource.type === 'evaluation' && linkedEvaluationId && evaluationModelConfig)
+ 
+     if (linkedLabel && isLinkedSourceEnabled) {
+         linkedActions.push(
+@@ -137,7 +167,7 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+         </LemonButton>
+     )
+ 
+-    if (modelConfig) {
++    if (evaluationModelConfig) {
+         saveAsNewActions.push(
+             <LemonButton
+                 key="save-new-evaluation"
+@@ -187,7 +217,7 @@ export function PlaygroundSaveMenu({ prompt }: { prompt: PromptConfig }): JSX.El
+                 tooltip={
+                     hasLinkedSource
+                         ? 'Save changes back to the linked item or create a new one'
+-                        : 'Save this system prompt as a prompt or evaluation'
++                        : 'Save this playground setup as a prompt or evaluation'
+                 }
+                 noPadding
+                 loading={saving}
+diff --git a/products/ai_observability/frontend/playground/llmPlaygroundModelLogic.ts b/products/ai_observability/frontend/playground/llmPlaygroundModelLogic.ts
+index 8e7cd86aaf0c..133a9a9cc4e2 100644
+--- a/products/ai_observability/frontend/playground/llmPlaygroundModelLogic.ts
++++ b/products/ai_observability/frontend/playground/llmPlaygroundModelLogic.ts
+@@ -15,6 +15,7 @@ import {
+     matchClosestModelOption,
+     type MatchModelOption,
+     resolveProviderKeyForPrompt,
++    resolveSavedModelSelection,
+     resolveTraceModelSelection,
+ } from './playgroundModelMatching'
+ 
+@@ -46,6 +47,7 @@ export interface llmPlaygroundModelLogicValues {
+     pendingTargetIsTrace: boolean // llmPlaygroundPromptsLogic
+     pendingTargetModel: string | null // llmPlaygroundPromptsLogic
+     pendingTargetProvider: string | null // llmPlaygroundPromptsLogic
++    pendingTargetProviderKeyId: string | null // llmPlaygroundPromptsLogic
+     promptConfigs: PromptConfig[] // llmPlaygroundPromptsLogic
+     providerKeys: LLMProviderKey[] // llmProviderKeysLogic
+     providerKeysLoading: boolean // llmProviderKeysLogic
+@@ -74,6 +76,13 @@ export interface llmPlaygroundModelLogicValues {
+ 
+ // Generated by kea-typegen. Update if you're an agent, ignore if you're human.
+ export interface llmPlaygroundModelLogicActions {
++    applySavedModelSelection: (selection: { model: string; provider: string | null; providerKeyId: string | null }) => {
++        selection: {
++            model: string
++            provider: string | null
++            providerKeyId: string | null
++        }
++    } // llmPlaygroundPromptsLogic
+     clearPendingTargetModel: () => {
+         value: true
+     } // llmPlaygroundPromptsLogic
+@@ -200,6 +209,7 @@ export const llmPlaygroundModelLogic = kea<llmPlaygroundModelLogicType>([
+                 'activePromptConfig',
+                 'pendingTargetModel',
+                 'pendingTargetProvider',
++                'pendingTargetProviderKeyId',
+                 'pendingTargetIsTrace',
+             ],
+             modelPickerLogic,
+@@ -216,7 +226,13 @@ export const llmPlaygroundModelLogic = kea<llmPlaygroundModelLogicType>([
+         ],
+         actions: [
+             llmPlaygroundPromptsLogic,
+-            ['setupPlaygroundFromEvent', 'setModel', 'setPromptConfigs', 'clearPendingTargetModel'],
++            [
++                'setupPlaygroundFromEvent',
++                'applySavedModelSelection',
++                'setModel',
++                'setPromptConfigs',
++                'clearPendingTargetModel',
++            ],
+             modelPickerLogic,
+             [
+                 'loadByokModelsSuccess',
+@@ -325,23 +341,22 @@ export const llmPlaygroundModelLogic = kea<llmPlaygroundModelLogicType>([
+     }),
+ 
+     listeners(({ actions, values }) => {
+-        const applyTraceSelection = (targetModel: string, promptId: string, provider: string | null): void => {
+-            const { resolvedModelId, providerKeyId } = resolveTraceModelSelection(
+-                targetModel,
+-                provider,
+-                values.allModelOptions,
+-                values.providerKeys
+-            )
+-            actions.setModel(resolvedModelId, providerKeyId, promptId)
+-        }
+-
+         const applyPendingTraceSelection = (targetModel: string): void => {
+             const promptId = values.promptConfigs[0]?.id
+             if (!promptId) {
+                 actions.clearPendingTargetModel()
+                 return
+             }
+-            applyTraceSelection(targetModel, promptId, values.pendingTargetProvider)
++            // pendingTargetProviderKeyId is only set by saved-prompt loads; for trace loads it is
++            // null and resolveSavedModelSelection falls through to plain trace matching.
++            const { resolvedModelId, providerKeyId } = resolveSavedModelSelection(
++                targetModel,
++                values.pendingTargetProvider,
++                values.pendingTargetProviderKeyId,
++                values.allModelOptions,
++                values.providerKeys
++            )
++            actions.setModel(resolvedModelId, providerKeyId, promptId)
+             actions.clearPendingTargetModel()
+         }
+ 
+@@ -443,6 +458,34 @@ export const llmPlaygroundModelLogic = kea<llmPlaygroundModelLogicType>([
+                 actions.setPromptConfigs(normalizedPrompts)
+                 actions.clearPendingTargetModel()
+             },
++            applySavedModelSelection: ({
++                selection,
++            }: {
++                selection: { model: string; provider: string | null; providerKeyId: string | null }
++            }) => {
++                if (!values.providerKeysSettled || !values.byokModelsSettled || !values.playgroundModelsSettled) {
++                    // The pendingTarget* reducers hold the selection; resolvePendingTarget applies
++                    // it once the model and key loaders settle.
++                    return
++                }
++                // Saved selections always target the first panel: a prompt load rebuilds the
++                // playground to a single panel, and the pending-path fallback resolves against
++                // the first panel too, so both paths agree.
++                const targetPromptId = values.promptConfigs[0]?.id
++                if (!targetPromptId) {
++                    actions.clearPendingTargetModel()
++                    return
++                }
++                const { resolvedModelId, providerKeyId } = resolveSavedModelSelection(
++                    selection.model,
++                    normalizeLLMProvider(selection.provider ?? undefined),
++                    selection.providerKeyId,
++                    values.allModelOptions,
++                    values.providerKeys
++                )
++                actions.setModel(resolvedModelId, providerKeyId, targetPromptId)
++                actions.clearPendingTargetModel()
++            },
+             setupPlaygroundFromEvent: ({ payload }: { payload: { model?: string; provider?: string } }) => {
+                 const { model, provider } = payload
+                 const currentPrompt = values.promptConfigs[0]
+diff --git a/products/ai_observability/frontend/playground/llmPlaygroundPromptsLogic.ts b/products/ai_observability/frontend/playground/llmPlaygroundPromptsLogic.ts
+index 50bca68f1c4c..b575e335046c 100644
+--- a/products/ai_observability/frontend/playground/llmPlaygroundPromptsLogic.ts
++++ b/products/ai_observability/frontend/playground/llmPlaygroundPromptsLogic.ts
+@@ -24,6 +24,7 @@ import { getApiErrorDetail } from '../prompts/utils'
+ import { normalizeLLMProvider } from '../settings/llmProviderKeysLogic'
+ import { isOTelPartsMessage, normalizeRole, safeStringify } from '../utils'
+ import { isTraceLikeSelection } from './playgroundModelMatching'
++import { type PlaygroundModelConfig, parsePlaygroundConfig, serializePlaygroundConfig } from './playgroundPromptConfig'
+ 
+ const SOURCE_PARAM_KEYS = ['source_prompt_name', 'source_prompt_version', 'source_evaluation_id'] as const
+ 
+@@ -482,6 +483,7 @@ export interface llmPlaygroundPromptsLogicValues {
+     pendingTargetIsTrace: boolean
+     pendingTargetModel: string | null
+     pendingTargetProvider: string | null
++    pendingTargetProviderKeyId: string | null
+     promptConfigs: PromptConfig[]
+     reasoningLevel: ReasoningLevel
+     saving: boolean
+@@ -515,6 +517,13 @@ export interface llmPlaygroundPromptsLogicActions {
+         promptId: string | undefined
+         response: string
+     }
++    applySavedModelSelection: (selection: { model: string; provider: string | null; providerKeyId: string | null }) => {
++        selection: {
++            model: string
++            provider: string | null
++            providerKeyId: string | null
++        }
++    }
+     clearConversation: (promptId?: string) => {
+         promptId: string | undefined
+     }
+@@ -556,8 +565,10 @@ export interface llmPlaygroundPromptsLogicActions {
+     }
+     saveAsNewPrompt: (
+         promptId: string,
+-        name: string
++        name: string,
++        modelConfig: PlaygroundModelConfig | null
+     ) => {
++        modelConfig: PlaygroundModelConfig | null
+         name: string
+         promptId: string
+     }
+@@ -579,7 +590,11 @@ export interface llmPlaygroundPromptsLogicActions {
+         } | null
+         promptId: string
+     }
+-    saveToLinkedPrompt: (promptId: string) => {
++    saveToLinkedPrompt: (
++        promptId: string,
++        modelConfig: PlaygroundModelConfig | null
++    ) => {
++        modelConfig: PlaygroundModelConfig | null
+         promptId: string
+     }
+     setActivePromptId: (promptId: string | null) => {
+@@ -779,12 +794,24 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+         toggleCollapsed: (key: string) => ({ key }),
+         setToolsJsonError: (promptId: string, error: string | null) => ({ promptId, error }),
+         setSourceSetupLoading: (isLoading: boolean) => ({ isLoading }),
+-        saveToLinkedPrompt: (promptId: string) => ({ promptId }),
++        applySavedModelSelection: (selection: {
++            model: string
++            provider: string | null
++            providerKeyId: string | null
++        }) => ({ selection }),
++        saveToLinkedPrompt: (promptId: string, modelConfig: PlaygroundModelConfig | null) => ({
++            promptId,
++            modelConfig,
++        }),
+         saveToLinkedEvaluation: (
+             promptId: string,
+             modelConfig: { model: string; provider: string; provider_key_id: string | null } | null
+         ) => ({ promptId, modelConfig }),
+-        saveAsNewPrompt: (promptId: string, name: string) => ({ promptId, name }),
++        saveAsNewPrompt: (promptId: string, name: string, modelConfig: PlaygroundModelConfig | null) => ({
++            promptId,
++            name,
++            modelConfig,
++        }),
+         saveAsNewEvaluation: (
+             promptId: string,
+             name: string,
+@@ -981,6 +1008,8 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                 resetPlayground: () => null,
+                 setupPlaygroundFromEvent: (_: string | null, { payload }: { payload: { model?: string } }) =>
+                     payload.model ?? null,
++                applySavedModelSelection: (_: string | null, { selection }: { selection: { model: string } }) =>
++                    selection.model,
+                 clearPendingTargetModel: () => null,
+             },
+         ],
+@@ -990,6 +1019,22 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                 resetPlayground: () => null,
+                 setupPlaygroundFromEvent: (_: string | null, { payload }: { payload: { provider?: string } }) =>
+                     normalizeLLMProvider(payload.provider),
++                applySavedModelSelection: (
++                    _: string | null,
++                    { selection }: { selection: { provider: string | null } }
++                ) => normalizeLLMProvider(selection.provider ?? undefined),
++                clearPendingTargetModel: () => null,
++            },
++        ],
++        pendingTargetProviderKeyId: [
++            null as string | null,
++            {
++                resetPlayground: () => null,
++                setupPlaygroundFromEvent: () => null,
++                applySavedModelSelection: (
++                    _: string | null,
++                    { selection }: { selection: { providerKeyId: string | null } }
++                ) => selection.providerKeyId,
+                 clearPendingTargetModel: () => null,
+             },
+         ],
+@@ -1001,6 +1046,9 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                     _: boolean,
+                     { payload }: { payload: { model?: string; provider?: string } }
+                 ) => isTraceLikeSelection(payload.model, payload.provider),
++                // Saved selections resolve through the trace-matching path: no default-model
++                // fallback, so an unmatched saved model id survives as-is.
++                applySavedModelSelection: () => true,
+                 clearPendingTargetModel: () => false,
+             },
+         ],
+@@ -1234,6 +1282,31 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                             sourceParams.source_prompt_version = String(payload.sourcePromptVersion)
+                         }
+                         finishSourceSetup(sourceParams)
++                        // Prompts saved from the playground carry the whole panel in config.
++                        // Prompts without playground keys (older, or API-authored) parse to null
++                        // and load as before: body into the system prompt, panel untouched.
++                        const parsedConfig = parsePlaygroundConfig(fetchedPrompt.config)
++                        if (parsedConfig) {
++                            actions.setPromptConfigs(
++                                updatePromptConfigs(values.promptConfigs, promptId, (p) => ({
++                                    ...p,
++                                    temperature: parsedConfig.temperature,
++                                    maxTokens: parsedConfig.maxTokens,
++                                    topP: parsedConfig.topP,
++                                    thinking: parsedConfig.thinking,
++                                    reasoningLevel: parsedConfig.reasoningLevel,
++                                    tools: parsedConfig.tools,
++                                    messages: parsedConfig.messages,
++                                }))
++                            )
++                            if (parsedConfig.model) {
++                                actions.applySavedModelSelection({
++                                    model: parsedConfig.model,
++                                    provider: parsedConfig.provider,
++                                    providerKeyId: parsedConfig.providerKeyId,
++                                })
++                            }
++                        }
+                     } catch {
+                         lemonToast.error('Error loading prompt for playground')
+                     }
+@@ -1366,8 +1439,7 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+             }
+         },
+ 
+-        saveToLinkedPrompt: async ({ promptId }) => {
+-            posthog.capture('llma playground saved to source', { action: 'save_to_linked_prompt' })
++        saveToLinkedPrompt: async ({ promptId, modelConfig }) => {
+             const { linkedSource, promptConfigs } = values
+             if (!linkedSource.promptName) {
+                 lemonToast.error('No linked prompt to save to')
+@@ -1380,6 +1452,12 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                 actions.saveComplete()
+                 return
+             }
++            posthog.capture('llma playground saved to source', {
++                action: 'save_to_linked_prompt',
++                with_messages: prompt.messages.length > 0,
++                with_tools: !!prompt.tools?.length,
++                with_model_config: !!modelConfig,
++            })
+             try {
+                 const current = await llmPromptsNameRetrieve(
+                     String(ApiConfig.getCurrentTeamId()),
+@@ -1387,6 +1465,9 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+                 )
+                 await llmPromptsNamePartialUpdate(String(ApiConfig.getCurrentTeamId()), linkedSource.promptName, {
+                     prompt: prompt.systemPrompt,
++                    // Explicit even when null: omitting config would carry the previous
++                    // version's forward, resurrecting panel state the user cleared.
++                    config: serializePlaygroundConfig(prompt, modelConfig, current.config),
+                     base_version: current.latest_version,
+                 })
+                 const promptName = linkedSource.promptName
+@@ -1466,16 +1547,26 @@ export const llmPlaygroundPromptsLogic = kea<llmPlaygroundPromptsLogicType>([
+             }
+         },
+ 
+-        saveAsNewPrompt: async ({ promptId, name }) => {
+-            posthog.capture('llma playground saved to source', { action: 'save_as_new_prompt' })
++        saveAsNewPrompt: async ({ promptId, name, modelConfig }) => {
+             const prompt = values.promptConfigs.find((p) => p.id === promptId)
+             if (!prompt) {
+                 lemonToast.error('No prompt configuration to save')
+                 actions.saveComplete()
+                 return
+             }
++            posthog.capture('llma playground saved to source', {
++                action: 'save_as_new_prompt',
++                with_messages: prompt.messages.length > 0,
++                with_tools: !!prompt.tools?.length,
++                with_model_config: !!modelConfig,
++            })
+             try {
+-                await llmPromptsCreate(String(ApiConfig.getCurrentTeamId()), { name, prompt: prompt.systemPrompt })
++                const config = serializePlaygroundConfig(prompt, modelConfig, null)
++                await llmPromptsCreate(String(ApiConfig.getCurrentTeamId()), {
++                    name,
++                    prompt: prompt.systemPrompt,
++                    ...(config ? { config } : {}),
++                })
+                 // Link the playground to the newly created prompt
+                 actions.setPromptConfigs(
+                     updatePromptConfigs(values.promptConfigs, prompt.id, (p) => ({
+diff --git a/products/ai_observability/frontend/playground/playgroundModelMatching.ts b/products/ai_observability/frontend/playground/playgroundModelMatching.ts
+index 9b189ba5a2e0..ffb36d21cdd3 100644
+--- a/products/ai_observability/frontend/playground/playgroundModelMatching.ts
++++ b/products/ai_observability/frontend/playground/playgroundModelMatching.ts
+@@ -280,6 +280,31 @@ export function resolveTraceModelSelection(
+     return { resolvedModelId: modelId, providerKeyId }
+ }
+ 
++/**
++ * Resolves a model selection restored from a saved prompt config. The saved provider key wins
++ * when it still exists and still serves the saved model; otherwise this degrades to the same
++ * matching trace import uses, so a prompt saved on another team or with a deleted key still
++ * lands on the closest available model.
++ */
++export function resolveSavedModelSelection(
++    modelId: string,
++    provider: string | null,
++    savedProviderKeyId: string | null,
++    availableModels: MatchModelOption[],
++    providerKeys: LLMProviderKey[]
++): { resolvedModelId: string; providerKeyId?: string } {
++    if (savedProviderKeyId) {
++        const savedKeyUsable = providerKeys.some((key) => key.id === savedProviderKeyId && key.state !== 'invalid')
++        const savedKeyServesModel = availableModels.some(
++            (option) => option.id === modelId && option.providerKeyId === savedProviderKeyId
++        )
++        if (savedKeyUsable && savedKeyServesModel) {
++            return { resolvedModelId: modelId, providerKeyId: savedProviderKeyId }
++        }
++    }
++    return resolveTraceModelSelection(modelId, provider, availableModels, providerKeys)
++}
++
+ export function matchClosestModelOption(
+     targetModel: string,
+     availableModels: MatchModelOption[],
+diff --git a/products/ai_observability/frontend/playground/playgroundPromptConfig.ts b/products/ai_observability/frontend/playground/playgroundPromptConfig.ts
+new file mode 100644
+index 000000000000..698594e0db9c
+--- /dev/null
++++ b/products/ai_observability/frontend/playground/playgroundPromptConfig.ts
+@@ -0,0 +1,139 @@
++import { isObject } from 'lib/utils/guards'
++
++import type { Message, MessageRole, PromptConfig, ReasoningLevel } from './llmPlaygroundPromptsLogic'
++
++export interface PlaygroundModelConfig {
++    model: string
++    provider: string
++    provider_key_id: string | null
++}
++
++// Config keys the playground owns. Serialization replaces exactly these keys and
++// preserves everything else, so config written via the API survives a playground save.
++const PLAYGROUND_CONFIG_KEYS = new Set([
++    'model',
++    'provider',
++    'provider_key_id',
++    'temperature',
++    'max_tokens',
++    'top_p',
++    'thinking',
++    'reasoning_effort',
++    'tools',
++    'messages',
++])
++
++const MESSAGE_ROLES: MessageRole[] = ['user', 'assistant', 'system']
++const REASONING_LEVELS: Exclude<ReasoningLevel, null>[] = ['minimal', 'low', 'medium', 'high']
++
++export interface ParsedPlaygroundConfig {
++    model: string | null
++    provider: string | null
++    providerKeyId: string | null
++    temperature: number | null
++    maxTokens: number | null
++    topP: number | null
++    thinking: boolean
++    reasoningLevel: ReasoningLevel
++    tools: Record<string, unknown>[] | null
++    messages: Message[]
++}
++
++/**
++ * Builds the config payload to store with a prompt version: the playground's model settings,
++ * tools, and conversation messages, merged over any non-playground keys already in the
++ * version's config. Variable placeholders in message content are stored raw, never substituted.
++ * Returns null when there is nothing to store, so the version's config stays null.
++ */
++export function serializePlaygroundConfig(
++    prompt: PromptConfig,
++    modelConfig: PlaygroundModelConfig | null,
++    existingConfig: unknown
++): Record<string, unknown> | null {
++    const config: Record<string, unknown> = {}
++    if (isObject(existingConfig)) {
++        for (const [key, value] of Object.entries(existingConfig)) {
++            if (!PLAYGROUND_CONFIG_KEYS.has(key)) {
++                config[key] = value
++            }
++        }
++    }
++
++    if (modelConfig) {
++        config.model = modelConfig.model
++        if (modelConfig.provider) {
++            config.provider = modelConfig.provider
++        }
++        config.provider_key_id = modelConfig.provider_key_id
++    } else if (isObject(existingConfig)) {
++        // No panel model to write (nothing selected yet): carry the stored selection
++        // forward instead of dropping it from the new version.
++        for (const key of ['model', 'provider', 'provider_key_id']) {
++            if (key in existingConfig) {
++                config[key] = existingConfig[key]
++            }
++        }
++    }
++    if (prompt.temperature !== null) {
++        config.temperature = prompt.temperature
++    }
++    if (prompt.maxTokens !== null) {
++        config.max_tokens = prompt.maxTokens
++    }
++    if (prompt.topP !== null) {
++        config.top_p = prompt.topP
++    }
++    config.thinking = prompt.thinking
++    config.reasoning_effort = prompt.reasoningLevel
++    if (prompt.tools && prompt.tools.length > 0) {
++        config.tools = prompt.tools
++    }
++    if (prompt.messages.length > 0) {
++        config.messages = prompt.messages.map((message) => ({ role: message.role, content: message.content }))
++    }
++
++    return Object.keys(config).length > 0 ? config : null
++}
++
++/**
++ * Reads playground state back out of a stored prompt config. Returns null when the config
++ * holds no playground-owned keys (old prompts, API-only configs), so the caller leaves the
++ * panel untouched. Unrecognized keys and wrong-typed values are ignored, never an error.
++ */
++export function parsePlaygroundConfig(config: unknown): ParsedPlaygroundConfig | null {
++    if (!isObject(config) || !Object.keys(config).some((key) => PLAYGROUND_CONFIG_KEYS.has(key))) {
++        return null
++    }
++
++    const messages: Message[] = Array.isArray(config.messages)
++        ? config.messages.flatMap((entry): Message[] =>
++              isObject(entry) && MESSAGE_ROLES.includes(entry.role as MessageRole) && typeof entry.content === 'string'
++                  ? [{ role: entry.role as MessageRole, content: entry.content }]
++                  : []
++          )
++        : []
++
++    const tools =
++        Array.isArray(config.tools) && config.tools.length > 0 && config.tools.every(isObject)
++            ? (config.tools as Record<string, unknown>[])
++            : null
++
++    return {
++        model: typeof config.model === 'string' && config.model ? config.model : null,
++        provider: typeof config.provider === 'string' && config.provider ? config.provider : null,
++        providerKeyId:
++            typeof config.provider_key_id === 'string' && config.provider_key_id ? config.provider_key_id : null,
++        temperature:
++            typeof config.temperature === 'number' && Number.isFinite(config.temperature) ? config.temperature : null,
++        maxTokens:
++            typeof config.max_tokens === 'number' && Number.isFinite(config.max_tokens) ? config.max_tokens : null,
++        topP: typeof config.top_p === 'number' && Number.isFinite(config.top_p) ? config.top_p : null,
++        thinking: config.thinking === true,
++        reasoningLevel:
++            'reasoning_effort' in config
++                ? (REASONING_LEVELS.find((level) => level === config.reasoning_effort) ?? null)
++                : 'medium',
++        tools,
++        messages,
++    }
++}

@@ -1,0 +1,490 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 77df2aa08687..6c7c9c047751 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -12559,9 +12559,9 @@ snapshots:
+     scenes-app-inbox-signalsourcespanel--source-catalog-connect-step--light:
+         hash: v1.k794b7964.306fb23c439334374b9ceae47f242edb0ba2cbf9313d255a6f0aac54fd038d16.829n9nWezXS75jPieMDpWOhWmkDuY5xq5I0OD4Mu5zA
+     scenes-app-inbox-signalsourcespanel--source-catalog-open--dark:
+-        hash: v1.k794b7964.efdda8fab343620e712a4a3a175f9edba29bca8d357b782a1e1314d4d415b72d.ovnA51MpkfwdYND0NKTR_eqT5eRBinJbDgYZOEJ51SE
++        hash: v1.k794b7964.92b60ec143522d7cdea7327cc00b26e94245ce7f393bcc1247121fe9c81ed8e5.Sx1s0Fuu_xIHOM5G43SAvBT4VOqrxnwD1TmzhrnwDuw
+     scenes-app-inbox-signalsourcespanel--source-catalog-open--light:
+-        hash: v1.k794b7964.fa6bcc0a684aaa46bfc102ea0a879c0af8f183b9206a6ef27f0f2d53a72d5519.uZKA01NAcf5kZObXT0QW0LNbRtD7eFhoeXVHR3Po2Hc
++        hash: v1.k794b7964.c7cae4ced0aa3b9e4f9e9923010c9019be4664945f3b502e788ffa3f97025047.AXU9Kjl6cAZ5DfRg5hJjYVE4avoDqxF1hfOudNZdGi0
+     scenes-app-inbox-signalsourcespanel--source-configs-unavailable--dark:
+         hash: v1.k794b7964.db9d51d553a1b00cc491773f3eb1f200e8aed4c380649d5bf536ff424ab97d2d.SQ7oPEEK3Ndguww2v2PCgeBbURlHxtKheOjR0BQs_us
+     scenes-app-inbox-signalsourcespanel--source-configs-unavailable--light:
+diff --git a/products/signals/backend/contracts.py b/products/signals/backend/contracts.py
+index 0becad8b2125..8a5aa021ab30 100644
+--- a/products/signals/backend/contracts.py
++++ b/products/signals/backend/contracts.py
+@@ -1328,6 +1328,49 @@ class BigeyeIssueSignalInput(SignalInputBase):
+     extra: BigeyeIssueSignalExtra
+ 
+ 
++# ── Error monitors ─────────────────────────────────────────────────────────────
++
++
++class TriggerDevErrorSignalExtra(SignalExtraBase):
++    task_identifier: str | None
++    status: str | None
++    count: str | None
++    first_seen: str | None
++    last_seen: str | None
++
++
++class TriggerDevErrorSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.TRIGGER_DEV]
++    extra: TriggerDevErrorSignalExtra
++
++
++class ChecklyErrorGroupSignalExtra(SignalExtraBase):
++    check_id: str | None
++    error_hash: str | None
++    first_seen: str | None
++    last_seen: str | None
++
++
++class ChecklyErrorGroupSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.CHECKLY]
++    extra: ChecklyErrorGroupSignalExtra
++
++
++class RoarkIssueSignalExtra(SignalExtraBase):
++    severity: str | None
++    status: str | None
++    event_count: str | None
++    created_at: str | None
++
++
++class RoarkIssueSignalInput(SignalInputBase):
++    source_type: Literal[SignalSourceType.ISSUE]
++    source_product: Literal[SignalSourceProduct.ROARK]
++    extra: RoarkIssueSignalExtra
++
++
+ # ── Union over all signal variants ──────────────────────────────────────────────
+ # Discrimination is by the composite (source_product, source_type) pair, resolved via
+ # SIGNAL_VARIANT_LOOKUP below — a single-field pydantic discriminator can't express it
+@@ -1405,7 +1448,10 @@ class BigeyeIssueSignalInput(SignalInputBase):
+     | BigeyeIssueSignalInput
+     | LaceworkScannerFindingSignalInput
+     | OrcaSecurityScannerFindingSignalInput
+-    | TenableVulnerabilityManagementScannerFindingSignalInput,
++    | TenableVulnerabilityManagementScannerFindingSignalInput
++    | TriggerDevErrorSignalInput
++    | ChecklyErrorGroupSignalInput
++    | RoarkIssueSignalInput,
+     Field(union_mode="left_to_right"),
+ ]
+ 
+@@ -1480,6 +1526,9 @@ class BigeyeIssueSignalInput(SignalInputBase):
+     LaceworkScannerFindingSignalInput,
+     OrcaSecurityScannerFindingSignalInput,
+     TenableVulnerabilityManagementScannerFindingSignalInput,
++    TriggerDevErrorSignalInput,
++    ChecklyErrorGroupSignalInput,
++    RoarkIssueSignalInput,
+     CheckFailedSignalInput,
+ )
+ 
+diff --git a/products/signals/backend/emission/checkly_error_groups.py b/products/signals/backend/emission/checkly_error_groups.py
+new file mode 100644
+index 000000000000..bdb007256b49
+--- /dev/null
++++ b/products/signals/backend/emission/checkly_error_groups.py
+@@ -0,0 +1,41 @@
++"""Signal emitter for checkly `error_groups` (record kind: issue).
++
++`cleaned_error_message` is the sanitized message the group is keyed on, so it is the title.
++Archived groups (`archived_until_next_event`) are skipped; `first_seen` is an ISO string.
++"""
++
++from products.signals.backend.emission._common import make_flat_emitter
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.fetchers.data_warehouse import data_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalSourceTableConfig
++
++CHECKLY_FIELDS = (
++    "id",
++    "cleaned_error_message",
++    "check_id",
++    "error_hash",
++    "first_seen",
++    "last_seen",
++)
++
++CHECKLY_CONFIG = SignalSourceTableConfig(
++    source_product="checkly",
++    source_type="issue",
++    emitter=make_flat_emitter(
++        source_product="checkly",
++        source_type="issue",
++        id_field="id",
++        title_field="cleaned_error_message",
++        extra_fields=("check_id", "error_hash", "first_seen", "last_seen"),
++    ),
++    record_fetcher=data_warehouse_record_fetcher,
++    partition_field="first_seen",
++    partition_field_is_datetime_string=True,
++    fields=CHECKLY_FIELDS,
++    where_clause="NOT ifNull(archived_until_next_event, false)",
++    max_records=200,
++    first_sync_lookback_days=1,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/registry.py b/products/signals/backend/emission/registry.py
+index f0ec684bc7cf..b33c6605b50f 100644
+--- a/products/signals/backend/emission/registry.py
++++ b/products/signals/backend/emission/registry.py
+@@ -158,6 +158,7 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.bigeye_issues import BIGEYE_CONFIG
+     from products.signals.backend.emission.bugsnag_errors import BUGSNAG_CONFIG
+     from products.signals.backend.emission.canny_posts import CANNY_CONFIG
++    from products.signals.backend.emission.checkly_error_groups import CHECKLY_CONFIG
+     from products.signals.backend.emission.conversations_tickets import CONVERSATIONS_TICKETS_CONFIG
+     from products.signals.backend.emission.datadog_error_issues import DATADOG_ERROR_ISSUES_CONFIG
+     from products.signals.backend.emission.datadog_error_logs import DATADOG_ERROR_LOGS_CONFIG
+@@ -199,6 +200,7 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.rapid7_insightvm_vulnerabilities import RAPID7_INSIGHTVM_CONFIG
+     from products.signals.backend.emission.raygun_error_groups import RAYGUN_CONFIG
+     from products.signals.backend.emission.retently_feedback import RETENTLY_CONFIG
++    from products.signals.backend.emission.roark_issues import ROARK_CONFIG
+     from products.signals.backend.emission.rollbar_items import ROLLBAR_CONFIG
+     from products.signals.backend.emission.semgrep_sast_findings import SEMGREP_CONFIG
+     from products.signals.backend.emission.sentry_issues import SENTRY_CONFIG
+@@ -211,6 +213,7 @@ def _register_all_emitters() -> None:
+     from products.signals.backend.emission.tenable_vulnerability_management_vulnerabilities import (
+         TENABLE_VULNERABILITY_MANAGEMENT_CONFIG,
+     )
++    from products.signals.backend.emission.trigger_dev_errors import TRIGGER_DEV_CONFIG
+     from products.signals.backend.emission.uservoice_suggestions import USERVOICE_CONFIG
+     from products.signals.backend.emission.xmatters_incidents import XMATTERS_CONFIG
+     from products.signals.backend.emission.zendesk_tickets import ZENDESK_TICKETS_CONFIG
+@@ -295,6 +298,10 @@ def _register_all_emitters() -> None:
+         "vulnerabilities",
+         TENABLE_VULNERABILITY_MANAGEMENT_CONFIG,
+     )
++    # Error monitors (record kind: issue)
++    register_signal_source(ExternalDataSourceType.TRIGGERDEV, "errors", TRIGGER_DEV_CONFIG)
++    register_signal_source(ExternalDataSourceType.CHECKLY, "error_groups", CHECKLY_CONFIG)
++    register_signal_source(ExternalDataSourceType.ROARK, "issue", ROARK_CONFIG)
+ 
+ 
+ _register_all_emitters()
+diff --git a/products/signals/backend/emission/roark_issues.py b/products/signals/backend/emission/roark_issues.py
+new file mode 100644
+index 000000000000..731ea7be2b57
+--- /dev/null
++++ b/products/signals/backend/emission/roark_issues.py
+@@ -0,0 +1,43 @@
++"""Signal emitter for roark `issue` (record kind: issue).
++
++`status` is OPEN, ACKED, or RESOLVED and `severity` is LOW, MEDIUM, HIGH, or CRITICAL.
++`created_at` is an ISO string; `summary` is the body.
++"""
++
++from products.signals.backend.emission._common import make_flat_emitter
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.fetchers.data_warehouse import data_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalSourceTableConfig
++
++ROARK_FIELDS = (
++    "id",
++    "title",
++    "summary",
++    "severity",
++    "status",
++    "event_count",
++    "created_at",
++)
++
++ROARK_CONFIG = SignalSourceTableConfig(
++    source_product="roark",
++    source_type="issue",
++    emitter=make_flat_emitter(
++        source_product="roark",
++        source_type="issue",
++        id_field="id",
++        title_field="title",
++        body_field="summary",
++        extra_fields=("severity", "status", "event_count", "created_at"),
++    ),
++    record_fetcher=data_warehouse_record_fetcher,
++    partition_field="created_at",
++    partition_field_is_datetime_string=True,
++    fields=ROARK_FIELDS,
++    where_clause="coalesce(status, '') != 'RESOLVED'",
++    max_records=200,
++    first_sync_lookback_days=1,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/backend/emission/trigger_dev_errors.py b/products/signals/backend/emission/trigger_dev_errors.py
+new file mode 100644
+index 000000000000..e78e9b9964ff
+--- /dev/null
++++ b/products/signals/backend/emission/trigger_dev_errors.py
+@@ -0,0 +1,44 @@
++"""Signal emitter for trigger_dev `errors` (record kind: issue).
++
++The table is full-refresh and keyed on (`id`, `task_identifier`), because one fingerprint can group under several tasks.
++`status` is unresolved, resolved, or ignored; `first_seen` is an ISO string.
++"""
++
++from products.signals.backend.emission._common import make_flat_emitter
++from products.signals.backend.emission._prompts import ERROR_ACTIONABILITY_PROMPT, ERROR_SUMMARIZATION_PROMPT
++from products.signals.backend.emission.fetchers.data_warehouse import data_warehouse_record_fetcher
++from products.signals.backend.emission.registry import SignalSourceTableConfig
++
++TRIGGER_DEV_FIELDS = (
++    "concat(id, ':', task_identifier) AS error_key",
++    "coalesce(nullIf(error_type, ''), task_identifier) AS title",
++    "error_message",
++    "task_identifier",
++    "status",
++    "count",
++    "first_seen",
++    "last_seen",
++)
++
++TRIGGER_DEV_CONFIG = SignalSourceTableConfig(
++    source_product="trigger_dev",
++    source_type="issue",
++    emitter=make_flat_emitter(
++        source_product="trigger_dev",
++        source_type="issue",
++        id_field="error_key",
++        title_field="title",
++        body_field="error_message",
++        extra_fields=("task_identifier", "status", "count", "first_seen", "last_seen"),
++    ),
++    record_fetcher=data_warehouse_record_fetcher,
++    partition_field="first_seen",
++    partition_field_is_datetime_string=True,
++    fields=TRIGGER_DEV_FIELDS,
++    where_clause="coalesce(status, '') NOT IN ('resolved', 'ignored')",
++    max_records=200,
++    first_sync_lookback_days=1,
++    actionability_prompt=ERROR_ACTIONABILITY_PROMPT,
++    summarization_prompt=ERROR_SUMMARIZATION_PROMPT,
++    description_summarization_threshold_chars=2000,
++)
+diff --git a/products/signals/frontend/generated/api.schemas.ts b/products/signals/frontend/generated/api.schemas.ts
+index 1976e7c1f1c8..9de524389338 100644
+--- a/products/signals/frontend/generated/api.schemas.ts
++++ b/products/signals/frontend/generated/api.schemas.ts
+@@ -3498,6 +3498,28 @@ export interface BigeyeIssueSignalExtraApi {
+     opened_time_seconds: string | null
+ }
+ 
++export interface TriggerDevErrorSignalExtraApi {
++    task_identifier: string | null
++    status: string | null
++    count: string | null
++    first_seen: string | null
++    last_seen: string | null
++}
++
++export interface ChecklyErrorGroupSignalExtraApi {
++    check_id: string | null
++    error_hash: string | null
++    first_seen: string | null
++    last_seen: string | null
++}
++
++export interface RoarkIssueSignalExtraApi {
++    severity: string | null
++    status: string | null
++    event_count: string | null
++    created_at: string | null
++}
++
+ export type SignalExtraApi =
+     | SessionProblemSignalExtraApi
+     | LlmEvalSignalExtraApi
+@@ -3571,6 +3593,9 @@ export type SignalExtraApi =
+     | BetterstackIncidentSignalExtraApi
+     | MonteCarloAlertSignalExtraApi
+     | BigeyeIssueSignalExtraApi
++    | TriggerDevErrorSignalExtraApi
++    | ChecklyErrorGroupSignalExtraApi
++    | RoarkIssueSignalExtraApi
+ 
+ export interface SpecificityMetadataApi {
+     /** Title of the PR the specificity gate evaluated. */
+diff --git a/products/signals/frontend/inbox/externalSignalSources.ts b/products/signals/frontend/inbox/externalSignalSources.ts
+index 724418ba9b1d..6237c3587caa 100644
+--- a/products/signals/frontend/inbox/externalSignalSources.ts
++++ b/products/signals/frontend/inbox/externalSignalSources.ts
+@@ -79,6 +79,15 @@ export const EXTERNAL_SIGNAL_SOURCES = [
+         requiredTables: ['errors'],
+         sourceType: 'issue',
+     },
++    {
++        source: 'checkly',
++        label: 'Checkly',
++        category: 'Error tracking',
++        watches: 'Surface recurring check errors',
++        dwSourceType: 'Checkly',
++        requiredTables: ['error_groups'],
++        sourceType: 'issue',
++    },
+     {
+         source: 'honeybadger',
+         label: 'Honeybadger',
+@@ -97,6 +106,15 @@ export const EXTERNAL_SIGNAL_SOURCES = [
+         requiredTables: ['error_groups'],
+         sourceType: 'issue',
+     },
++    {
++        source: 'roark',
++        label: 'Roark',
++        category: 'Error tracking',
++        watches: 'Surface open voice and chat agent issues',
++        dwSourceType: 'Roark',
++        requiredTables: ['issue'],
++        sourceType: 'issue',
++    },
+     {
+         source: 'rollbar',
+         label: 'Rollbar',
+@@ -115,6 +133,15 @@ export const EXTERNAL_SIGNAL_SOURCES = [
+         requiredTables: ['issues'],
+         sourceType: 'issue',
+     },
++    {
++        source: 'trigger_dev',
++        label: 'Trigger.dev',
++        category: 'Error tracking',
++        watches: 'Surface failing background task errors',
++        dwSourceType: 'TriggerDev',
++        requiredTables: ['errors'],
++        sourceType: 'issue',
++    },
+     {
+         source: 'dixa',
+         label: 'Dixa',
+diff --git a/products/signals/frontend/inbox/signalSourcesLogic.ts b/products/signals/frontend/inbox/signalSourcesLogic.ts
+index 085f9693f8f0..2800abfb27ed 100644
+--- a/products/signals/frontend/inbox/signalSourcesLogic.ts
++++ b/products/signals/frontend/inbox/signalSourcesLogic.ts
+@@ -621,6 +621,7 @@ export interface signalSourcesLogicMeta {
+                 | 'bigeye'
+                 | 'bugsnag'
+                 | 'canny'
++                | 'checkly'
+                 | 'dixa'
+                 | 'dynamics365'
+                 | 'featurebase'
+@@ -654,6 +655,7 @@ export interface signalSourcesLogicMeta {
+                 | 'rapid7_insightvm'
+                 | 'raygun'
+                 | 'retently'
++                | 'roark'
+                 | 'rollbar'
+                 | 'semgrep'
+                 | 'sentry'
+@@ -664,6 +666,7 @@ export interface signalSourcesLogicMeta {
+                 | 'sonarqube'
+                 | 'squadcast'
+                 | 'tenable_vulnerability_management'
++                | 'trigger_dev'
+                 | 'uservoice'
+                 | 'xmatters'
+                 | 'zendesk'
+@@ -692,6 +695,7 @@ export interface signalSourcesLogicMeta {
+                 | 'bigeye'
+                 | 'bugsnag'
+                 | 'canny'
++                | 'checkly'
+                 | 'dixa'
+                 | 'dynamics365'
+                 | 'featurebase'
+@@ -725,6 +729,7 @@ export interface signalSourcesLogicMeta {
+                 | 'rapid7_insightvm'
+                 | 'raygun'
+                 | 'retently'
++                | 'roark'
+                 | 'rollbar'
+                 | 'semgrep'
+                 | 'sentry'
+@@ -735,6 +740,7 @@ export interface signalSourcesLogicMeta {
+                 | 'sonarqube'
+                 | 'squadcast'
+                 | 'tenable_vulnerability_management'
++                | 'trigger_dev'
+                 | 'uservoice'
+                 | 'xmatters'
+                 | 'zendesk'
+@@ -754,6 +760,7 @@ export interface signalSourcesLogicMeta {
+                 | 'bigeye'
+                 | 'bugsnag'
+                 | 'canny'
++                | 'checkly'
+                 | 'dixa'
+                 | 'dynamics365'
+                 | 'featurebase'
+@@ -787,6 +794,7 @@ export interface signalSourcesLogicMeta {
+                 | 'rapid7_insightvm'
+                 | 'raygun'
+                 | 'retently'
++                | 'roark'
+                 | 'rollbar'
+                 | 'semgrep'
+                 | 'sentry'
+@@ -797,6 +805,7 @@ export interface signalSourcesLogicMeta {
+                 | 'sonarqube'
+                 | 'squadcast'
+                 | 'tenable_vulnerability_management'
++                | 'trigger_dev'
+                 | 'uservoice'
+                 | 'xmatters'
+                 | 'zendesk'
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 58fb373daa82..e282de2dfdd4 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -22875,6 +22875,13 @@ export namespace Schemas {
+       CustomSql: 'custom_sql',
+     } as const;
+ 
++    export interface ChecklyErrorGroupSignalExtra {
++      check_id: string | null;
++      error_hash: string | null;
++      first_seen: string | null;
++      last_seen: string | null;
++    }
++
+     /**
+      * * `code` - Code
+      * * `slack` - Slack
+@@ -99161,7 +99168,22 @@ export namespace Schemas {
+       first_found: string | null;
+     }
+ 
+-    export type SignalExtra = SessionProblemSignalExtra | LlmEvalSignalExtra | LlmEvalReportSignalExtra | ZendeskTicketSignalExtra | GithubIssueSignalExtra | LinearIssueSignalExtra | JiraIssueSignalExtra | ConversationsTicketSignalExtra | ErrorTrackingSignalExtra | PgAnalyzeIssueSignalExtra | EndpointExecutionFailedSignalExtra | EndpointBreakdownLimitExceededSignalExtra | SignalsScoutSignalExtra | CheckFailedSignalExtra | LogsAlertStateChangeSignalExtra | ReplayVisionScannerFindingSignalExtra | AnalyticsAnomalyInvestigationSignalExtra | HealthCheckSignalExtra | EngineeringAnalyticsCIFlakyCheckSignalExtra | EngineeringAnalyticsCIBrokenDefaultBranchSignalExtra | EngineeringAnalyticsCIDurationRegressionSignalExtra | FreshdeskTicketSignalExtra | FreshserviceTicketSignalExtra | FrontConversationSignalExtra | GorgiasTicketSignalExtra | KustomerConversationSignalExtra | DixaConversationSignalExtra | PlainThreadSignalExtra | GitlabIssueSignalExtra | GiteaIssueSignalExtra | ShortcutStorySignalExtra | SentryIssueSignalExtra | RollbarItemSignalExtra | BugsnagErrorSignalExtra | HoneybadgerFaultSignalExtra | RaygunErrorGroupSignalExtra | DatadogSignalExtra | SnykScannerFindingSignalExtra | SonarqubeScannerFindingSignalExtra | SemgrepScannerFindingSignalExtra | Rapid7InsightvmScannerFindingSignalExtra | FeaturebaseFeedbackSignalExtra | FrillFeedbackSignalExtra | AhaFeedbackSignalExtra | UservoiceFeedbackSignalExtra | ProductboardFeedbackSignalExtra | CannyFeedbackSignalExtra | AsknicelyFeedbackSignalExtra | RetentlyFeedbackSignalExtra | AppfiguresReviewSignalExtra | AppfollowReviewSignalExtra | JudgemeReviewsReviewSignalExtra | IntercomTicketSignalExtra | HubspotTicketSignalExtra | Dynamics365TicketSignalExtra | ZohoCrmTicketSignalExtra | GoogleSearchConsoleSearchOpportunitySignalExtra | PagerdutyIncidentSignalExtra | OpsgenieAlertSignalExtra | IncidentIoIncidentSignalExtra | FirehydrantIncidentSignalExtra | SquadcastIncidentSignalExtra | ServicenowIncidentSignalExtra | SolarwindsServiceDeskIncidentSignalExtra | GrafanaIrmIncidentSignalExtra | XmattersIncidentSignalExtra | LaceworkScannerFindingSignalExtra | OrcaSecurityScannerFindingSignalExtra | TenableVulnerabilityManagementScannerFindingSignalExtra | BetterstackIncidentSignalExtra | MonteCarloAlertSignalExtra | BigeyeIssueSignalExtra;
++    export interface TriggerDevErrorSignalExtra {
++      task_identifier: string | null;
++      status: string | null;
++      count: string | null;
++      first_seen: string | null;
++      last_seen: string | null;
++    }
++
++    export interface RoarkIssueSignalExtra {
++      severity: string | null;
++      status: string | null;
++      event_count: string | null;
++      created_at: string | null;
++    }
++
++    export type SignalExtra = SessionProblemSignalExtra | LlmEvalSignalExtra | LlmEvalReportSignalExtra | ZendeskTicketSignalExtra | GithubIssueSignalExtra | LinearIssueSignalExtra | JiraIssueSignalExtra | ConversationsTicketSignalExtra | ErrorTrackingSignalExtra | PgAnalyzeIssueSignalExtra | EndpointExecutionFailedSignalExtra | EndpointBreakdownLimitExceededSignalExtra | SignalsScoutSignalExtra | CheckFailedSignalExtra | LogsAlertStateChangeSignalExtra | ReplayVisionScannerFindingSignalExtra | AnalyticsAnomalyInvestigationSignalExtra | HealthCheckSignalExtra | EngineeringAnalyticsCIFlakyCheckSignalExtra | EngineeringAnalyticsCIBrokenDefaultBranchSignalExtra | EngineeringAnalyticsCIDurationRegressionSignalExtra | FreshdeskTicketSignalExtra | FreshserviceTicketSignalExtra | FrontConversationSignalExtra | GorgiasTicketSignalExtra | KustomerConversationSignalExtra | DixaConversationSignalExtra | PlainThreadSignalExtra | GitlabIssueSignalExtra | GiteaIssueSignalExtra | ShortcutStorySignalExtra | SentryIssueSignalExtra | RollbarItemSignalExtra | BugsnagErrorSignalExtra | HoneybadgerFaultSignalExtra | RaygunErrorGroupSignalExtra | DatadogSignalExtra | SnykScannerFindingSignalExtra | SonarqubeScannerFindingSignalExtra | SemgrepScannerFindingSignalExtra | Rapid7InsightvmScannerFindingSignalExtra | FeaturebaseFeedbackSignalExtra | FrillFeedbackSignalExtra | AhaFeedbackSignalExtra | UservoiceFeedbackSignalExtra | ProductboardFeedbackSignalExtra | CannyFeedbackSignalExtra | AsknicelyFeedbackSignalExtra | RetentlyFeedbackSignalExtra | AppfiguresReviewSignalExtra | AppfollowReviewSignalExtra | JudgemeReviewsReviewSignalExtra | IntercomTicketSignalExtra | HubspotTicketSignalExtra | Dynamics365TicketSignalExtra | ZohoCrmTicketSignalExtra | GoogleSearchConsoleSearchOpportunitySignalExtra | PagerdutyIncidentSignalExtra | OpsgenieAlertSignalExtra | IncidentIoIncidentSignalExtra | FirehydrantIncidentSignalExtra | SquadcastIncidentSignalExtra | ServicenowIncidentSignalExtra | SolarwindsServiceDeskIncidentSignalExtra | GrafanaIrmIncidentSignalExtra | XmattersIncidentSignalExtra | LaceworkScannerFindingSignalExtra | OrcaSecurityScannerFindingSignalExtra | TenableVulnerabilityManagementScannerFindingSignalExtra | BetterstackIncidentSignalExtra | MonteCarloAlertSignalExtra | BigeyeIssueSignalExtra | TriggerDevErrorSignalExtra | ChecklyErrorGroupSignalExtra | RoarkIssueSignalExtra;
+ 
+     export type SignalMatchMetadata = MatchedMetadata | NoMatchMetadata;
+ 

@@ -1,0 +1,26 @@
+diff --git a/contents/docs/error-tracking/_snippets/cli/download.mdx b/contents/docs/error-tracking/_snippets/cli/download.mdx
+index ba92aa041329..3b4138e44f44 100644
+--- a/contents/docs/error-tracking/_snippets/cli/download.mdx
++++ b/contents/docs/error-tracking/_snippets/cli/download.mdx
+@@ -10,8 +10,19 @@ npm install -g @posthog/cli
+ 
+ ```bash file=Curl
+ 
+-curl --proto '=https' --tlsv1.2 -LsSf https://download.posthog.com/cli | sh
+-posthog-cli-update
++curl -LsSf https://download.posthog.com/cli | sh
++
++```
++
++```bash file=Homebrew
++
++brew install posthog/tap/posthog-cli
++
++```
++
++```bash file=Cargo
++
++cargo install posthog-cli
+ 
+ ```
+ 

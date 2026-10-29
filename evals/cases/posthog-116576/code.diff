@@ -1,0 +1,1126 @@
+diff --git a/posthog/hogql/direct_sql/postgres_adapter.py b/posthog/hogql/direct_sql/postgres_adapter.py
+index 45152083db52..4fad8c571e2b 100644
+--- a/posthog/hogql/direct_sql/postgres_adapter.py
++++ b/posthog/hogql/direct_sql/postgres_adapter.py
+@@ -171,8 +171,10 @@ def execute(self, request: DirectQueryRequest) -> DirectQueryResult:
+                     HostNotAllowedError,
+                     TemporaryHostResolutionError,
+                     _get_sslmode,
++                    libpq_tls_kwargs,
+                     pinned_host_kwargs,
+                     source_requires_ssl,
++                    tls_options,
+                 )
+ 
+             postgres_source, source_config = self.validate_source_config(source, request.team, request.timings)
+@@ -239,6 +241,9 @@ def execute(self, request: DirectQueryRequest) -> DirectQueryResult:
+ 
+                     with request.timings.measure("postgres_connect", emit_span=True):
+                         try:
++                            # The files must outlast the connect, because a cancel request reads them again.
++                            tls_kwargs = tunnel_stack.enter_context(libpq_tls_kwargs(tls_options(source_config)))
++                            connection_kwargs.update(cast(PostgresConnectionKwargs, tls_kwargs))
+                             connection_context = psycopg.connect(**connection_kwargs)
+                         except (psycopg.Error, RuntimeError, ValueError) as error:
+                             if source.is_managed_warehouse_ready:
+diff --git a/products/warehouse_sources/backend/facade/source_management.py b/products/warehouse_sources/backend/facade/source_management.py
+index ed822b52ee95..f3ef8ef4d5e4 100644
+--- a/products/warehouse_sources/backend/facade/source_management.py
++++ b/products/warehouse_sources/backend/facade/source_management.py
+@@ -55,6 +55,8 @@
+     "OAuthMixin": "sources.common.mixins",
+     "pinned_host_kwargs": "sources.common.mixins",
+     "TemporaryHostResolutionError": "sources.common.mixins",
++    "libpq_tls_kwargs": "sources.common.tls",
++    "tls_options": "sources.common.tls",
+     "SourceSchema": "sources.common.schema",
+     "discover_trino_catalog": "sources.trino.trino",
+     "build_default_schemas": "sources.common.schema",
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/cdc/errors.py b/products/warehouse_sources/backend/temporal/data_imports/cdc/errors.py
+index c2f273438bfc..291222b0d500 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/cdc/errors.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/cdc/errors.py
+@@ -25,6 +25,7 @@
+ class CDCErrorCategory(enum.StrEnum):
+     AUTH_FAILED = "auth_failed"
+     SSL_REQUIRED = "ssl_required"
++    CERTIFICATE_REJECTED = "certificate_rejected"
+     CONNECTION_FAILED = "connection_failed"
+     HOST_UNREACHABLE = "host_unreachable"
+     QUOTA_EXCEEDED = "quota_exceeded"
+@@ -97,6 +98,12 @@ class CDCReservedColumnError(Exception):
+         "that the database accepts SSL connections, then re-enable change data capture.",
+         False,
+     ),
++    CDCErrorCategory.CERTIFICATE_REJECTED: (
++        "The TLS certificate check failed. Either the source database's certificate did not pass "
++        "verification, or the database rejected the client certificate. Check the TLS settings of the "
++        "source, then re-enable change data capture.",
++        False,
++    ),
+     CDCErrorCategory.CONNECTION_FAILED: (
+         "Could not connect to the source database. PostHog will keep retrying — if this persists, "
+         "check that the database is reachable and accepting connections.",
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/common/tls.py b/products/warehouse_sources/backend/temporal/data_imports/sources/common/tls.py
+new file mode 100644
+index 000000000000..4655a73e905b
+--- /dev/null
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/common/tls.py
+@@ -0,0 +1,237 @@
++import ssl
++import tempfile
++from collections.abc import Iterator
++from contextlib import contextmanager
++from dataclasses import field
++from functools import cache
++from pathlib import Path
++
++from posthog.dataclasses import frozen
++
++from products.warehouse_sources.backend.facade.source_config import (
++    SourceFieldInputConfig,
++    SourceFieldInputConfigType,
++    SourceFieldSelectConfig,
++    SourceFieldSelectConfigConverter,
++    SourceFieldSelectConfigOption,
++)
++
++CLIENT_CERTIFICATE_INCOMPLETE_ERROR = (
++    "A client certificate needs its private key. Add the key, or clear the certificate."
++)
++
++ENCRYPTED_CLIENT_KEY_ERROR = "The client key has a passphrase. Remove the passphrase and paste the key again."
++
++# The user has to change the source to clear either one, so a sync stops on them.
++TLS_CONFIGURATION_ERRORS: dict[str, str | None] = {
++    CLIENT_CERTIFICATE_INCOMPLETE_ERROR: None,
++    ENCRYPTED_CLIENT_KEY_ERROR: None,
++}
++
++_CLIENT_CERTIFICATE_REJECTED_ERROR = (
++    "Your database rejected the client certificate, or requires one. Add a client certificate and key that "
++    "your database trusts."
++)
++
++# Keyed by the stable part of the client library's message, in lower case. Each failure stays the same
++# on every attempt until the user changes the source.
++CERTIFICATE_ERRORS: dict[str, str] = {
++    "certificate verify failed": (
++        "PostHog could not verify your database's TLS certificate. Either an authority PostHog trusts did not "
++        "sign it, or it does not match the host. Add the authority that signed it, check the host, or turn "
++        "off certificate verification and remove the certificate authority."
++    ),
++    "does not match host name": (
++        "Your database's TLS certificate does not match the host you entered. Use the hostname the "
++        "certificate was issued for, or turn off certificate verification and remove the certificate authority."
++    ),
++    "alert certificate required": _CLIENT_CERTIFICATE_REJECTED_ERROR,
++    "alert bad certificate": _CLIENT_CERTIFICATE_REJECTED_ERROR,
++    "alert unknown ca": _CLIENT_CERTIFICATE_REJECTED_ERROR,
++    # Postgres completes the TLS handshake and then rejects the certificate at its pg_hba check.
++    "certificate authentication failed": _CLIENT_CERTIFICATE_REJECTED_ERROR,
++    "connection requires a valid client certificate": _CLIENT_CERTIFICATE_REJECTED_ERROR,
++}
++
++
++class TLSConfigurationError(Exception):
++    """The TLS fields of a source contradict each other."""
++
++
++@frozen
++class TLSOptions:
++    """The TLS settings a database source reads from its config.
++
++    `verify_hostname` is False through an SSH tunnel. The tunnel presents the database on a
++    loopback address, so the certificate's hostname cannot match the address the client dials.
++    """
++
++    verify: bool = False
++    verify_hostname: bool = False
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = field(default=None, repr=False)
++
++    def __post_init__(self) -> None:
++        if self.client_certificate and not self.client_key:
++            raise TLSConfigurationError(CLIENT_CERTIFICATE_INCOMPLETE_ERROR)
++        # OpenSSL prompts on the terminal for the passphrase of an encrypted key, which can block
++        # a worker. Both PEM forms of an encrypted key carry this word.
++        if self.client_key and "ENCRYPTED" in self.client_key:
++            raise TLSConfigurationError(ENCRYPTED_CLIENT_KEY_ERROR)
++
++    @property
++    def is_set(self) -> bool:
++        return self.verify or bool(self.client_certificate)
++
++
++@frozen
++class TLSFiles:
++    ca_certificate: str | None
++    client_certificate: str | None
++    client_key: str | None
++
++
++def tls_options(config: object) -> TLSOptions:
++    """Read the TLS fields from a source config. A config without them gets the no-op options."""
++    ca_certificate = _pem(config, "ca_certificate")
++    client_certificate = _pem(config, "client_certificate")
++    # A certificate authority has no use except to verify against, so setting one turns verification on.
++    verify = bool(getattr(config, "verify_server_certificate", False)) or ca_certificate is not None
++    ssh_tunnel = getattr(config, "ssh_tunnel", None)
++    return TLSOptions(
++        verify=verify,
++        verify_hostname=verify and not (ssh_tunnel is not None and ssh_tunnel.enabled),
++        ca_certificate=ca_certificate,
++        client_certificate=client_certificate,
++        # The form cannot blank a stored secret, so clearing the certificate is how a user turns the
++        # client certificate off. The stored key stays, and nothing uses it without a certificate.
++        client_key=_pem(config, "client_key") if client_certificate else None,
++    )
++
++
++# Debian and Ubuntu first, the production images. macOS and Alpine second.
++_CA_BUNDLE_PATHS = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem")
++
++
++@cache
++def system_ca_bundle() -> str:
++    """Return the first CA bundle that exists on this host."""
++    defaults = ssl.get_default_verify_paths()
++    for path in (*_CA_BUNDLE_PATHS, defaults.cafile, defaults.openssl_cafile):
++        if path and Path(path).is_file():
++            return path
++    return _CA_BUNDLE_PATHS[0]
++
++
++@contextmanager
++def tls_files(options: TLSOptions) -> Iterator[TLSFiles]:
++    """Write the PEM values to files for the duration of the context.
++
++    The database clients take certificate paths, not contents. The directory is private to this
++    process user, which libpq requires for the private key.
++    """
++    if not (options.ca_certificate or options.client_certificate):
++        yield TLSFiles(ca_certificate=None, client_certificate=None, client_key=None)
++        return
++    with tempfile.TemporaryDirectory(prefix="source-tls-") as directory:
++
++        def write(name: str, pem: str | None) -> str | None:
++            if not pem:
++                return None
++            path = Path(directory) / name
++            path.touch(mode=0o600)
++            path.write_text(pem)
++            return str(path)
++
++        yield TLSFiles(
++            ca_certificate=write("ca.crt", options.ca_certificate),
++            client_certificate=write("client.crt", options.client_certificate),
++            client_key=write("client.key", options.client_key),
++        )
++
++
++@contextmanager
++def libpq_tls_kwargs(options: TLSOptions | None) -> Iterator[dict[str, str]]:
++    """Yield the libpq connection parameters that `options` overrides.
++
++    Yields nothing when no TLS option is set, so the caller's own `sslmode` stays in effect.
++    The files exist only inside the context, and libpq reads them when it connects.
++    """
++    if options is None or not options.is_set:
++        yield {}
++        return
++    with tls_files(options) as files:
++        kwargs: dict[str, str] = {}
++        if options.verify:
++            kwargs["sslmode"] = "verify-full" if options.verify_hostname else "verify-ca"
++            kwargs["sslrootcert"] = files.ca_certificate or system_ca_bundle()
++        if files.client_certificate and files.client_key:
++            # With `prefer`, libpq falls back to plaintext and never presents the certificate.
++            kwargs.setdefault("sslmode", "require")
++            kwargs["sslcert"] = files.client_certificate
++            kwargs["sslkey"] = files.client_key
++        yield kwargs
++
++
++def _pem(config: object, name: str) -> str | None:
++    value = getattr(config, name, None)
++    return value.strip() or None if isinstance(value, str) else None
++
++
++def verify_server_certificate_field() -> SourceFieldSelectConfig:
++    return SourceFieldSelectConfig(
++        name="verify_server_certificate",
++        label="Verify the server certificate?",
++        required=True,
++        defaultValue="false",
++        converter=SourceFieldSelectConfigConverter.STR_TO_BOOL,
++        caption=(
++            "Check that your database's TLS certificate comes from a trusted authority and matches the host. "
++            "Through an SSH tunnel we check the certificate chain but not the hostname, because the tunnel "
++            "presents your database on a local address."
++        ),
++        options=[
++            SourceFieldSelectConfigOption(label="Yes", value="true"),
++            SourceFieldSelectConfigOption(label="No", value="false"),
++        ],
++    )
++
++
++def ca_certificate_field() -> SourceFieldInputConfig:
++    return SourceFieldInputConfig(
++        name="ca_certificate",
++        label="Certificate authority (optional)",
++        type=SourceFieldInputConfigType.TEXTAREA,
++        required=False,
++        placeholder="-----BEGIN CERTIFICATE-----",
++        caption=(
++            "The PEM certificate of the authority that signed your database's certificate. Add it when your "
++            "database uses a private authority or a self-signed certificate. Adding one turns on certificate "
++            "verification."
++        ),
++        secret=False,
++    )
++
++
++def client_certificate_fields() -> list[SourceFieldInputConfig]:
++    return [
++        SourceFieldInputConfig(
++            name="client_certificate",
++            label="Client certificate (optional)",
++            type=SourceFieldInputConfigType.TEXTAREA,
++            required=False,
++            placeholder="-----BEGIN CERTIFICATE-----",
++            caption="A PEM certificate that PostHog presents to your database. Add it when your database requires one.",
++            secret=False,
++        ),
++        SourceFieldInputConfig(
++            name="client_key",
++            label="Client key (optional)",
++            type=SourceFieldInputConfigType.TEXTAREA,
++            required=False,
++            placeholder="-----BEGIN PRIVATE KEY-----",
++            caption="The private key of the client certificate, in PEM format and without a passphrase.",
++            secret=True,
++        ),
++    ]
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mssql.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mssql.py
+index 301be94f8497..a0b3141ef2e1 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mssql.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mssql.py
+@@ -14,4 +14,5 @@ class MSSQLSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    require_encryption: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mysql.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mysql.py
+index 76406ed725e0..9d97db733baa 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mysql.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/mysql.py
+@@ -15,4 +15,7 @@ class MySQLSourceConfig(config.Config):
+     schema: str | None = None
+     using_ssl: bool = config.value(default=config.str_to_bool("true"), converter=config.str_to_bool)
+     verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = None
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/neon.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/neon.py
+index bbde6290afa1..f8a099c08b16 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/neon.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/neon.py
+@@ -14,4 +14,8 @@ class NeonSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = None
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/planetscalepostgres.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/planetscalepostgres.py
+index bee481a9bb3e..d04aa946055a 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/planetscalepostgres.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/planetscalepostgres.py
+@@ -13,3 +13,7 @@ class PlanetScalePostgresSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/postgres.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/postgres.py
+index 96ab3e4aa230..9b0b94704d51 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/postgres.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/postgres.py
+@@ -14,4 +14,8 @@ class PostgresSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = None
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/redshift.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/redshift.py
+index 364dd41de841..7bc7e8c68e56 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/redshift.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/redshift.py
+@@ -14,4 +14,6 @@ class RedshiftSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/supabase.py b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/supabase.py
+index b470ac8d2ace..0ae5f66964db 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/supabase.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/generated_configs/supabase.py
+@@ -14,4 +14,8 @@ class SupabaseSourceConfig(config.Config):
+     port: int = config.value(converter=int)
+     connection_string: str | None = None
+     schema: str | None = None
++    verify_server_certificate: bool = config.value(default=config.str_to_bool("false"), converter=config.str_to_bool)
++    ca_certificate: str | None = None
++    client_certificate: str | None = None
++    client_key: str | None = None
+     ssh_tunnel: SSHTunnelConfig | None = None
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/mssql.py b/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/mssql.py
+index e912006b8de3..833dc785e1e7 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/mssql.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/mssql.py
+@@ -692,6 +692,8 @@ def connect(
+                 user=config.user,
+                 password=config.password,
+                 login_timeout=MSSQL_LOGIN_TIMEOUT_SECONDS,
++                # None keeps the FreeTDS default, which encrypts only when the server offers it.
++                encryption="require" if config.require_encryption else None,
+             ) as conn:
+                 with conn.cursor() as cursor:
+                     cursor.execute(f"SET LOCK_TIMEOUT {int(lock_timeout_ms)}")
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/source.py
+index f4feb3a2210a..497e4e07443b 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/mssql/source.py
+@@ -10,6 +10,9 @@
+     SourceConfig,
+     SourceFieldInputConfig,
+     SourceFieldInputConfigType,
++    SourceFieldSelectConfig,
++    SourceFieldSelectConfigConverter,
++    SourceFieldSelectConfigOption,
+     SourceFieldSSHTunnelConfig,
+ )
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.base import FieldType, ResumableSource
+@@ -356,6 +359,21 @@ def get_source_config(self) -> SourceConfig:
+                         placeholder="Leave blank to import all schemas",
+                         secret=False,
+                     ),
++                    SourceFieldSelectConfig(
++                        name="require_encryption",
++                        label="Require encryption?",
++                        required=True,
++                        defaultValue="false",
++                        converter=SourceFieldSelectConfigConverter.STR_TO_BOOL,
++                        caption=(
++                            "Refuse to connect unless the connection to your database is encrypted. "
++                            "PostHog does not verify the SQL Server certificate."
++                        ),
++                        options=[
++                            SourceFieldSelectConfigOption(label="Yes", value="true"),
++                            SourceFieldSelectConfigOption(label="No", value="false"),
++                        ],
++                    ),
+                     SourceFieldSSHTunnelConfig(name="ssh_tunnel", label="Use SSH tunnel?"),
+                 ],
+             ),
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/mysql.py b/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/mysql.py
+index 06e989bf6acc..d329766a17a3 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/mysql.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/mysql.py
+@@ -24,8 +24,6 @@
+ from contextlib import ExitStack, contextmanager
+ from typing import Any, TypeVar
+ 
+-from django.conf import settings
+-
+ import psycopg
+ import pyarrow as pa
+ import pymysql
+@@ -99,6 +97,11 @@
+     normalize_namespace,
+     resolve_source_location,
+ )
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import (
++    system_ca_bundle,
++    tls_files,
++    tls_options,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.mysql import MySQLSourceConfig
+ from products.warehouse_sources.backend.types import IncrementalFieldType, PartitionSettings
+@@ -915,8 +918,9 @@ def _request_authentication(self) -> None:
+         if self.ssl and not offers_tls:
+             raise pymysql.err.OperationalError(
+                 CR.CR_SSL_CONNECTION_ERROR,
+-                "The MySQL server did not offer a TLS connection. Turn off certificate "
+-                "verification for this source, or enable TLS on the server.",
++                "The MySQL server did not offer a TLS connection. Enable TLS on the server, or turn off "
++                "certificate verification and remove the certificate authority and client certificate "
++                "for this source.",
+             )
+         super()._request_authentication()
+ 
+@@ -935,8 +939,8 @@ def connection_timeouts(read_timeout: int) -> dict[str, int]:
+ 
+ 
+ def _new_connection(kwargs: dict[str, Any], **extra: Any) -> pymysql.Connection:
+-    """Build the connection, refusing plaintext when this source verifies the certificate."""
+-    if kwargs.get("ssl_verify_cert"):
++    """Build the connection, refusing plaintext when this source verifies or presents a certificate."""
++    if kwargs.get("ssl_verify_cert") or kwargs.get("ssl_cert"):
+         return _TLSRequiredConnection(**kwargs, **extra)
+     return _SourceConnection(**kwargs, **extra)
+ 
+@@ -1329,19 +1333,12 @@ def connect(
+         first rows are ready, and the keyset path sets `autocommit` so each
+         page is its own transaction (see `_keyset_get_rows`).
+         """
+-        verify_certificate = config.verify_server_certificate
+-        ssl_ca: str | None = None
+-        # Verification implies TLS, so a user who asks us to check the certificate gets the
+-        # encrypted connection that check needs, whatever `using_ssl` says.
+-        if config.using_ssl or verify_certificate:
+-            ssl_ca = "/etc/ssl/cert.pem" if settings.DEBUG else "/etc/ssl/certs/ca-certificates.crt"
+-
+-        # The tunnel presents the database on a loopback address, so the certificate's hostname
+-        # cannot match the address pymysql dials. The chain check still applies there.
+-        tunnel = config.ssh_tunnel
+-        verify_hostname = verify_certificate and not (tunnel is not None and tunnel.enabled)
+-
+-        with self._ssh_tunnel_endpoint(config, team_id) as (host, port):
++        tls = tls_options(config)
++        # Any TLS option implies TLS, so a user who sets one gets the encrypted connection it needs,
++        # whatever `using_ssl` says.
++        use_tls = config.using_ssl or tls.is_set
++
++        with self._ssh_tunnel_endpoint(config, team_id) as (host, port), tls_files(tls) as files:
+             kwargs: dict[str, Any] = {
+                 "host": host,
+                 # pymysql rejects a non-int port; config.port can arrive as a string when the
+@@ -1351,11 +1348,13 @@ def connect(
+                 "user": config.user,
+                 "password": config.password,
+                 **connection_timeouts(read_timeout),
+-                "ssl_ca": ssl_ca,
++                "ssl_ca": (files.ca_certificate or system_ca_bundle()) if use_tls else None,
++                "ssl_cert": files.client_certificate,
++                "ssl_key": files.client_key,
+                 # pymysql resolves `ssl_ca` on its own to `verify_mode=CERT_NONE`, so only an
+                 # explicit True verifies. None leaves that prior behavior untouched.
+-                "ssl_verify_cert": True if verify_certificate else None,
+-                "ssl_verify_identity": True if verify_hostname else None,
++                "ssl_verify_cert": True if tls.verify else None,
++                "ssl_verify_identity": True if tls.verify_hostname else None,
+                 "conv": _MYSQL_SAFE_CONVERSIONS,
+                 "autocommit": autocommit,
+                 "init_command": "SET workload = 'OLAP';" if host.endswith("psdb.cloud") else None,
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/source.py
+index 97666bcfa7ef..bcae01a80311 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/mysql/source.py
+@@ -32,6 +32,13 @@
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import SourceSchema
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.base import SQLSource
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import KeysetResumeState
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import (
++    CERTIFICATE_ERRORS,
++    TLS_CONFIGURATION_ERRORS,
++    TLSConfigurationError,
++    ca_certificate_field,
++    client_certificate_fields,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.mysql import MySQLSourceConfig
+ from products.warehouse_sources.backend.temporal.data_imports.sources.mysql.mysql import (
+@@ -54,6 +61,7 @@
+ # get_non_retryable_errors — which the sync path also consults for retry
+ # classification — so connection-error retry behaviour is unchanged.
+ _VALIDATE_CONNECTION_HINTS: list[tuple[str, str]] = [
++    *CERTIFICATE_ERRORS.items(),
+     (
+         "Name or service not known",
+         "Host could not be resolved. Check the host is spelled correctly and reachable from PostHog.",
+@@ -275,8 +283,8 @@ def get_source_config(self) -> SourceConfig:
+                         converter=SourceFieldSelectConfigConverter.STR_TO_BOOL,
+                         caption=(
+                             "Check that your database's TLS certificate comes from a trusted authority. "
+-                            "A self-signed certificate or a private authority does not pass, so leave this off "
+-                            "if you use one. Through an SSH tunnel we check the certificate chain but not the "
++                            "A self-signed certificate or a private authority passes only when you add its "
++                            "certificate authority below. Through an SSH tunnel we check the certificate chain but not the "
+                             "hostname, because the tunnel presents your database on a local address."
+                         ),
+                         options=[
+@@ -284,6 +292,8 @@ def get_source_config(self) -> SourceConfig:
+                             SourceFieldSelectConfigOption(label="No", value="false"),
+                         ],
+                     ),
++                    ca_certificate_field(),
++                    *client_certificate_fields(),
+                     SourceFieldSSHTunnelConfig(name="ssh_tunnel", label="Use SSH tunnel?"),
+                 ],
+             ),
+@@ -291,6 +301,9 @@ def get_source_config(self) -> SourceConfig:
+ 
+     def get_non_retryable_errors(self) -> dict[str, str | None]:
+         return {
++            # pymysql wraps a TLS failure in the generic 2003 error below, so these must come first.
++            **CERTIFICATE_ERRORS,
++            **TLS_CONFIGURATION_ERRORS,
+             # pymysql collapses every connect-level failure (wrong host/port, closed firewall,
+             # unreachable host, a connect timeout that outlasts the in-process retry budget) into
+             # error 2003, "Can't connect to MySQL server on '<host>' (<os detail>)". Non-retryable
+@@ -649,9 +662,10 @@ def validate_credentials(
+ 
+         try:
+             self.get_schemas(config, team_id, api_version=api_version)
+-        except (HostNotAllowedError, TemporaryHostResolutionError) as e:
+-            # The host policy refused the host, or its lookup never answered. Both carry their own
+-            # user-facing wording and neither is a PostHog defect, so they are not captured.
++        except (HostNotAllowedError, TemporaryHostResolutionError, TLSConfigurationError) as e:
++            # The host policy refused the host, its lookup never answered, or the TLS fields contradict
++            # each other. Each carries its own user-facing wording and none is a PostHog defect, so they
++            # are not captured.
+             return False, str(e)
+         except BaseSSHTunnelForwarderError as e:
+             # sshtunnel surfaces raw library strings (e.g. "Could not establish session to SSH
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/adapter.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/adapter.py
+index 5d7b0314c7fb..7ae8a92befe2 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/adapter.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/adapter.py
+@@ -13,6 +13,7 @@
+ 
+ from products.warehouse_sources.backend.temporal.data_imports.cdc.errors import cdc_error_info
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.mixins import HostNotAllowedError
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import tls_options
+ from products.warehouse_sources.backend.temporal.data_imports.sources.postgres.cdc.config import PostgresCDCConfig
+ from products.warehouse_sources.backend.temporal.data_imports.sources.postgres.cdc.errors import (
+     classify_postgres_cdc_error,
+@@ -135,6 +136,7 @@ def create_reader(self, source: ExternalDataSource) -> CDCStreamReader:
+             user=inputs.get("user", ""),
+             password=inputs.get("password", ""),
+             require_ssl=source_requires_ssl(source, config),
++            tls=tls_options(config),
+             slot_name=cdc_config.slot_name,
+             publication_name=cdc_config.publication_name,
+         )
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/errors.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/errors.py
+index 0e35b61b11eb..0d41ed45fd5f 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/errors.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/errors.py
+@@ -19,6 +19,7 @@
+     SSH_TUNNEL_HOST_NOT_ALLOWED_ERROR,
+     HostNotAllowedError,
+ )
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import CERTIFICATE_ERRORS
+ 
+ # Server requires (or rejects) an encrypted connection. Kept specific so a transient
+ # "SSL connection has been closed unexpectedly" stays a retryable connection failure.
+@@ -128,6 +129,11 @@ def classify_postgres_cdc_error(exc: BaseException) -> CDCErrorCategory | None:
+         if "publication" in message:
+             return CDCErrorCategory.PUBLICATION_MISSING
+ 
++    # Before the authentication checks: Postgres reports a rejected client certificate as
++    # "certificate authentication failed", which the auth markers would otherwise claim.
++    if any(marker in message for marker in CERTIFICATE_ERRORS):
++        return CDCErrorCategory.CERTIFICATE_REJECTED
++
+     # Authentication (SQLSTATE class 28) surfaces either as a mapped subclass (server-side)
+     # or a bare OperationalError with a libpq message (connection-time). Check before the
+     # generic OperationalError fallback, which these subclass.
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/slot_manager.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/slot_manager.py
+index 181771106b93..addbda47b05a 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/slot_manager.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/slot_manager.py
+@@ -23,6 +23,7 @@ def cdc_pg_connection(source: ExternalDataSource, connect_timeout: int = 15) ->
+     Handles SSH tunnel and delegates the actual connection
+     to _connect_to_postgres which owns SSL cert overrides.
+     """
++    from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import tls_options
+     from products.warehouse_sources.backend.temporal.data_imports.sources.postgres.postgres import (
+         _connect_to_postgres,
+         source_requires_ssl,
+@@ -45,6 +46,7 @@ def cdc_pg_connection(source: ExternalDataSource, connect_timeout: int = 15) ->
+             password=config.password,
+             require_ssl=require_ssl,
+             connect_timeout=connect_timeout,
++            tls=tls_options(config),
+             team_id=source.team_id,
+         )
+         try:
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/stream_reader.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/stream_reader.py
+index 059bbe9ac7ae..23e6d8c86584 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/stream_reader.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/cdc/stream_reader.py
+@@ -19,6 +19,7 @@
+ from psycopg import sql
+ 
+ from products.warehouse_sources.backend.temporal.data_imports.cdc.types import ChangeEvent
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import TLSOptions
+ from products.warehouse_sources.backend.temporal.data_imports.sources.postgres.cdc.decoder import PgOutputDecoder
+ from products.warehouse_sources.backend.temporal.data_imports.sources.postgres.postgres import (
+     _connect_to_postgres,
+@@ -66,6 +67,7 @@ class PgCDCConnectionParams:
+     user: str
+     password: str = field(repr=False)
+     require_ssl: bool = False
++    tls: TLSOptions | None = None
+     slot_name: str = ""
+     publication_name: str = ""
+ 
+@@ -128,6 +130,7 @@ def _open_streaming_connection(self) -> psycopg.Connection:
+                 user=self._params.user,
+                 password=self._params.password,
+                 require_ssl=self._params.require_ssl,
++                tls=self._params.tls,
+                 team_id=self._source.team_id if self._source is not None else None,
+                 # statement_timeout (30m) is a server-side ceiling so a stalled WAL decode can't
+                 # hang the streaming connection indefinitely; it bounds a single peek, the caller's
+@@ -293,6 +296,7 @@ def confirm_position(self, position: str) -> None:
+                 user=self._params.user,
+                 password=self._params.password,
+                 require_ssl=self._params.require_ssl,
++                tls=self._params.tls,
+                 team_id=self._source.team_id if self._source is not None else None,
+             ),
+             logger,
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
+index 098dc86d20da..060c731b311a 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/postgres.py
+@@ -4,6 +4,7 @@
+ import math
+ import time
+ import errno
++import weakref
+ import collections
+ import dataclasses
+ from collections.abc import Callable, Iterator
+@@ -95,6 +96,12 @@
+     and_join,
+     render_psycopg_row_filter_conditions,
+ )
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import (
++    CERTIFICATE_ERRORS,
++    TLSOptions,
++    libpq_tls_kwargs,
++    tls_options,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.postgres import (
+     PostgresSourceConfig,
+@@ -950,7 +957,16 @@ def _is_invalid_ssl_negotiation_response(error: BaseException) -> bool:
+     return _INVALID_SSL_NEGOTIATION_RESPONSE_SUBSTRING in " ".join(str(arg) for arg in error.args).lower()
+ 
+ 
+-def _open_connection(*, team_id: int | None = None, **connect_kwargs: Any) -> psycopg.Connection:
++# libpq mentions SSL when it refuses the server certificate or the server refuses ours. The server
++# does speak TLS there, so the "enable SSL" advice of `SSLRequiredError` would mislead.
++def _is_certificate_rejection(error: BaseException) -> bool:
++    message = " ".join(str(arg) for arg in error.args).lower()
++    return any(marker in message for marker in CERTIFICATE_ERRORS)
++
++
++def _open_connection(
++    *, team_id: int | None = None, tls: TLSOptions | None = None, **connect_kwargs: Any
++) -> psycopg.Connection:
+     """The one `psycopg.connect` in this module. Every connection to a source database opens
+     here so that `pinned_host_kwargs` decides what gets dialed.
+ 
+@@ -958,6 +974,18 @@ def _open_connection(*, team_id: int | None = None, **connect_kwargs: Any) -> ps
+     `_OPTIONS_STARTUP_PARAM_UNSUPPORTED_SUBSTRINGS` for why transaction-mode poolers reject
+     `options` and why dropping it is safe.
+     """
++    if tls is not None:
++        tls_files = ExitStack()
++        tls_kwargs = tls_files.enter_context(libpq_tls_kwargs(tls))
++        try:
++            connection = _open_connection(team_id=team_id, **{**connect_kwargs, **tls_kwargs})
++        except BaseException:
++            tls_files.close()
++            raise
++        # libpq 17 reads the certificate files again for every `cancel_safe` request, so they must
++        # last as long as the connection.
++        weakref.finalize(connection, tls_files.close)
++        return connection
+     connect_kwargs.update(
+         pinned_host_kwargs(
+             connect_kwargs["host"],
+@@ -988,6 +1016,7 @@ def _connect_to_postgres(
+     require_ssl: bool = False,
+     connect_timeout: int = 15,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+     **kwargs: Any,
+ ) -> psycopg.Connection:
+     sslmode = _get_sslmode(require_ssl)
+@@ -1001,6 +1030,7 @@ def _connect_to_postgres(
+     try:
+         return _open_connection(
+             team_id=team_id,
++            tls=tls,
+             host=host,
+             port=port,
+             dbname=database,
+@@ -1020,6 +1050,7 @@ def _connect_to_postgres(
+             require_ssl
+             and "SSL" in str(e)
+             and not _is_invalid_ssl_negotiation_response(e)
++            and not _is_certificate_rejection(e)
+             and not _is_connection_dropped_error(e)
+         ):
+             raise SSLRequiredError(
+@@ -1039,6 +1070,7 @@ def pg_connection(
+     password: str,
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+ ) -> Iterator[psycopg.Connection]:
+     """Context manager that opens a postgres connection and ensures it is closed on exit."""
+     conn = _connect_to_postgres(
+@@ -1049,6 +1081,7 @@ def pg_connection(
+         password=password,
+         require_ssl=require_ssl,
+         team_id=team_id,
++        tls=tls,
+     )
+     try:
+         yield conn
+@@ -1617,6 +1650,7 @@ def get_postgres_row_count(
+     schema: str | None,
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+     names: list[str] | None = None,
+ ) -> dict[str, int]:
+     if _normalize_selected_schema(schema) is None and not names:
+@@ -1630,6 +1664,7 @@ def get_postgres_row_count(
+             password=password,
+             require_ssl=require_ssl,
+             team_id=team_id,
++            tls=tls,
+         ) as connection:
+             return _row_counts_from_conn(connection, schema, names)
+     except:
+@@ -1748,6 +1783,7 @@ def get_schemas(
+     port: int,
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+     names: list[str] | None = None,
+ ) -> dict[str, PostgresDiscoveredSchema]:
+     """Get all tables from PostgreSQL source schemas to sync."""
+@@ -1778,6 +1814,7 @@ def _connect_and_discover() -> dict[str, PostgresDiscoveredSchema]:
+             password=password,
+             require_ssl=require_ssl,
+             team_id=team_id,
++            tls=tls,
+         )
+         try:
+             return _schemas_from_conn(connection, schema, names)
+@@ -1802,6 +1839,7 @@ def get_primary_keys_for_schemas(
+     table_names: list[str],
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+ ) -> dict[str, list[str] | None]:
+     """Detect primary keys for all tables in a single query."""
+     result: dict[str, list[str] | None] = dict.fromkeys(table_names)
+@@ -1815,6 +1853,7 @@ def get_primary_keys_for_schemas(
+             password=password,
+             require_ssl=require_ssl,
+             team_id=team_id,
++            tls=tls,
+         ) as connection:
+             pks = get_primary_key_columns(connection, schema, table_names)
+             for table_name, pk_cols in pks.items():
+@@ -1902,6 +1941,7 @@ def get_foreign_keys(
+     port: int,
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+     names: list[str] | None = None,
+ ) -> dict[str, list[tuple[str, str, str]]]:
+     """Get foreign keys for tables in the selected PostgreSQL schema."""
+@@ -1913,6 +1953,7 @@ def get_foreign_keys(
+         password=password,
+         require_ssl=require_ssl,
+         team_id=team_id,
++        tls=tls,
+     ) as connection:
+         return _foreign_keys_from_conn(connection, schema, names)
+ 
+@@ -1937,6 +1978,7 @@ def get_connection_metadata(
+     port: int,
+     require_ssl: bool = False,
+     team_id: int | None = None,
++    tls: TLSOptions | None = None,
+ ) -> dict[str, Any]:
+     with pg_connection(
+         host=host,
+@@ -1946,6 +1988,7 @@ def get_connection_metadata(
+         password=password,
+         require_ssl=require_ssl,
+         team_id=team_id,
++        tls=tls,
+     ) as connection:
+         with connection.cursor() as cursor:
+             cursor.execute("SELECT current_database(), version()")
+@@ -3691,6 +3734,7 @@ def postgres_source(
+     incremental_field: Optional[str] = None,
+     incremental_field_type: Optional[IncrementalFieldType] = None,
+     require_ssl: bool = False,
++    tls: TLSOptions | None = None,
+     is_initial_sync: bool = False,
+     enabled_columns: Optional[list[str]] = None,
+     row_filters: Optional[list[ValidatedRowFilter]] = None,
+@@ -3722,6 +3766,7 @@ def _open_setup_connection() -> psycopg.Connection:
+             try:
+                 conn = _open_connection(
+                     team_id=team_id,
++                    tls=tls,
+                     host=host,
+                     port=port,
+                     dbname=database,
+@@ -3740,6 +3785,7 @@ def _open_setup_connection() -> psycopg.Connection:
+                     require_ssl
+                     and "SSL" in str(e)
+                     and not _is_invalid_ssl_negotiation_response(e)
++                    and not _is_certificate_rejection(e)
+                     and not _is_connection_dropped_error(e)
+                 ):
+                     raise SSLRequiredError(
+@@ -4118,6 +4164,7 @@ def get_connection():
+                 try:
+                     connection = _open_connection(
+                         team_id=team_id,
++                        tls=tls,
+                         host=host,
+                         port=port,
+                         dbname=database,
+@@ -4137,6 +4184,7 @@ def get_connection():
+                         require_ssl
+                         and "SSL" in str(e)
+                         and not _is_invalid_ssl_negotiation_response(e)
++                        and not _is_certificate_rejection(e)
+                         and not _is_connection_dropped_error(e)
+                     ):
+                         raise SSLRequiredError(
+@@ -4857,6 +4905,7 @@ def connect(
+                 password=config.password,
+                 require_ssl=require_ssl,
+                 team_id=team_id,
++                tls=tls_options(config),
+             ) as conn:
+                 yield conn
+ 
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/source.py
+index 83a5a004c0af..427d1a01f217 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/postgres/source.py
+@@ -45,6 +45,15 @@
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.base import SQLSource
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.keyset import KeysetResumeState
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.location import resolve_source_location
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import (
++    CERTIFICATE_ERRORS,
++    TLS_CONFIGURATION_ERRORS,
++    TLSConfigurationError,
++    ca_certificate_field,
++    client_certificate_fields,
++    tls_options,
++    verify_server_certificate_field,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.postgres import (
+     PostgresSourceConfig,
+@@ -195,6 +204,7 @@
+ POSTGRES_HOST_CHECK_SOURCE_TYPE = "postgres"
+ 
+ PostgresErrors = {
++    **CERTIFICATE_ERRORS,
+     "password authentication failed for user": _INVALID_CREDENTIALS_VALIDATION_ERROR,
+     # A proxy/pooler in front of some providers rejects bad credentials during its own
+     # database-identification step instead of libpq's "password authentication failed for user",
+@@ -729,6 +739,9 @@ def get_source_config(self) -> SourceConfig:
+                         placeholder="public",
+                         secret=False,
+                     ),
++                    verify_server_certificate_field(),
++                    ca_certificate_field(),
++                    *client_certificate_fields(),
+                     SourceFieldSSHTunnelConfig(name="ssh_tunnel", label="Use SSH tunnel?"),
+                 ],
+             ),
+@@ -1173,6 +1186,8 @@ def get_non_retryable_errors(self) -> dict[str, str | None]:
+                 "check that the host for this source is the hostname your database provider gave "
+                 "you rather than an IP address, then re-enable the sync."
+             ),
++            **CERTIFICATE_ERRORS,
++            **TLS_CONFIGURATION_ERRORS,
+             "SSLRequiredError": None,
+             "SSL/TLS connection is required": None,
+             _SSH_GATEWAY_SESSION_ERROR: _SSH_GATEWAY_UNREACHABLE_SYNC_MESSAGE,
+@@ -1735,6 +1750,7 @@ def get_schemas(
+         require_ssl: bool = False,
+     ) -> list[SourceSchema]:
+         schemas = []
++        tls = tls_options(config)
+ 
+         with self.with_ssh_tunnel(config, team_id, POSTGRES_HOST_CHECK_SOURCE_TYPE) as (host, port):
+             db_schemas = get_postgres_schemas(
+@@ -1747,6 +1763,7 @@ def get_schemas(
+                 names=names,
+                 require_ssl=require_ssl,
+                 team_id=team_id,
++                tls=tls,
+             )
+             # Foreign keys are advisory metadata (they pre-populate relationship hints in the
+             # table picker). The discovery query joins three `information_schema` views, which
+@@ -1764,6 +1781,7 @@ def get_schemas(
+                     names=names,
+                     require_ssl=require_ssl,
+                     team_id=team_id,
++                    tls=tls,
+                 )
+             except Exception as e:
+                 structlog.get_logger().warning("Failed to detect foreign keys for Postgres schemas", exc_info=e)
+@@ -1780,6 +1798,7 @@ def get_schemas(
+                     names=names,
+                     require_ssl=require_ssl,
+                     team_id=team_id,
++                    tls=tls,
+                 )
+             else:
+                 row_counts = {}
+@@ -1814,6 +1833,7 @@ def get_schemas(
+                     database=config.database,
+                     require_ssl=require_ssl,
+                     team_id=team_id,
++                    tls=tls,
+                 ) as conn:
+                     # PK lookup powers `supports_cdc`. Wrap in try/except so a permissions
+                     # quirk on `pg_catalog` (rare) only disables CDC advertising for this
+@@ -2015,7 +2035,7 @@ def validate_credentials(
+             if require_ssl:
+                 return False, _SSL_UNSUPPORTED_ERROR
+             return False, str(e)
+-        except HostNotAllowedError as e:
++        except (HostNotAllowedError, TLSConfigurationError) as e:
+             return False, str(e)
+         except TemporaryHostResolutionError as e:
+             return False, str(e)
+@@ -2071,6 +2091,7 @@ def get_connection_metadata(
+                 database=config.database,
+                 require_ssl=require_ssl,
+                 team_id=team_id,
++                tls=tls_options(config),
+             )
+ 
+     def check_cdc_prerequisites(
+@@ -2104,6 +2125,7 @@ def check_cdc_prerequisites(
+                 password=config.password,
+                 require_ssl=require_ssl,
+                 team_id=team_id,
++                tls=tls_options(config),
+             )
+             try:
+                 # A blank schema means discovery enumerated every schema and named each table
+@@ -2352,6 +2374,7 @@ def source_for_pipeline(  # type: ignore[override]
+                 chunk_size_override=schema.chunk_size_override,
+                 team_id=inputs.team_id,
+                 require_ssl=require_ssl,
++                tls=tls_options(config),
+                 is_initial_sync=not schema.initial_sync_complete,
+                 enabled_columns=inputs.enabled_columns,
+                 row_filters=inputs.row_filters,
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/redshift.py b/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/redshift.py
+index 358dc8f6d2fa..f9ab950a1562 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/redshift.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/redshift.py
+@@ -80,6 +80,7 @@
+     and_join,
+     render_psycopg_row_filter_conditions,
+ )
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import libpq_tls_kwargs, tls_options
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.redshift import (
+     RedshiftSourceConfig,
+@@ -1087,13 +1088,15 @@ def connect(
+                     host, port=port, connect_timeout=_REDSHIFT_CONNECT_OPTS["connect_timeout"], team_id=team_id
+                 ),
+             }
+-            with psycopg.connect(**connect_kwargs) as conn:
+-                conn.adapters.register_loader("date", SafeDateLoader)
+-                conn.adapters.register_loader("timestamp", SafeTimestampLoader)
+-                conn.adapters.register_loader("timestamptz", SafeTimestamptzLoader)
+-                if statement_timeout_ms is not None:
+-                    _set_session_statement_timeout(conn, statement_timeout_ms)
+-                yield conn
++            with libpq_tls_kwargs(tls_options(config)) as tls_kwargs:
++                connection = psycopg.connect(**{**connect_kwargs, **tls_kwargs})
++                with connection as conn:
++                    conn.adapters.register_loader("date", SafeDateLoader)
++                    conn.adapters.register_loader("timestamp", SafeTimestampLoader)
++                    conn.adapters.register_loader("timestamptz", SafeTimestamptzLoader)
++                    if statement_timeout_ms is not None:
++                        _set_session_statement_timeout(conn, statement_timeout_ms)
++                    yield conn
+ 
+     # ------------------------------------------------------------------
+     # Listing — batch queries run once during `get_schemas`
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/source.py
+index e7ca085f84d7..54b190e110c1 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/redshift/source.py
+@@ -28,6 +28,11 @@
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.registry import SourceRegistry
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import SourceSchema
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.sql.base import SQLSource
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.tls import (
++    CERTIFICATE_ERRORS,
++    ca_certificate_field,
++    verify_server_certificate_field,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceInputs, SourceResponse
+ from products.warehouse_sources.backend.temporal.data_imports.sources.generated_configs.redshift import (
+     RedshiftSourceConfig,
+@@ -86,6 +91,7 @@
+ )
+ 
+ RedshiftErrors = {
++    **CERTIFICATE_ERRORS,
+     "password authentication failed for user": "Invalid user or password",
+     "could not translate host name": _DNS_RESOLUTION_VALIDATION_ERROR,
+     "Is the server running on that host and accepting TCP/IP connections": _HOST_UNREACHABLE_VALIDATION_ERROR,
+@@ -194,6 +200,8 @@ def get_source_config(self) -> SourceConfig:
+                         placeholder="Leave blank to import all schemas",
+                         secret=False,
+                     ),
++                    verify_server_certificate_field(),
++                    ca_certificate_field(),
+                     SourceFieldSSHTunnelConfig(name="ssh_tunnel", label="Use SSH tunnel?"),
+                 ],
+             ),
+@@ -235,6 +243,7 @@ def get_retry_exhausted_errors(self) -> dict[str, str]:
+     def get_non_retryable_errors(self) -> dict[str, str | None]:
+         return {
+             **self.default_non_retryable_errors(),
++            **CERTIFICATE_ERRORS,
+             "NoSuchTableError": None,
+             "is not permitted to log in": None,
+             "could not translate host name": None,

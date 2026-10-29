@@ -1,0 +1,206 @@
+diff --git a/contents/docs/data-pipelines/sources/microsoft-sql-server.mdx b/contents/docs/data-pipelines/sources/microsoft-sql-server.mdx
+index 37dbfa247006..899b96e42359 100644
+--- a/contents/docs/data-pipelines/sources/microsoft-sql-server.mdx
++++ b/contents/docs/data-pipelines/sources/microsoft-sql-server.mdx
+@@ -28,6 +28,7 @@ To link Azure SQL Server:
+    - **User:** The username with the necessary permissions to access the database.
+    - **Password:** The password for the user.
+    - **Schema:** (Optional) The schema for your database. Leave blank to browse and sync tables from all schemas, or specify one to limit the selection. The default is `dbo`.
++   - **Require encryption:** (Optional) Whether to require TLS encryption for the connection. Default is off. When enabled, PostHog refuses to connect unless the connection is encrypted. See [Encryption](#encryption) below.
+ 4. Click **Link**
+ 
+ The data warehouse then starts syncing your Azure SQL Server data. You can see details and progress in the [sources tab](https://app.posthog.com/data-management/sources).
+@@ -36,6 +37,14 @@ The data warehouse then starts syncing your Azure SQL Server data. You can see d
+ 
+ <SourceParameters />
+ 
++## Encryption
++
++You can require TLS encryption for the connection to your SQL Server database. When enabled, PostHog refuses to connect if the server does not offer encryption. When disabled (the default), PostHog encrypts only when the server offers it.
++
++To enable encryption, set **Require encryption?** to **Yes** during source setup or on the source's **Configuration** tab.
++
++> **Note:** PostHog does not verify the SQL Server certificate. The driver's certificate authority setting is process-wide, so per-connection verification is not supported. If you need verified TLS, terminate TLS at a proxy or use an SSH tunnel.
++
+ ## Selecting columns
+ 
+ By default, PostHog syncs all columns from each table. To sync only specific columns:
+diff --git a/contents/docs/data-pipelines/sources/mysql.mdx b/contents/docs/data-pipelines/sources/mysql.mdx
+index 0f8aaf5a7efd..fec1aa2de480 100644
+--- a/contents/docs/data-pipelines/sources/mysql.mdx
++++ b/contents/docs/data-pipelines/sources/mysql.mdx
+@@ -9,6 +9,8 @@ availability:
+ sourceId: MySQL
+ ---
+ 
++import { CalloutBox } from "components/Docs/CalloutBox";
++
+ The MySQL connector can link your database tables to PostHog.
+ 
+ To link MySQL:
+@@ -23,6 +25,7 @@ To link MySQL:
+    - **Password:** The password for the user.
+    - **Schema:** The schema for your database where your tables are located. The default is `public`.
+    - **Use SSL:** Whether to use SSL for the connection. Default is enabled.
++   - **Verify the server certificate?** — Whether to check that your database's TLS certificate comes from a trusted authority. Defaults to **No**.
+ 4. If you need to connect through an SSH tunnel, enable and configure it (optional):
+    - **Tunnel host:** The hostname of your SSH server.
+    - **Tunnel port:** The port your SSH server is listening on.
+@@ -37,6 +40,25 @@ The data warehouse then starts syncing your MySQL data. You can see details and
+ 
+ <SourceParameters />
+ 
++## TLS certificate verification
++
++You can optionally verify your database's TLS certificate and authenticate with a client certificate. These fields appear in the source form below the **Verify the server certificate?** toggle:
++
++- **Verify the server certificate?** — Check that your database's TLS certificate comes from a trusted authority. Defaults to **No**. A self-signed certificate or a private authority passes only when you add its certificate authority below. When connecting through an SSH tunnel, PostHog checks the certificate chain but not the hostname, because the tunnel presents your database on a local address.
++- **Certificate authority (optional)** — The PEM certificate of the authority that signed your database's certificate. Add it when your database uses a private authority or a self-signed certificate. Adding a certificate authority automatically turns on certificate verification even if the toggle is set to **No**.
++- **Client certificate (optional)** — A PEM certificate that PostHog presents to your database. Add it when your database requires mutual TLS (mTLS) authentication.
++- **Client key (optional)** — The private key of the client certificate, in PEM format and without a passphrase. This is a secret field — API responses do not include it.
++
++A source that sets none of these fields connects with the same TLS behavior as before.
++
++<CalloutBox icon="IconInfo" title="Client certificate requirements" type="fyi">
++
++- A client certificate requires both the certificate and its private key. If one is missing, the credential check fails with an error.
++- The client key must not have a passphrase. An encrypted key fails the credential check.
++- A client certificate requires TLS even with verification off — MySQL refuses a server that offers no TLS when a client certificate is set, so the certificate is never silently skipped.
++- To turn off client certificate authentication, clear the client certificate field. The stored key is ignored when no certificate is set.
++
++</CalloutBox>
+ ## Selecting columns
+ 
+ By default, PostHog syncs all columns from each table. To sync only specific columns:
+diff --git a/contents/docs/data-pipelines/sources/neon.mdx b/contents/docs/data-pipelines/sources/neon.mdx
+index 97d6b90a9c4d..7854fde54be7 100644
+--- a/contents/docs/data-pipelines/sources/neon.mdx
++++ b/contents/docs/data-pipelines/sources/neon.mdx
+@@ -64,7 +64,7 @@ See the [Postgres source documentation](/docs/data-pipelines/sources/postgres#se
+ 
+ > **Permissions** The Neon source only requires read permissions on the schemas and tables you intend to sync. We recommend creating a dedicated read-only role in Neon rather than using the default `neondb_owner` role.
+ 
+-Neon requires SSL/TLS for all connections, which PostHog uses by default.
++Neon requires SSL/TLS for all connections, which PostHog uses by default. You can also verify your database's TLS certificate and authenticate with a client certificate. See the [Postgres TLS certificate verification documentation](/docs/data-pipelines/sources/postgres#tls-certificate-verification) for details on these options.
+ 
+ import InboundIpAddresses from "../_snippets/inbound-ip-addresses.mdx";
+ 
+diff --git a/contents/docs/data-pipelines/sources/postgres.mdx b/contents/docs/data-pipelines/sources/postgres.mdx
+index 1e68218781c3..3fff16e79f8e 100644
+--- a/contents/docs/data-pipelines/sources/postgres.mdx
++++ b/contents/docs/data-pipelines/sources/postgres.mdx
+@@ -42,6 +42,25 @@ The data warehouse then starts syncing your Postgres data. You can see details a
+ 
+ <SourceParameters />
+ 
++## TLS certificate verification
++
++You can optionally verify your database's TLS certificate and authenticate with a client certificate. These fields appear in the source form below the schema field:
++
++- **Verify the server certificate?** — Check that your database's TLS certificate comes from a trusted authority and matches the host. Defaults to **No**. When connecting through an SSH tunnel, PostHog checks the certificate chain but not the hostname, because the tunnel presents your database on a local address.
++- **Certificate authority (optional)** — The PEM certificate of the authority that signed your database's certificate. Add it when your database uses a private authority or a self-signed certificate. Adding a certificate authority automatically turns on certificate verification even if the toggle is set to **No**.
++- **Client certificate (optional)** — A PEM certificate that PostHog presents to your database. Add it when your database requires mutual TLS (mTLS) authentication.
++- **Client key (optional)** — The private key of the client certificate, in PEM format and without a passphrase. This is a secret field — API responses do not include it.
++
++A source that sets none of these fields connects with the same TLS behavior as before.
++
++<CalloutBox icon="IconInfo" title="Client certificate requirements" type="fyi">
++
++- A client certificate requires both the certificate and its private key. If one is missing, the credential check fails with an error.
++- The client key must not have a passphrase. An encrypted key fails the credential check.
++- To turn off client certificate authentication, clear the client certificate field. The stored key is ignored when no certificate is set.
++
++</CalloutBox>
++
+ ## Selecting columns
+ 
+ By default, PostHog syncs all columns from each table. To sync only specific columns:
+@@ -113,6 +132,8 @@ Row filters are not supported for CDC schemas or direct Postgres sources. They o
+ 
+ PostgreSQL sources created after February 18, 2026 require SSL/TLS encryption for database connections. Ensure your PostgreSQL database supports SSL/TLS connections before linking. Existing sources created before this date are not affected. If you're connecting through an SSH tunnel, you can optionally disable TLS using the **Require TLS through tunnel?** toggle since the tunnel already encrypts the connection.
+ 
++You can also [verify your database's TLS certificate](#tls-certificate-verification) and authenticate with a client certificate for additional security.
++
+ </CalloutBox>
+ 
+ <InboundIpAddresses />
+@@ -684,4 +705,12 @@ To fix this, either:
+ 
+ After making changes, re-enable the sync in PostHog.
+ 
++### TLS certificate verification failed
++
++This error occurs when PostHog could not verify your database's TLS certificate. The error message tells you what went wrong:
++
++- **"PostHog could not verify your database's TLS certificate"** — The certificate was not signed by an authority PostHog trusts, or it does not match the host. Add the certificate authority that signed it, check the host, or turn off certificate verification and remove the certificate authority.
++- **"Your database's TLS certificate does not match the host"** — The certificate's hostname does not match the host you entered. Use the hostname the certificate was issued for, or turn off certificate verification and remove the certificate authority.
++- **"Your database rejected the client certificate"** — Your database rejected the client certificate PostHog presented, or it requires one. Add a client certificate and key that your database trusts.
++
+ > **Looking for an example of the Postgres source?** Check out our tutorial where we [connect and query Supabase data](/tutorials/supabase-query).
+diff --git a/contents/docs/data-pipelines/sources/redshift.mdx b/contents/docs/data-pipelines/sources/redshift.mdx
+index a503ac5218f3..3fa8925973b7 100644
+--- a/contents/docs/data-pipelines/sources/redshift.mdx
++++ b/contents/docs/data-pipelines/sources/redshift.mdx
+@@ -25,7 +25,10 @@ To link Redshift:
+    - **User:** The username with the necessary permissions to access the database.
+    - **Password:** The password for the user.
+    - **Schema:** (Optional) The schema for your database. Leave blank to browse and sync tables from all schemas, or specify one to limit the selection. The default is `public`.
+-4. Click **Next**
++4. Optionally, configure TLS certificate verification:
++   - **Verify the server certificate?** Whether to check that your database's TLS certificate comes from a trusted authority and matches the host. Defaults to No.
++   - **Certificate authority (optional):** The PEM certificate of the authority that signed your database's certificate. Add it when your database uses a private authority or a self-signed certificate. Adding a certificate authority automatically turns on certificate verification.
++5. Click **Next**
+ 
+ The data warehouse then starts syncing your Redshift data. You can see details and progress in the [sources tab](https://app.posthog.com/data-management/sources).
+ 
+@@ -35,6 +38,23 @@ The data warehouse then starts syncing your Redshift data. You can see details a
+ 
+ <SourceParameters />
+ 
++## TLS certificate verification
++
++Redshift connections use TLS encryption by default (`sslmode=require`). You can optionally enable certificate verification to check that the server's TLS certificate is trusted and matches the host.
++
++To enable certificate verification, set **Verify the server certificate?** to **Yes** in the source configuration. With verification on, PostHog checks:
++
++- The certificate chain — that a trusted authority signed the server's certificate.
++- The hostname — that the certificate matches the host you entered.
++
++If you connect through an SSH tunnel, PostHog checks the certificate chain but not the hostname, because the tunnel presents the database on a local address.
++
++### Using a custom certificate authority
++
++If your database uses a private certificate authority or a self-signed certificate, paste the authority's PEM certificate into the **Certificate authority** field. Adding a certificate authority automatically turns on certificate verification, even if the toggle is set to No.
++
++Without a custom authority, verification uses the system's default trusted certificates.
++
+ ## Selecting columns
+ 
+ By default, PostHog syncs all columns from each table. To sync only specific columns:
+diff --git a/contents/docs/data-pipelines/sources/supabase.mdx b/contents/docs/data-pipelines/sources/supabase.mdx
+index 22699e71ca59..e011dbf4f429 100644
+--- a/contents/docs/data-pipelines/sources/supabase.mdx
++++ b/contents/docs/data-pipelines/sources/supabase.mdx
+@@ -37,7 +37,12 @@ To link Supabase:
+      - For password authentication, enter your SSH username and password.
+      - For key-based authentication, enter your SSH username, private key, and optional passphrase.
+    - **Require TLS through tunnel?** - Whether to require TLS encryption through the SSH tunnel. Enabled by default. Disable if your database does not support TLS.
+-5. Click **Link**
++5. Optionally configure TLS certificate verification:
++   - **Verify the server certificate?** Whether to check that your database's TLS certificate comes from a trusted authority and matches the host. Through an SSH tunnel, PostHog checks the certificate chain but not the hostname. Disabled by default.
++   - **Certificate authority (optional):** The PEM certificate of the authority that signed your database's certificate. Add it when your database uses a private or self-signed certificate. Adding a certificate authority automatically turns on certificate verification.
++   - **Client certificate (optional):** A PEM certificate that PostHog presents to your database. Add it when your database requires client certificate authentication.
++   - **Client key (optional):** The private key of the client certificate, in PEM format and without a passphrase.
++6. Click **Link**
+ 
+ The data warehouse then starts syncing your Supabase data. You can see details and progress in the [sources tab](https://app.posthog.com/data-management/sources).
+ 
+@@ -65,6 +70,8 @@ See the [Postgres source documentation](/docs/data-pipelines/sources/postgres#se
+ 
+ Supabase sources created after February 18, 2026 require SSL/TLS encryption for database connections. Supabase enforces SSL/TLS by default, so this is typically already in place. If you're connecting through an SSH tunnel, you can optionally disable TLS using the **Require TLS through tunnel?** toggle since the tunnel already encrypts the connection.
+ 
++You can also verify your database's TLS certificate, add a custom certificate authority, or configure client certificate authentication. See the [Postgres TLS documentation](/docs/data-pipelines/sources/postgres) for details on how these options work, since the Supabase connector uses the same underlying integration.
++
+ </CalloutBox>
+ 
+ > **Permissions** The Supabase source only requires read permissions on the schemas and tables you intend to sync. We recommend creating a dedicated read-only role in Supabase rather than using the default `postgres` superuser.

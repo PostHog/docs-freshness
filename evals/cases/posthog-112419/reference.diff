@@ -1,0 +1,270 @@
+diff --git a/contents/docs/cdp/batch-exports/bigquery.mdx b/contents/docs/cdp/batch-exports/bigquery.mdx
+index 74e1f6589296..a800b0da960a 100644
+--- a/contents/docs/cdp/batch-exports/bigquery.mdx
++++ b/contents/docs/cdp/batch-exports/bigquery.mdx
+@@ -121,21 +121,22 @@ This section describes the models that can be exported to BigQuery.
+ 
+ This is the default model for BigQuery batch exports. The schema of the model as created in BigQuery is:
+ 
+-| Field                 | Type               | Description                                                               |
+-| --------------------- | ------------------ | ------------------------------------------------------------------------- |
+-| uuid                  | `STRING`           | The unique ID of the event within PostHog                                 |
+-| event                 | `STRING`           | The name of the event that was sent                                       |
+-| properties            | `STRING` or `JSON` | All the properties sent along with an event                               |
+-| elements              | `STRING`           | This field is present for backwards compatibility but has been deprecated |
+-| set                   | `STRING` or `JSON` | Deprecated. Person update payloads aren't retained on stored events       |
+-| set_once              | `STRING` or `JSON` | Deprecated. Person update payloads aren't retained on stored events       |
+-| person_properties     | `STRING` or `JSON` | All the person properties at the time the event was ingested              |
+-| distinct_id           | `STRING`           | The `distinct_id` of the user who sent the event                          |
+-| team_id               | `INT64`            | The `team_id` for the event                                               |
+-| ip                    | `STRING`           | The IP address that was sent with the event                               |
+-| site_url              | `STRING`           | This field is present for backwards compatibility but has been deprecated |
+-| timestamp             | `TIMESTAMP`        | The timestamp associated with an event                                    |
+-| bq_ingested_timestamp | `TIMESTAMP`        | The timestamp when the event was sent to BigQuery                         |
++| Field                 | Type               | Description                                                                                                             |
++| --------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
++| uuid                  | `STRING`           | The unique ID of the event within PostHog                                                                               |
++| event                 | `STRING`           | The name of the event that was sent                                                                                     |
++| properties            | `STRING` or `JSON` | All the properties sent along with an event                                                                             |
++| elements              | `STRING`           | This field is present for backwards compatibility but has been deprecated                                               |
++| set                   | `STRING` or `JSON` | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| set_once              | `STRING` or `JSON` | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| person_properties     | `STRING` or `JSON` | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows   |
++| person_id             | `STRING`           | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes |
++| distinct_id           | `STRING`           | The `distinct_id` of the user who sent the event                                                                        |
++| team_id               | `INT64`            | The `team_id` for the event                                                                                             |
++| ip                    | `STRING`           | The IP address that was sent with the event                                                                             |
++| site_url              | `STRING`           | This field is present for backwards compatibility but has been deprecated                                               |
++| timestamp             | `TIMESTAMP`        | The timestamp associated with an event                                                                                  |
++| bq_ingested_timestamp | `TIMESTAMP`        | The timestamp when the event was sent to BigQuery                                                                       |
+ 
+ Some fields can be either `STRING` or `JSON` type depending on whether the corresponding checkbox is marked or not when creating the batch export.
+ 
+@@ -154,13 +155,15 @@ CREATE TABLE IF NOT EXISTS `{project_id}.{dataset_id}.{table_id}` (
+     ip STRING,
+     site_url STRING,
+     timestamp TIMESTAMP,
++    person_properties JSON,
++    person_id STRING,
+     bq_ingested_timestamp TIMESTAMP
+ )
+ PARTITION BY DATE(timestamp)
+ OPTIONS(description = 'PostHog events table')
+ ```
+ 
+-> **Note:** If you unchecked the JSON columns option when creating the batch export, replace `JSON` with `STRING` for the `properties`, `set`, and `set_once` columns.
++> **Note:** If you unchecked the JSON columns option when creating the batch export, replace `JSON` with `STRING` for the `properties`, `set`, `set_once`, and `person_properties` columns.
+ >
+ > The `PARTITION BY DATE(timestamp)` clause matches what PostHog creates automatically; if you need a different partition column or want to configure clustering, adjust the query accordingly.
+ 
+diff --git a/contents/docs/cdp/batch-exports/databricks.mdx b/contents/docs/cdp/batch-exports/databricks.mdx
+index 20352718e974..a17eab3edb1f 100644
+--- a/contents/docs/cdp/batch-exports/databricks.mdx
++++ b/contents/docs/cdp/batch-exports/databricks.mdx
+@@ -147,16 +147,18 @@ This section describes the models that can be exported to Databricks.
+ 
+ This is the default model for Databricks batch exports. The schema of the model as created in Databricks is:
+ 
+-| Field                         | Type                  | Description                                                                         |
+-| ----------------------------- | --------------------- | ----------------------------------------------------------------------------------- |
+-| uuid                          | `STRING`              | The unique ID of the event within PostHog                                           |
+-| event                         | `STRING`              | The name of the event that was sent                                                 |
+-| properties                    | `VARIANT` or `STRING` | All the properties sent along with an event                                         |
+-| person_properties             | `VARIANT` or `STRING` | All the person properties at the time the event was ingested                        |
+-| distinct_id                   | `STRING`              | The `distinct_id` of the user who sent the event                                    |
+-| team_id                       | `BIGINT`              | The `team_id` for the event                                                         |
+-| timestamp                     | `TIMESTAMP`           | The timestamp associated with an event                                              |
+-| databricks_ingested_timestamp | `TIMESTAMP`           | An additional metadata column, indicating when the event was ingested into Databricks |
++| Field                         | Type                  | Description                                                                                                             |
++| ----------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------- |
++| uuid                          | `STRING`              | The unique ID of the event within PostHog                                                                               |
++| event                         | `STRING`              | The name of the event that was sent                                                                                     |
++| properties                    | `VARIANT` or `STRING` | All the properties sent along with an event                                                                             |
++| person_properties             | `VARIANT` or `STRING` | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows   |
++| person_id                     | `STRING`              | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes |
++| distinct_id                   | `STRING`              | The `distinct_id` of the user who sent the event                                                                        |
++| team_id                       | `BIGINT`              | The `team_id` for the event                                                                                             |
++| timestamp                     | `TIMESTAMP`           | The timestamp associated with an event                                                                                  |
++| created_at                    | `TIMESTAMP`           | When PostHog ingested the event                                                                                         |
++| databricks_ingested_timestamp | `TIMESTAMP`           | An additional metadata column, indicating when the event was ingested into Databricks                                   |
+ 
+ ### Persons model
+ 
+diff --git a/contents/docs/cdp/batch-exports/index.mdx b/contents/docs/cdp/batch-exports/index.mdx
+index 0403df0e7497..7018318bca5c 100644
+--- a/contents/docs/cdp/batch-exports/index.mdx
++++ b/contents/docs/cdp/batch-exports/index.mdx
+@@ -72,6 +72,7 @@ However, there are some properties of the model that apply to all destinations:
+ 
+ - This model is **immutable** with all fields set once the event is ingested.
+ - Each event is **uniquely** identified by a UUID that can be used for de-duplication.
++- The `person_id` and `person_properties` fields show the person at the time the event was ingested. PostHog never updates exported rows, regardless of later changes to the person. To get the latest person for an event, export the [persons model](#persons-model) and join it on `distinct_id`.
+ 
+ ### Persons model
+ 
+diff --git a/contents/docs/cdp/batch-exports/postgres.mdx b/contents/docs/cdp/batch-exports/postgres.mdx
+index f0b5c5142c1e..9ba4af5789e0 100644
+--- a/contents/docs/cdp/batch-exports/postgres.mdx
++++ b/contents/docs/cdp/batch-exports/postgres.mdx
+@@ -39,20 +39,21 @@ GRANT USAGE ON SCHEMA posthog_exports TO posthog;
+ 
+ This is the default model for Postgres batch exports. The schema of the model as created in Postgres is:
+ 
+-| Field             | Type                       | Description                                                               |
+-| ----------------- | -------------------------- | ------------------------------------------------------------------------- |
+-| uuid              | `VARCHAR(200)`             | The unique ID of the event within PostHog                                 |
+-| event             | `VARCHAR(200)`             | The name of the event that was sent                                       |
+-| properties        | `JSONB`                    | All the properties sent along with an event                               |
+-| elements          | `JSONB`                    | This field is present for backwards compatibility but has been deprecated |
+-| set               | `JSONB`                    | Deprecated. Person update payloads aren't retained on stored events       |
+-| set_once          | `JSONB`                    | Deprecated. Person update payloads aren't retained on stored events       |
+-| person_properties | `JSONB`                    | All the person properties at the time the event was ingested              |
+-| distinct_id       | `VARCHAR(200)`             | The `distinct_id` of the user who sent the event                          |
+-| team_id           | `INTEGER`                  | The `team_id` for the event                                               |
+-| ip                | `VARCHAR(200)`             | The IP address that was sent with the event                               |
+-| site_url          | `VARCHAR(200)`             | This field is present for backwards compatibility but has been deprecated |
+-| timestamp         | `TIMESTAMP WITH TIME ZONE` | The timestamp associated with an event                                    |
++| Field             | Type                       | Description                                                                                                             |
++| ----------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
++| uuid              | `VARCHAR(200)`             | The unique ID of the event within PostHog                                                                               |
++| event             | `VARCHAR(200)`             | The name of the event that was sent                                                                                     |
++| properties        | `JSONB`                    | All the properties sent along with an event                                                                             |
++| elements          | `JSONB`                    | This field is present for backwards compatibility but has been deprecated                                               |
++| set               | `JSONB`                    | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| set_once          | `JSONB`                    | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| person_properties | `JSONB`                    | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows   |
++| person_id         | `VARCHAR(200)`             | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes |
++| distinct_id       | `VARCHAR(200)`             | The `distinct_id` of the user who sent the event                                                                        |
++| team_id           | `INTEGER`                  | The `team_id` for the event                                                                                             |
++| ip                | `VARCHAR(200)`             | The IP address that was sent with the event                                                                             |
++| site_url          | `VARCHAR(200)`             | This field is present for backwards compatibility but has been deprecated                                               |
++| timestamp         | `TIMESTAMP WITH TIME ZONE` | The timestamp associated with an event                                                                                  |
+ 
+ ### Persons model
+ 
+diff --git a/contents/docs/cdp/batch-exports/redshift.mdx b/contents/docs/cdp/batch-exports/redshift.mdx
+index ee704abe4562..fd7a4b84111a 100644
+--- a/contents/docs/cdp/batch-exports/redshift.mdx
++++ b/contents/docs/cdp/batch-exports/redshift.mdx
+@@ -54,20 +54,21 @@ Finally, Redshift needs access to your S3 bucket too, and we must provide it wit
+ 
+ This is the default model for Redshift batch exports. The schema of the model as created in Redshift is:
+ 
+-| Field             | Type                        | Description                                                               |
+-| ----------------- | --------------------------- | ------------------------------------------------------------------------- |
+-| uuid              | `VARCHAR(200)`              | The unique ID of the event within PostHog                                 |
+-| event             | `VARCHAR(200)`              | The name of the event that was sent                                       |
+-| properties        | `SUPER` or `VARCHAR(65535)` | All the properties sent along with an event                               |
+-| elements          | `VARCHAR(65535)`            | This field is present for backwards compatibility but has been deprecated |
+-| set               | `SUPER` or `VARCHAR(65535)` | Deprecated. Person update payloads aren't retained on stored events       |
+-| set_once          | `SUPER` or `VARCHAR(65535)` | Deprecated. Person update payloads aren't retained on stored events       |
+-| person_properties | `SUPER` or `VARCHAR(65535)` | All the person properties at the time the event was ingested              |
+-| distinct_id       | `VARCHAR(200)`              | The `distinct_id` of the user who sent the event                          |
+-| team_id           | `INTEGER`                   | The `team_id` for the event                                               |
+-| ip                | `VARCHAR(200)`              | The IP address that was sent with the event                               |
+-| site_url          | `VARCHAR(200)`              | This field is present for backwards compatibility but has been deprecated |
+-| timestamp         | `TIMESTAMP WITH TIME ZONE`  | The timestamp associated with an event                                    |
++| Field             | Type                        | Description                                                                                                             |
++| ----------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
++| uuid              | `VARCHAR(200)`              | The unique ID of the event within PostHog                                                                               |
++| event             | `VARCHAR(200)`              | The name of the event that was sent                                                                                     |
++| properties        | `SUPER` or `VARCHAR(65535)` | All the properties sent along with an event                                                                             |
++| elements          | `VARCHAR(65535)`            | This field is present for backwards compatibility but has been deprecated                                               |
++| set               | `SUPER` or `VARCHAR(65535)` | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| set_once          | `SUPER` or `VARCHAR(65535)` | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| person_properties | `SUPER` or `VARCHAR(65535)` | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows   |
++| person_id         | `VARCHAR(200)`              | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes |
++| distinct_id       | `VARCHAR(200)`              | The `distinct_id` of the user who sent the event                                                                        |
++| team_id           | `INTEGER`                   | The `team_id` for the event                                                                                             |
++| ip                | `VARCHAR(200)`              | The IP address that was sent with the event                                                                             |
++| site_url          | `VARCHAR(200)`              | This field is present for backwards compatibility but has been deprecated                                               |
++| timestamp         | `TIMESTAMP WITH TIME ZONE`  | The timestamp associated with an event                                                                                  |
+ 
+ ### Persons model
+ 
+diff --git a/contents/docs/cdp/batch-exports/s3.md b/contents/docs/cdp/batch-exports/s3.md
+index 2600e38598f0..1c7d111e6371 100644
+--- a/contents/docs/cdp/batch-exports/s3.md
++++ b/contents/docs/cdp/batch-exports/s3.md
+@@ -31,18 +31,18 @@ This section describes the models that can be exported to S3.
+ 
+ This is the default model for S3 batch exports. When exported in the Parquet file format, the schema is:
+ 
+-| Field             | Type        | Description                                                                                              |
+-| ----------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
+-| uuid              | `STRING`    | The unique ID of the event within PostHog                                                                |
+-| event             | `STRING`    | The name of the event that was sent                                                                      |
+-| distinct_id       | `STRING`    | The `distinct_id` of the user who sent the event                                                         |
+-| person_id         | `STRING`    | The ID of the person the event is attributed to, resolved at ingestion time                              |
+-| properties        | `STRING`    | All the properties sent along with the event, stored as a JSON-encoded string in Parquet                 |
+-| person_properties | `STRING`    | All the person properties at the time the event was ingested, stored as a JSON-encoded string in Parquet |
+-| elements_chain    | `STRING`    | The chain of DOM elements for `$autocapture` events. Empty for other events                              |
+-| timestamp         | `TIMESTAMP` | When the event occurred, as reported by the client. Microsecond precision, UTC                           |
+-| created_at        | `TIMESTAMP` | When PostHog ingested the event. Microsecond precision, UTC                                              |
+-| \_inserted_at     | `TIMESTAMP` | Internal field used by batch exports to track export progress. Included in files but safe to ignore      |
++| Field             | Type        | Description                                                                                                                                                       |
++| ----------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
++| uuid              | `STRING`    | The unique ID of the event within PostHog                                                                                                                         |
++| event             | `STRING`    | The name of the event that was sent                                                                                                                               |
++| distinct_id       | `STRING`    | The `distinct_id` of the user who sent the event                                                                                                                  |
++| person_id         | `STRING`    | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes                                           |
++| properties        | `STRING`    | All the properties sent along with the event, stored as a JSON-encoded string in Parquet                                                                          |
++| person_properties | `STRING`    | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows. Stored as a JSON-encoded string in Parquet |
++| elements_chain    | `STRING`    | The chain of DOM elements for `$autocapture` events. Empty for other events                                                                                       |
++| timestamp         | `TIMESTAMP` | When the event occurred, as reported by the client. Microsecond precision, UTC                                                                                    |
++| created_at        | `TIMESTAMP` | When PostHog ingested the event. Microsecond precision, UTC                                                                                                       |
++| \_inserted_at     | `TIMESTAMP` | Internal field used by batch exports to track export progress. Included in files but safe to ignore                                                               |
+ 
+ > **Note:** The types above describe the **Parquet** file format. Other file formats represent the same data differently. For example, in **JSONLines** exports the timestamp fields (`timestamp`, `created_at`, and `_inserted_at`) are ISO 8601 strings, and `properties` and `person_properties` are nested JSON objects rather than JSON-encoded strings.
+ 
+diff --git a/contents/docs/cdp/batch-exports/snowflake.mdx b/contents/docs/cdp/batch-exports/snowflake.mdx
+index 210b230599bc..46884c3817bb 100644
+--- a/contents/docs/cdp/batch-exports/snowflake.mdx
++++ b/contents/docs/cdp/batch-exports/snowflake.mdx
+@@ -80,21 +80,22 @@ This section describes the models that can be exported to Snowflake.
+ 
+ This is the default model for Snowflake batch exports. The schema of the model as created in Snowflake is:
+ 
+-| Field                        | Type        | Description                                                               |
+-| ---------------------------- | ----------- | ------------------------------------------------------------------------- |
+-| uuid                         | `STRING`    | The unique ID of the event within PostHog                                 |
+-| event                        | `STRING`    | The name of the event that was sent                                       |
+-| properties                   | `VARIANT`   | All the properties sent along with an event                               |
+-| elements                     | `VARIANT`   | This field is present for backwards compatibility but has been deprecated |
+-| people_set                   | `VARIANT`   | Deprecated. Person update payloads aren't retained on stored events       |
+-| people_set_once              | `VARIANT`   | Deprecated. Person update payloads aren't retained on stored events       |
+-| person_properties            | `VARIANT`   | All the person properties at the time the event was ingested              |
+-| distinct_id                  | `STRING`    | The `distinct_id` of the user who sent the event                          |
+-| team_id                      | `INTEGER`   | The `team_id` for the event                                               |
+-| ip                           | `STRING`    | The IP address that was sent with the event                               |
+-| site_url                     | `STRING`    | This field is present for backwards compatibility but has been deprecated |
+-| timestamp                    | `TIMESTAMP` | The timestamp associated with an event                                    |
+-| snowflake_ingested_timestamp | `TIMESTAMP` | The timestamp when the event was loaded into Snowflake                    |
++| Field                        | Type        | Description                                                                                                             |
++| ---------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
++| uuid                         | `STRING`    | The unique ID of the event within PostHog                                                                               |
++| event                        | `STRING`    | The name of the event that was sent                                                                                     |
++| properties                   | `VARIANT`   | All the properties sent along with an event                                                                             |
++| elements                     | `VARIANT`   | This field is present for backwards compatibility but has been deprecated                                               |
++| people_set                   | `VARIANT`   | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| people_set_once              | `VARIANT`   | Deprecated. Person update payloads aren't retained on stored events                                                     |
++| person_properties            | `VARIANT`   | All the person properties at the time the event was ingested. Later changes to the person do not update exported rows   |
++| person_id                    | `STRING`    | The ID of the person at the time the event was ingested. Rows are never updated regardless of underlying person changes |
++| distinct_id                  | `STRING`    | The `distinct_id` of the user who sent the event                                                                        |
++| team_id                      | `INTEGER`   | The `team_id` for the event                                                                                             |
++| ip                           | `STRING`    | The IP address that was sent with the event                                                                             |
++| site_url                     | `STRING`    | This field is present for backwards compatibility but has been deprecated                                               |
++| timestamp                    | `TIMESTAMP` | The timestamp associated with an event                                                                                  |
++| snowflake_ingested_timestamp | `TIMESTAMP` | The timestamp when the event was loaded into Snowflake                                                                  |
+ 
+ If the provided table doesn't exist in the provided database and schema, the first batch export run will create it. This is generally the safest option, but you may also create it yourself by running the query:
+ 
+@@ -111,6 +112,8 @@ CREATE TABLE IF NOT EXISTS "{database}"."{schema}"."{table_name}" (
+     "ip" STRING,
+     "site_url" STRING,
+     "timestamp" TIMESTAMP,
++    "person_properties" VARIANT,
++    "person_id" STRING,
+     "snowflake_ingested_timestamp" TIMESTAMP
+ )
+ COMMENT = 'PostHog events table'

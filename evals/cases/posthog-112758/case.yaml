@@ -1,0 +1,9 @@
+id: posthog-112758
+codePr: 112758
+mergeSha: 2b6d7fc4f572d77dce2b399aa2822b7c56833ec2
+docsPr: 20885
+docsBaseSha: a141866fa79d99d54a3356e6aa990db45f1b97a1
+section: cmd-k
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/cmd-k/index.mdx

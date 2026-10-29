@@ -1,0 +1,326 @@
+diff --git a/frontend/src/scenes/data-management/database/DatabaseTable.tsx b/frontend/src/scenes/data-management/database/DatabaseTable.tsx
+index 7be7afc87c5a..a3f1d5311bf2 100644
+--- a/frontend/src/scenes/data-management/database/DatabaseTable.tsx
++++ b/frontend/src/scenes/data-management/database/DatabaseTable.tsx
+@@ -22,6 +22,7 @@ interface DatabaseTableProps {
+     tables: DatabaseSchemaTable[]
+     inEditSchemaMode: boolean
+     schemaOnChange?: (columnKey: string, columnType: DatabaseSerializedFieldType) => void
++    fieldDescriptions?: Record<string, string>
+ }
+ 
+ const nonEditableSchemaTypes = [
+@@ -103,7 +104,13 @@ const JoinsMoreMenu = ({ tableName, fieldName }: { tableName: string; fieldName:
+     return <More overlay={overlay()} />
+ }
+ 
+-export function DatabaseTable({ table, tables, inEditSchemaMode, schemaOnChange }: DatabaseTableProps): JSX.Element {
++export function DatabaseTable({
++    table,
++    tables,
++    inEditSchemaMode,
++    schemaOnChange,
++    fieldDescriptions,
++}: DatabaseTableProps): JSX.Element {
+     const dataSource = Object.values(tables.find(({ name }) => name === table)?.fields ?? {})
+     const { dataWarehouseTables, databaseLoading } = useValues(dataWarehouseSettingsSceneLogic)
+ 
+@@ -211,7 +218,7 @@ export function DatabaseTable({ table, tables, inEditSchemaMode, schemaOnChange
+                             )
+                         }
+ 
+-                        return ''
++                        return fieldDescriptions?.[field.name] ?? ''
+                     },
+                 },
+                 {
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/BatchExportConfiguration.tsx b/frontend/src/scenes/data-pipelines/batch-exports/BatchExportConfiguration.tsx
+index 053873dfc8c1..59a2b3a517c8 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/BatchExportConfiguration.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/BatchExportConfiguration.tsx
+@@ -35,6 +35,7 @@ import {
+     BatchExportConfigurationSaveButton,
+ } from './BatchExportConfigurationButtons'
+ import { BatchExportGeneralEditFields, BatchExportsEditFields } from './BatchExportEditForm'
++import { EVENT_FIELD_DESCRIPTIONS } from './destinations/common'
+ import { BatchExportConfigurationForm } from './types'
+ import { dayOptions, hourOptions } from './utils'
+ 
+@@ -270,6 +271,11 @@ export function BatchExportConfiguration(): JSX.Element {
+                                                     table={selectedModel ? selectedModel : 'events'}
+                                                     tables={tables}
+                                                     inEditSchemaMode={false}
++                                                    fieldDescriptions={
++                                                        !selectedModel || selectedModel === 'events'
++                                                            ? EVENT_FIELD_DESCRIPTIONS
++                                                            : undefined
++                                                    }
+                                                 />
+                                             </div>
+                                         ),
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/batchExportConfigFormLogic.tsx b/frontend/src/scenes/data-pipelines/batch-exports/batchExportConfigFormLogic.tsx
+index 100547f28d4e..964bd58f274d 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/batchExportConfigFormLogic.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/batchExportConfigFormLogic.tsx
+@@ -456,10 +456,10 @@ const sessionsTable: DatabaseSchemaBatchExportTable = {
+             hogql_value: 'exit_pathname',
+             schema_valid: true,
+         },
+-        vital_lcp: {
+-            name: 'vital_lcp',
++        vitals_lcp: {
++            name: 'vitals_lcp',
+             type: 'float',
+-            hogql_value: 'vital_lcp',
++            hogql_value: 'vitals_lcp',
+             schema_valid: true,
+         },
+         entry_gclsrc: {
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/azureblob.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/azureblob.tsx
+index 91e82ae2d7cf..4a30efdd3453 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/azureblob.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/azureblob.tsx
+@@ -7,7 +7,7 @@ import {
+     CompressionField,
+     FileFormatField,
+     MaxFileSizeField,
+-    PERSON_PROPERTIES_EVENT_FIELD,
++    PERSON_EVENT_FIELDS,
+     ParquetExtensionField,
+     validateAzureContainerName,
+ } from './common'
+@@ -32,8 +32,22 @@ export const azureBlobDefinition: DestinationDefinition = {
+     validate: (formValues) => ({
+         container_name: validateAzureContainerName(formValues.container_name),
+     }),
+-    eventTableOverrides: { teamIdHogql: 'team_id' },
+-    eventTableExtraFields: { ...PERSON_PROPERTIES_EVENT_FIELD },
++    eventTableExtraFields: {
++        team_id: {
++            name: 'team_id',
++            hogql_value: 'team_id',
++            type: 'integer',
++            schema_valid: true,
++        },
++        ...PERSON_EVENT_FIELDS,
++        azure_blob_ingested_timestamp: {
++            name: 'azure_blob_ingested_timestamp',
++            hogql_value: 'NOW64()',
++            type: 'datetime',
++            schema_valid: true,
++        },
++    },
++    eventTableOverrides: { includeGenericPersonFields: false },
+     Fields: function AzureBlobFields({ isNew, formValues, savedConfig }) {
+         return (
+             <>
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/bigquery.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/bigquery.tsx
+index 72f6e2558fb4..b2a7fed8e30f 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/bigquery.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/bigquery.tsx
+@@ -4,7 +4,7 @@ import { LemonCheckbox, LemonInput, Tooltip } from '@posthog/lemon-ui'
+ import { IntegrationChoice } from 'lib/components/CyclotronJob/integrations/IntegrationChoice'
+ import { LemonField } from 'lib/lemon-ui/LemonField'
+ 
+-import { PERSON_PROPERTIES_EVENT_FIELD } from './common'
++import { PERSON_EVENT_FIELDS } from './common'
+ import type { DestinationDefinition } from './types'
+ 
+ export const bigqueryDefinition: DestinationDefinition = {
+@@ -16,7 +16,7 @@ export const bigqueryDefinition: DestinationDefinition = {
+     configKeys: ['dataset_id', 'table_id', 'use_json_type'],
+     eventTableOverrides: { teamIdHogql: 'team_id' },
+     eventTableExtraFields: {
+-        ...PERSON_PROPERTIES_EVENT_FIELD,
++        ...PERSON_EVENT_FIELDS,
+         bq_ingested_timestamp: {
+             name: 'bq_ingested_timestamp',
+             hogql_value: 'NOW64()',
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/common.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/common.tsx
+index 312f361d8130..6afae99f7005 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/common.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/common.tsx
+@@ -202,25 +202,39 @@ export function MaxFileSizeField(): JSX.Element {
+ }
+ 
+ // Included in every destination's event table preview except HTTP, which posts capture-format
+-// payloads and does not export the column.
+-export const PERSON_PROPERTIES_EVENT_FIELD: Record<string, DatabaseSchemaField> = {
++// payloads and does not export these columns.
++export const PERSON_EVENT_FIELDS: Record<string, DatabaseSchemaField> = {
++    person_id: {
++        name: 'person_id',
++        hogql_value: 'toString(person_id)',
++        type: 'string',
++        schema_valid: true,
++    },
+     person_properties: {
+         name: 'person_properties',
+         hogql_value: "nullIf(person_properties, '')",
+-        type: 'string',
++        type: 'json',
+         schema_valid: true,
+     },
+ }
+ 
++// The export reads these columns from the event as ingested, and later person changes never update them.
++export const EVENT_FIELD_DESCRIPTIONS: Record<string, string> = {
++    person_id:
++        'The person ID at the time of the event. PostHog never updates it, regardless of later changes to the person.',
++    person_properties:
++        'The person properties at the time of the event. Later changes to the person do not update them.',
++}
++
+ // Event table preview columns shared by every S3-family destination (S3, AwsS3, S3Compatible).
+ export const S3_FAMILY_EVENT_TABLE_EXTRA_FIELDS: Record<string, DatabaseSchemaField> = {
+-    person_id: {
+-        name: 'person_id',
+-        hogql_value: 'toString(person_id)',
++    ...PERSON_EVENT_FIELDS,
++    elements_chain: {
++        name: 'elements_chain',
++        hogql_value: 'elements_chain',
+         type: 'string',
+         schema_valid: true,
+     },
+-    ...PERSON_PROPERTIES_EVENT_FIELD,
+     created_at: {
+         name: 'created_at',
+         hogql_value: 'created_at',
+@@ -364,9 +378,8 @@ export function S3FamilyFields({
+     )
+ }
+ 
+-// Generic person-related event columns shared by Postgres, Redshift, Snowflake, BigQuery, HTTP.
+-// S3 and Databricks override these (S3 uses person_id/person_properties/created_at; Databricks
+-// emits a different team_id+ingestion-timestamp pair).
++// Legacy event columns shared by Postgres, Redshift, Snowflake and BigQuery.
++// S3, Databricks, AzureBlob and HTTP export a reduced set and opt out of these.
+ export function genericPersonEventFields(opts: {
+     teamIdHogql: string
+     setName: string
+@@ -382,13 +395,13 @@ export function genericPersonEventFields(opts: {
+         set: {
+             name: opts.setName,
+             hogql_value: "nullIf(JSONExtractString(properties, '$set'), '')",
+-            type: 'string',
++            type: 'json',
+             schema_valid: true,
+         },
+         set_once: {
+             name: opts.setOnceName,
+             hogql_value: "nullIf(JSONExtractString(properties, '$set_once'), '')",
+-            type: 'string',
++            type: 'json',
+             schema_valid: true,
+         },
+         site_url: {
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/databricks.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/databricks.tsx
+index 2e5b5e19fc8c..d11465c60895 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/databricks.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/databricks.tsx
+@@ -4,7 +4,7 @@ import { LemonCheckbox, LemonInput, Link, Tooltip } from '@posthog/lemon-ui'
+ import { IntegrationChoice } from 'lib/components/CyclotronJob/integrations/IntegrationChoice'
+ import { LemonField } from 'lib/lemon-ui/LemonField'
+ 
+-import { PERSON_PROPERTIES_EVENT_FIELD } from './common'
++import { PERSON_EVENT_FIELDS } from './common'
+ import type { DestinationDefinition } from './types'
+ 
+ export const databricksDefinition: DestinationDefinition = {
+@@ -24,7 +24,7 @@ export const databricksDefinition: DestinationDefinition = {
+             type: 'integer',
+             schema_valid: true,
+         },
+-        ...PERSON_PROPERTIES_EVENT_FIELD,
++        ...PERSON_EVENT_FIELDS,
+         created_at: {
+             name: 'created_at',
+             hogql_value: 'created_at',
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/http.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/http.tsx
+index 493f3513d879..aab39e06b5b0 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/http.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/http.tsx
+@@ -8,7 +8,15 @@ export const httpDefinition: DestinationDefinition = {
+     type: 'HTTP',
+     defaults: () => ({}),
+     requiredFields: () => ['url', 'token'],
+-    eventTableOverrides: { teamIdHogql: 'team_id' },
++    eventTableExtraFields: {
++        elements_chain: {
++            name: 'elements_chain',
++            hogql_value: 'elements_chain',
++            type: 'string',
++            schema_valid: true,
++        },
++    },
++    eventTableOverrides: { includeGenericPersonFields: false },
+     Fields: function HttpFields() {
+         return (
+             <>
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/postgres.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/postgres.tsx
+index f41461383796..1e7e92a4c624 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/postgres.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/postgres.tsx
+@@ -4,7 +4,7 @@ import { LemonBanner, LemonCheckbox, LemonInput, Tooltip } from '@posthog/lemon-
+ import { IntegrationChoice } from 'lib/components/CyclotronJob/integrations/IntegrationChoice'
+ import { LemonField } from 'lib/lemon-ui/LemonField'
+ 
+-import { PERSON_PROPERTIES_EVENT_FIELD } from './common'
++import { PERSON_EVENT_FIELDS } from './common'
+ import type { DestinationDefinition } from './types'
+ 
+ export const postgresDefinition: DestinationDefinition = {
+@@ -22,7 +22,7 @@ export const postgresDefinition: DestinationDefinition = {
+         return ['host', 'port', 'database', 'schema', 'table_name']
+     },
+     eventTableOverrides: { teamIdHogql: 'toInt32(team_id)' },
+-    eventTableExtraFields: { ...PERSON_PROPERTIES_EVENT_FIELD },
++    eventTableExtraFields: { ...PERSON_EVENT_FIELDS },
+     Fields: function PostgresFields({ isNew, formValues }) {
+         const useIntegration = isNew || !!formValues.integration_id
+ 
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/redshift.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/redshift.tsx
+index 420ce4a876d4..e3fffd1224f2 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/redshift.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/redshift.tsx
+@@ -6,7 +6,7 @@ import { LemonField } from 'lib/lemon-ui/LemonField'
+ 
+ import type { IntegrationType } from '~/types'
+ 
+-import { PERSON_PROPERTIES_EVENT_FIELD, validateBucketName } from './common'
++import { PERSON_EVENT_FIELDS, validateBucketName } from './common'
+ import type { DestinationDefinition } from './types'
+ 
+ // Redshift is the only destination with a non-trivial form ↔ payload mapping.
+@@ -239,7 +239,7 @@ export const redshiftDefinition: DestinationDefinition = {
+         return result
+     },
+     eventTableOverrides: { teamIdHogql: 'toInt32(team_id)' },
+-    eventTableExtraFields: { ...PERSON_PROPERTIES_EVENT_FIELD },
++    eventTableExtraFields: { ...PERSON_EVENT_FIELDS },
+     Fields: function RedshiftFields({ isNew, formValues, selectedIntegration }) {
+         const useConnection = usesConnection(isNew, formValues)
+         const useS3Connection = usesS3Connection(isNew, formValues)
+diff --git a/frontend/src/scenes/data-pipelines/batch-exports/destinations/snowflake.tsx b/frontend/src/scenes/data-pipelines/batch-exports/destinations/snowflake.tsx
+index f4a29f33f648..ba550cd99e33 100644
+--- a/frontend/src/scenes/data-pipelines/batch-exports/destinations/snowflake.tsx
++++ b/frontend/src/scenes/data-pipelines/batch-exports/destinations/snowflake.tsx
+@@ -3,7 +3,7 @@ import { LemonInput } from '@posthog/lemon-ui'
+ import { IntegrationChoice } from 'lib/components/CyclotronJob/integrations/IntegrationChoice'
+ import { LemonField } from 'lib/lemon-ui/LemonField'
+ 
+-import { PERSON_PROPERTIES_EVENT_FIELD } from './common'
++import { PERSON_EVENT_FIELDS } from './common'
+ import type { DestinationDefinition } from './types'
+ 
+ // Credentials come from a linked `snowflake` Integration, never from this destination's config.
+@@ -18,7 +18,7 @@ export const snowflakeDefinition: DestinationDefinition = {
+         setOnceName: 'people_set_once',
+     },
+     eventTableExtraFields: {
+-        ...PERSON_PROPERTIES_EVENT_FIELD,
++        ...PERSON_EVENT_FIELDS,
+         snowflake_ingested_timestamp: {
+             name: 'snowflake_ingested_timestamp',
+             hogql_value: 'NOW64()',

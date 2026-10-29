@@ -1,0 +1,840 @@
+diff --git a/products/data_modeling/backend/facade/api.py b/products/data_modeling/backend/facade/api.py
+index 77f30cad2879..a37aadb0f3be 100644
+--- a/products/data_modeling/backend/facade/api.py
++++ b/products/data_modeling/backend/facade/api.py
+@@ -36,6 +36,7 @@
+     "SavedQueryNotOnV2ScheduleError": "logic.node_materialization",
+     "is_saved_query_on_v2_schedule": "logic.node_materialization",
+     "materialize_saved_query": "logic.node_materialization",
++    "run_related_node_materializations": "logic.node_materialization",
+     "run_saved_query_materialization": "logic.node_materialization",
+     "get_materialized_table_uri": "logic.saved_query_reads",
+     "get_node_ids_for_saved_queries": "logic.saved_query_reads",
+@@ -58,6 +59,7 @@
+     "completed_full_refresh_workflow_ids": "logic.saved_query_reads",
+     "MaterializationFailedError": "facade.contracts",
+     "MaterializationForbiddenError": "facade.contracts",
++    "MaterializationRunDirection": "facade.contracts",
+     "MaterializationRefusedError": "facade.contracts",
+     "IncrementalConfigRefusedError": "facade.contracts",
+     "enable_saved_query_materialization": "logic.saved_query_materialization",
+diff --git a/products/data_modeling/backend/facade/contracts.py b/products/data_modeling/backend/facade/contracts.py
+index b1e313dc4d98..74b8cf6ff851 100644
+--- a/products/data_modeling/backend/facade/contracts.py
++++ b/products/data_modeling/backend/facade/contracts.py
+@@ -16,6 +16,7 @@
+ from pydantic.dataclasses import dataclass
+ 
+ from posthog.dataclasses import frozen
++from posthog.enums import LabeledStrEnum
+ 
+ 
+ @dataclass(frozen=True)
+@@ -109,6 +110,11 @@ def __init__(self, message: str, refused_keys: tuple[str, ...] = ()) -> None:
+         self.refused_keys = refused_keys
+ 
+ 
++class MaterializationRunDirection(LabeledStrEnum):
++    UPSTREAM = "upstream", "Upstream"
++    DOWNSTREAM = "downstream", "Downstream"
++
++
+ class MaterializationForbiddenError(Exception):
+     pass
+ 
+diff --git a/products/data_modeling/backend/graph.py b/products/data_modeling/backend/graph.py
+index 25f552bdb937..2b04de280616 100644
+--- a/products/data_modeling/backend/graph.py
++++ b/products/data_modeling/backend/graph.py
+@@ -26,12 +26,14 @@ def __init__(
+         team_id: int,
+         exclude_table_sources: bool = True,
+         exclude_table_targets: bool = True,
++        dag_id: UUID | str | None = None,
+         hidden_types: frozenset[str] = frozenset(),
+     ):
+         """Load edges and build adjacency maps.
+ 
+         Args:
+             team_id: filter edges to this team
++            dag_id: when set, load only this DAG's edges instead of every edge for the team
+             exclude_table_sources: skip edges whose source is a TABLE node (for upstream counts)
+             exclude_table_targets: skip edges whose target is a TABLE node (for downstream counts)
+             hidden_types: node types the reader may not see, dropped from both sides so a count
+@@ -40,6 +42,8 @@ def __init__(
+         qs = Edge.objects.filter(team_id=team_id).exclude(
+             Q(source__saved_query__deleted=True) | Q(target__saved_query__deleted=True)
+         )
++        if dag_id is not None:
++            qs = qs.filter(dag_id=dag_id)
+ 
+         # Fetch edges with source/target types in a single query
+         edge_rows = list(
+diff --git a/products/data_modeling/backend/logic/node_materialization.py b/products/data_modeling/backend/logic/node_materialization.py
+index a67344e85598..9ee8b647698b 100644
+--- a/products/data_modeling/backend/logic/node_materialization.py
++++ b/products/data_modeling/backend/logic/node_materialization.py
+@@ -1,15 +1,24 @@
+ import asyncio
+ from dataclasses import asdict
+-from uuid import UUID
++from datetime import timedelta
++from uuid import UUID, uuid4
+ 
+ from django.conf import settings
+ 
+ import structlog
+ from temporalio.common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+ 
++from posthog.hogql.database.database import Database
++
++from posthog.models import User
++from posthog.rbac.query_access import assert_user_can_read_query
+ from posthog.temporal.common.client import sync_connect
++from posthog.temporal.data_modeling.workflows.execute_dag import ExecuteDAGInputs
+ from posthog.temporal.data_modeling.workflows.materialize_view import MaterializeViewWorkflowInputs
+ 
++from products.access_control.backend.facade.user_access_control import UserAccessControl
++from products.data_modeling.backend.facade.contracts import MaterializationForbiddenError, MaterializationRunDirection
++from products.data_modeling.backend.graph import Graph
+ from products.data_modeling.backend.logic.node_suspension import unsuspend_nodes
+ from products.data_modeling.backend.logic.saved_query_dag_sync import MissingDagNodeError
+ from products.data_modeling.backend.models import Node
+@@ -19,6 +28,9 @@
+ logger = structlog.get_logger(__name__)
+ 
+ 
++RELATED_RUN_EDIT_ACCESS_REFUSAL = "You need edit access to every view in this run."
++
++
+ def start_node_materialization(node: Node, *, resume: bool = True, triggered_by_id: int | None = None) -> None:
+     """Start a one-off materialization workflow for a single node.
+ 
+@@ -40,7 +52,6 @@ def start_node_materialization(node: Node, *, resume: bool = True, triggered_by_
+         node_id=str(node.id),
+         manually_triggered_by_id=triggered_by_id,
+     )
+-
+     temporal = sync_connect()
+     asyncio.run(
+         temporal.start_workflow(
+@@ -55,6 +66,74 @@ def start_node_materialization(node: Node, *, resume: bool = True, triggered_by_
+     )
+ 
+ 
++def run_related_node_materializations(
++    team_id: int,
++    node_id: UUID | str,
++    *,
++    direction: MaterializationRunDirection | str,
++    user: User,
++    hidden_types: frozenset[str] = frozenset(),
++) -> list[str]:
++    try:
++        node = Node.objects.select_related("team").get(team_id=team_id, id=node_id)
++    except Node.DoesNotExist:
++        raise MissingDagNodeError(f"Node {node_id} not found")
++    graph = Graph(team_id=node.team_id, dag_id=node.dag_id, hidden_types=hidden_types)
++    if direction == MaterializationRunDirection.UPSTREAM:
++        node_ids = graph.get_upstream(node.id)
++    else:
++        node_ids = graph.get_downstream(node.id)
++
++    managed_view_node_ids = {
++        str(node_id)
++        for node_id in Node.objects.filter(
++            team_id=node.team_id,
++            id__in=node_ids,
++            saved_query__managed_viewset__isnull=False,
++        ).values_list("id", flat=True)
++    }
++    node_ids = managed_view_node_ids if node.belongs_to_managed_viewset else node_ids - managed_view_node_ids
++    node_ids.add(str(node.id))
++
++    # A dependency run materializes every node it touches, so it needs the same edit and data access checks as
++    # enabling materialization for each view.
++    database = Database.create_for(team_id=node.team_id, user=user)
++    access_control = UserAccessControl(user=user, team=node.team)
++    saved_queries = DataWarehouseSavedQuery.objects.filter(
++        team_id=node.team_id,
++        node__id__in=node_ids,
++    ).distinct()
++    for saved_query in saved_queries:
++        if not access_control.check_access_level_for_object(saved_query, "editor"):
++            raise MaterializationForbiddenError(RELATED_RUN_EDIT_ACCESS_REFUSAL)
++        assert_user_can_read_query(saved_query.query, node.team_id, user, database=database)
++
++    # The workflow skips suspended nodes, so an explicit run must resume every selected node first.
++    unsuspend_nodes(Node.objects.filter(team_id=node.team_id, id__in=node_ids), by="manual_run")
++
++    inputs = ExecuteDAGInputs(
++        team_id=node.team_id,
++        dag_id=str(node.dag_id),
++        node_ids=sorted(node_ids),
++    )
++    temporal = sync_connect()
++    asyncio.run(
++        temporal.start_workflow(
++            "data-modeling-execute-dag",
++            asdict(inputs),
++            id=f"execute-dag-{uuid4()}",
++            task_queue=str(settings.DATA_MODELING_TASK_QUEUE),
++            retry_policy=RetryPolicy(
++                initial_interval=timedelta(seconds=10),
++                maximum_interval=timedelta(seconds=60),
++                maximum_attempts=3,
++                non_retryable_error_types=["NondeterminismError", "CancelledError"],
++            ),
++        )
++    )
++    return sorted(node_ids)
++
++
+ def is_saved_query_on_v2_schedule(saved_query: DataWarehouseSavedQuery) -> bool:
+     """Whether the saved query's DAG already runs on a v2 schedule.
+ 
+@@ -92,7 +171,7 @@ def run_saved_query_materialization(team_id: int, saved_query_id: UUID | str) ->
+ 
+ def materialize_saved_query(
+     saved_query: DataWarehouseSavedQuery, *, resume: bool = True, triggered_by_id: int | None = None
+-) -> None:
++) -> UUID:
+     """Materialize the saved query's backing node via the v2 workflow.
+ 
+     Fire a single materialization — don't fan out over duplicate-DAG nodes, or two workers race to
+@@ -107,3 +186,4 @@ def materialize_saved_query(
+         # trace of, and there is no v1 schedule left to fall back to.
+         raise MissingDagNodeError(f"Saved query {saved_query.id} has no DAG node to materialize")
+     start_node_materialization(node, resume=resume, triggered_by_id=triggered_by_id)
++    return node.id
+diff --git a/products/data_modeling/backend/presentation/views/node.py b/products/data_modeling/backend/presentation/views/node.py
+index f0a561312f75..4564f532c7eb 100644
+--- a/products/data_modeling/backend/presentation/views/node.py
++++ b/products/data_modeling/backend/presentation/views/node.py
+@@ -1,10 +1,6 @@
+-import asyncio
+-from dataclasses import asdict
+-from datetime import timedelta
+ from typing import Any, cast
+-from uuid import UUID, uuid4
++from uuid import UUID
+ 
+-from django.conf import settings
+ from django.db import models
+ from django.db.models import Exists, OuterRef, Subquery
+ 
+@@ -12,22 +8,20 @@
+ from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_field
+ from rest_framework import filters, mixins, request, response, serializers, status, viewsets
+ from rest_framework.decorators import action
+-from rest_framework.exceptions import NotFound
++from rest_framework.exceptions import NotFound, PermissionDenied
+ from rest_framework.pagination import PageNumberPagination
+-from temporalio.common import RetryPolicy
+-
+-from posthog.hogql.database.database import Database
+ 
+ from posthog.api.routing import TeamAndOrgViewSetMixin
+ from posthog.models import User
+ from posthog.rbac.query_access import assert_user_can_read_query
+-from posthog.temporal.common.client import sync_connect
+-from posthog.temporal.data_modeling.workflows.execute_dag import ExecuteDAGInputs
+ 
+ from products.data_modeling.backend.facade.api import (
++    MaterializationForbiddenError,
++    MaterializationRunDirection,
+     delete_node,
+     endpoint_link,
+     get_declared_target,
++    run_related_node_materializations,
+     suspension_state,
+     unsuspend_nodes,
+ )
+@@ -35,7 +29,6 @@
+     SAVED_QUERY_NODE_TYPES,
+     DataModelingJob,
+     DataModelingJobEngine,
+-    DataWarehouseSavedQuery,
+     Edge,
+     LineageIssueKind,
+     Node,
+@@ -56,6 +49,20 @@ class NodeResumeSerializer(serializers.Serializer):
+     resumed = serializers.BooleanField(help_text="False when the node was not suspended to begin with.")
+ 
+ 
++class NodeRunSerializer(serializers.Serializer):
++    direction = serializers.ChoiceField(
++        choices=MaterializationRunDirection.choices,
++        help_text="Run this view with all upstream dependencies or all downstream dependents.",
++    )
++
++
++class NodeRunResponseSerializer(serializers.Serializer):
++    node_ids = serializers.ListField(
++        child=serializers.UUIDField(),
++        help_text="The nodes included in the dependency run.",
++    )
++
++
+ class NodeEndpointSerializer(serializers.Serializer):
+     name = serializers.CharField(help_text="Name of the endpoint this node's materialization backs.")
+     version = serializers.IntegerField(help_text="Endpoint version this node's materialization backs.")
+@@ -286,15 +293,6 @@ def _get_upstream_nodes(
+     return nodes
+ 
+ 
+-def _managed_view_node_ids(team_id: int, node_ids: set[str]) -> set[str]:
+-    return {
+-        str(node_id)
+-        for node_id in Node.objects.filter(
+-            team_id=team_id, id__in=node_ids, saved_query__managed_viewset__isnull=False
+-        ).values_list("id", flat=True)
+-    }
+-
+-
+ def _feeds_a_managed_view(node: Node) -> bool:
+     return node.outgoing_edges.filter(target__saved_query__managed_viewset__isnull=False).exists()
+ 
+@@ -447,76 +445,36 @@ def safely_get_queryset(self, queryset):
+             self.ordering
+         )
+ 
++    @extend_schema(request=NodeRunSerializer, responses={200: NodeRunResponseSerializer})
+     @action(methods=["POST"], detail=True)
+     def run(self, req: request.Request, *args, **kwargs) -> response.Response:
+-        """
+-        Run this node and its upstream or downstream dependencies.
+-
+-        Request body:
+-            direction: "upstream" | "downstream" (required)
+-                - "upstream": Run all ancestors of this node, plus this node
+-                - "downstream": Run this node and all its descendants
+-        """
+-        node = self.get_object()
+-        direction = req.data.get("direction")
+-
+-        if direction not in ("upstream", "downstream"):
++        """Run this node with its upstream dependencies or downstream dependents."""
++        body = NodeRunSerializer(data=req.data)
++        if not body.is_valid():
+             return response.Response(
+                 {"error": "direction must be 'upstream' or 'downstream'"},
+                 status=status.HTTP_400_BAD_REQUEST,
+             )
+ 
++        node = self.get_object()
++
+         if node.type not in SAVED_QUERY_NODE_TYPES:
+             return response.Response(
+                 {"error": f"Cannot run a {node.type} node"},
+                 status=status.HTTP_400_BAD_REQUEST,
+             )
+ 
+-        if direction == "upstream":
+-            node_ids = _get_upstream_nodes(node)
+-        else:
+-            node_ids = _get_downstream_nodes(node)
+-        managed_view_node_ids = _managed_view_node_ids(self.team_id, node_ids)
+-        node_ids = managed_view_node_ids if node.belongs_to_managed_viewset else node_ids - managed_view_node_ids
+-
+-        node_ids.add(str(node.id))
+-
+-        # A run materializes every node it touches (the workflow sets is_materialized), and the
+-        # resulting rows then resolve under each view's own access rules. So this is the same
+-        # declassification as enabling materialization directly, and needs the same check.
+-        database = Database.create_for(team_id=self.team_id, user=cast(User, req.user))
+-        for saved_query in DataWarehouseSavedQuery.objects.filter(
+-            team_id=self.team_id, node__id__in=node_ids
+-        ).distinct():
+-            assert_user_can_read_query(saved_query.query, self.team_id, cast(User, req.user), database=database)
+-
+-        # ExecuteDAGWorkflow skips suspended nodes, so without this the request is a silent no-op
+-        # for exactly the nodes that need it most.
+-        unsuspend_nodes(Node.objects.filter(team_id=self.team_id, id__in=node_ids), by="manual_run")
+-
+-        inputs = ExecuteDAGInputs(
+-            team_id=self.team_id,
+-            dag_id=str(node.dag_id),
+-            node_ids=list(node_ids),
+-        )
+-
+-        temporal = sync_connect()
+-        asyncio.run(
+-            temporal.start_workflow(
+-                "data-modeling-execute-dag",
+-                asdict(inputs),
+-                id=f"execute-dag-{uuid4()}",
+-                task_queue=str(settings.DATA_MODELING_TASK_QUEUE),
+-                retry_policy=RetryPolicy(
+-                    initial_interval=timedelta(seconds=10),
+-                    maximum_interval=timedelta(seconds=60),
+-                    maximum_attempts=3,
+-                    non_retryable_error_types=["NondeterminismError", "CancelledError"],
+-                ),
++        try:
++            node_ids = run_related_node_materializations(
++                node.team_id,
++                node.id,
++                direction=body.validated_data["direction"],
++                user=cast(User, req.user),
++                hidden_types=self._hidden_node_types(),
+             )
+-        )
+-
+-        return response.Response({"node_ids": list(node_ids)}, status=status.HTTP_200_OK)
++        except MaterializationForbiddenError as error:
++            raise PermissionDenied(str(error))
++        return response.Response({"node_ids": node_ids}, status=status.HTTP_200_OK)
+ 
+     def _lineage_lookup(self, req: request.Request) -> dict[str, UUID]:
+         by_param = {
+diff --git a/products/data_modeling/frontend/generated/api.schemas.ts b/products/data_modeling/frontend/generated/api.schemas.ts
+index 8129fc9017e8..3345ad02139d 100644
+--- a/products/data_modeling/frontend/generated/api.schemas.ts
++++ b/products/data_modeling/frontend/generated/api.schemas.ts
+@@ -234,6 +234,31 @@ export interface NodeResumeApi {
+     resumed: boolean
+ }
+ 
++/**
++ * * `upstream` - Upstream
++ * * `downstream` - Downstream
++ */
++export type MaterializationRunDirectionEnumApi =
++    (typeof MaterializationRunDirectionEnumApi)[keyof typeof MaterializationRunDirectionEnumApi]
++
++export const MaterializationRunDirectionEnumApi = {
++    Upstream: 'upstream',
++    Downstream: 'downstream',
++} as const
++
++export interface NodeRunApi {
++    /** Run this view with all upstream dependencies or all downstream dependents.
++     *
++     * * `upstream` - Upstream
++     * * `downstream` - Downstream */
++    direction: MaterializationRunDirectionEnumApi
++}
++
++export interface NodeRunResponseApi {
++    /** The nodes included in the dependency run. */
++    node_ids: string[]
++}
++
+ export interface LineageResponseApi {
+     /** Every node reachable from the requested one, plus the node itself. */
+     nodes: NodeApi[]
+diff --git a/products/data_modeling/frontend/generated/api.ts b/products/data_modeling/frontend/generated/api.ts
+index 2a2ad77e702b..0750a445e1dd 100644
+--- a/products/data_modeling/frontend/generated/api.ts
++++ b/products/data_modeling/frontend/generated/api.ts
+@@ -19,6 +19,8 @@ import type {
+     ModelUsageApi,
+     NodeApi,
+     NodeResumeApi,
++    NodeRunApi,
++    NodeRunResponseApi,
+     PaginatedEdgeListApi,
+     PaginatedNodeListApi,
+     PatchedEdgeApi,
+@@ -285,24 +287,19 @@ export const getDataModelingNodesRunCreateUrl = (projectId: string, id: string)
+ }
+ 
+ /**
+- * Run this node and its upstream or downstream dependencies.
+- *
+- * Request body:
+- *     direction: "upstream" | "downstream" (required)
+- *         - "upstream": Run all ancestors of this node, plus this node
+- *         - "downstream": Run this node and all its descendants
++ * Run this node with its upstream dependencies or downstream dependents.
+  */
+ export const dataModelingNodesRunCreate = async (
+     projectId: string,
+     id: string,
+-    nodeApi: NonReadonly<NodeApi>,
++    nodeRunApi: NodeRunApi,
+     options?: RequestInit
+-): Promise<NodeApi> => {
+-    return apiMutator<NodeApi>(getDataModelingNodesRunCreateUrl(projectId, id), {
++): Promise<NodeRunResponseApi> => {
++    return apiMutator<NodeRunResponseApi>(getDataModelingNodesRunCreateUrl(projectId, id), {
+         ...options,
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json', ...options?.headers },
+-        body: JSON.stringify(nodeApi),
++        body: JSON.stringify(nodeRunApi),
+     })
+ }
+ 
+diff --git a/products/data_modeling/frontend/generated/api.zod.ts b/products/data_modeling/frontend/generated/api.zod.ts
+index 3a614ed0fc8f..50b7f9e5de7d 100644
+--- a/products/data_modeling/frontend/generated/api.zod.ts
++++ b/products/data_modeling/frontend/generated/api.zod.ts
+@@ -66,24 +66,13 @@ export const DataModelingNodesMaterializeCreateBody = /* @__PURE__ */ zod.object
+ })
+ 
+ /**
+- * Run this node and its upstream or downstream dependencies.
+- *
+- * Request body:
+- *     direction: "upstream" | "downstream" (required)
+- *         - "upstream": Run all ancestors of this node, plus this node
+- *         - "downstream": Run this node and all its descendants
++ * Run this node with its upstream dependencies or downstream dependents.
+  */
+-export const dataModelingNodesRunCreateBodyNameMax = 2048
+-
+-export const dataModelingNodesRunCreateBodyDescriptionMax = 1024
+-
+ export const DataModelingNodesRunCreateBody = /* @__PURE__ */ zod.object({
+-    name: zod.string().max(dataModelingNodesRunCreateBodyNameMax),
+-    type: zod
+-        .enum(['table', 'view', 'matview', 'endpoint', 'metric'])
+-        .optional()
++    direction: zod
++        .enum(['upstream', 'downstream'])
++        .describe('\* `upstream` - Upstream\n\* `downstream` - Downstream')
+         .describe(
+-            '\* `table` - Table\n\* `view` - View\n\* `matview` - Mat View\n\* `endpoint` - Endpoint\n\* `metric` - Metric'
++            'Run this view with all upstream dependencies or all downstream dependents.\n\n\* `upstream` - Upstream\n\* `downstream` - Downstream'
+         ),
+-    description: zod.string().max(dataModelingNodesRunCreateBodyDescriptionMax).optional(),
+ })
+diff --git a/products/data_warehouse/backend/presentation/views/saved_query/viewset.py b/products/data_warehouse/backend/presentation/views/saved_query/viewset.py
+index 572cd48ad644..e92a9f82c9e9 100644
+--- a/products/data_warehouse/backend/presentation/views/saved_query/viewset.py
++++ b/products/data_warehouse/backend/presentation/views/saved_query/viewset.py
+@@ -29,12 +29,20 @@
+     MaterializationFailedError,
+     MaterializationForbiddenError,
+     MaterializationRefusedError,
++    MaterializationRunDirection,
+     SavedQueryNotFoundError,
+     disable_saved_query_materialization,
+     enable_saved_query_materialization,
++    run_related_node_materializations,
+ )
+ from products.data_modeling.backend.facade.flags import is_managed_viewset_enabled
+-from products.data_modeling.backend.facade.models import DataModelingJob, DataModelingJobEngine, DataWarehouseSavedQuery
++from products.data_modeling.backend.facade.models import (
++    DataModelingJob,
++    DataModelingJobEngine,
++    DataWarehouseSavedQuery,
++    Node,
++    NodeType,
++)
+ from products.warehouse_sources.backend.facade.models import sync_frequency_to_sync_frequency_interval
+ 
+ from . import editing, incremental_config, lifecycle, lineage, sync_cadence, view_state
+@@ -95,6 +103,28 @@ class SavedQueryRunSerializer(serializers.Serializer):
+         "view that is not incremental. This is how you reprocess history after changing what the "
+         "query means without changing its text, or after upstream data was corrected.",
+     )
++    direction = serializers.ChoiceField(
++        choices=MaterializationRunDirection.choices,
++        required=False,
++        help_text=(
++            "Run this view with all upstream dependencies or all downstream dependents. "
++            "Omit this field to run only this view. You cannot use it with full_refresh."
++        ),
++    )
++
++    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
++        if attrs.get("direction") and attrs["full_refresh"]:
++            raise serializers.ValidationError(
++                {"full_refresh": "You cannot use full_refresh with an upstream or downstream run."}
++            )
++        return attrs
++
++
++class SavedQueryRunResponseSerializer(serializers.Serializer):
++    node_ids = serializers.ListField(
++        child=serializers.UUIDField(),
++        help_text="The data model nodes included in the run.",
++    )
+ 
+ 
+ class SavedQueryMaterializeSerializer(serializers.Serializer):
+@@ -250,7 +280,7 @@ def destroy(self, request: request.Request, *args: Any, **kwargs: Any) -> respon
+ 
+         return response.Response(status=status.HTTP_204_NO_CONTENT)
+ 
+-    @extend_schema(request=SavedQueryRunSerializer, responses={200: None})
++    @extend_schema(request=SavedQueryRunSerializer, responses={200: SavedQueryRunResponseSerializer})
+     @action(
+         methods=["POST"],
+         detail=True,
+@@ -280,11 +310,36 @@ def run(self, request: request.Request, *args, **kwargs) -> response.Response:
+             clear_incremental_state(saved_query, scope=TRINO_INCREMENTAL_SCOPE)
+ 
+         try:
+-            materialize_saved_query(saved_query, triggered_by_id=request.user.pk)
++            direction = body.validated_data.get("direction")
++            if direction:
++                node = (
++                    Node.objects.filter(team_id=self.team_id, saved_query_id=saved_query.id)
++                    .order_by("created_at")
++                    .first()
++                )
++                if node is None:
++                    raise MissingDagNodeError
++                hidden_types = (
++                    frozenset()
++                    if self.user_access_control.check_access_level_for_resource("data_catalog", required_level="viewer")
++                    else frozenset({NodeType.METRIC})
++                )
++                node_ids = run_related_node_materializations(
++                    self.team_id,
++                    node.id,
++                    direction=direction,
++                    user=cast(User, request.user),
++                    hidden_types=hidden_types,
++                )
++            else:
++                node_id = materialize_saved_query(saved_query, triggered_by_id=request.user.pk)
++                node_ids = [str(node_id)]
+         except MissingDagNodeError:
+             raise exceptions.ValidationError(
+                 detail="This view isn't fully set up to materialize. Save the query again, then try syncing."
+             )
++        except MaterializationForbiddenError as error:
++            raise exceptions.PermissionDenied(str(error))
+ 
+         log_activity(
+             organization_id=self.team.organization_id,
+@@ -297,7 +352,7 @@ def run(self, request: request.Request, *args, **kwargs) -> response.Response:
+             detail=Detail(name=saved_query.name),
+         )
+ 
+-        return response.Response(status=status.HTTP_200_OK)
++        return response.Response({"node_ids": node_ids}, status=status.HTTP_200_OK)
+ 
+     @extend_schema(
+         request=incremental_config.CheckIncrementalSerializer,
+diff --git a/products/data_warehouse/frontend/generated/api.schemas.ts b/products/data_warehouse/frontend/generated/api.schemas.ts
+index 217f53b280d2..432aac164603 100644
+--- a/products/data_warehouse/frontend/generated/api.schemas.ts
++++ b/products/data_warehouse/frontend/generated/api.schemas.ts
+@@ -2166,12 +2166,34 @@ export interface SavedQueryResumeApi {
+     resumed: boolean
+ }
+ 
++/**
++ * * `upstream` - Upstream
++ * * `downstream` - Downstream
++ */
++export type MaterializationRunDirectionEnumApi =
++    (typeof MaterializationRunDirectionEnumApi)[keyof typeof MaterializationRunDirectionEnumApi]
++
++export const MaterializationRunDirectionEnumApi = {
++    Upstream: 'upstream',
++    Downstream: 'downstream',
++} as const
++
+ /**
+  * Body of the `run` action.
+  */
+ export interface SavedQueryRunApi {
+     /** Rebuild the whole table instead of updating it incrementally. Has no effect on a view that is not incremental. This is how you reprocess history after changing what the query means without changing its text, or after upstream data was corrected. */
+     full_refresh?: boolean
++    /** Run this view with all upstream dependencies or all downstream dependents. Omit this field to run only this view. You cannot use it with full_refresh.
++     *
++     * * `upstream` - Upstream
++     * * `downstream` - Downstream */
++    direction?: MaterializationRunDirectionEnumApi
++}
++
++export interface SavedQueryRunResponseApi {
++    /** The data model nodes included in the run. */
++    node_ids: string[]
+ }
+ 
+ /**
+diff --git a/products/data_warehouse/frontend/generated/api.ts b/products/data_warehouse/frontend/generated/api.ts
+index f7867ae3751f..25ff2921fa40 100644
+--- a/products/data_warehouse/frontend/generated/api.ts
++++ b/products/data_warehouse/frontend/generated/api.ts
+@@ -86,6 +86,7 @@ import type {
+     SavedQueryResumeApi,
+     SavedQueryResumeSchedulesRequestApi,
+     SavedQueryRunApi,
++    SavedQueryRunResponseApi,
+     TableApi,
+     UploadedFileApi,
+     ViewLinkApi,
+@@ -1916,8 +1917,8 @@ export const warehouseSavedQueriesRunCreate = async (
+     id: string,
+     savedQueryRunApi?: SavedQueryRunApi,
+     options?: RequestInit
+-): Promise<void> => {
+-    return apiMutator<void>(getWarehouseSavedQueriesRunCreateUrl(projectId, id), {
++): Promise<SavedQueryRunResponseApi> => {
++    return apiMutator<SavedQueryRunResponseApi>(getWarehouseSavedQueriesRunCreateUrl(projectId, id), {
+         ...options,
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json', ...options?.headers },
+diff --git a/products/data_warehouse/frontend/generated/api.zod.ts b/products/data_warehouse/frontend/generated/api.zod.ts
+index 9f130a6ebd14..d743a0ab940b 100644
+--- a/products/data_warehouse/frontend/generated/api.zod.ts
++++ b/products/data_warehouse/frontend/generated/api.zod.ts
+@@ -1025,6 +1025,13 @@ export const WarehouseSavedQueriesRunCreateBody = /* @__PURE__ */ zod
+             .describe(
+                 'Rebuild the whole table instead of updating it incrementally. Has no effect on a view that is not incremental. This is how you reprocess history after changing what the query means without changing its text, or after upstream data was corrected.'
+             ),
++        direction: zod
++            .enum(['upstream', 'downstream'])
++            .describe('\* `upstream` - Upstream\n\* `downstream` - Downstream')
++            .optional()
++            .describe(
++                'Run this view with all upstream dependencies or all downstream dependents. Omit this field to run only this view. You cannot use it with full_refresh.\n\n\* `upstream` - Upstream\n\* `downstream` - Downstream'
++            ),
+     })
+     .describe('Body of the `run` action.')
+ 
+diff --git a/products/data_warehouse/mcp/tools.yaml b/products/data_warehouse/mcp/tools.yaml
+index e3e34f0822f8..a1e93e6481e8 100644
+--- a/products/data_warehouse/mcp/tools.yaml
++++ b/products/data_warehouse/mcp/tools.yaml
+@@ -281,8 +281,10 @@ tools:
+         enrich_url: ?open_view={params.id}
+         title: Run saved query
+         description: >
+-            Trigger a manual materialization run for a saved query. This immediately refreshes the materialized table
+-            with the latest data. The view must already be materialized. Use 'view-run-history' to check run status.
++            Trigger a manual materialization run for a saved query. By default, this refreshes only the selected view.
++            Set direction to upstream to also run all dependencies. Set direction to downstream to also run all
++            dependents. Both options include the selected view and run the views in dependency order. Do not set
++            full_refresh when you set direction. Use 'view-run-history' to check each view's status.
+     view-run-history:
+         operation: warehouse_saved_queries_run_history_retrieve
+         enabled: true
+diff --git a/services/mcp/schema/generated-tool-definitions.json b/services/mcp/schema/generated-tool-definitions.json
+index a0f88512fd4a..25908e18ce81 100644
+--- a/services/mcp/schema/generated-tool-definitions.json
++++ b/services/mcp/schema/generated-tool-definitions.json
+@@ -14584,7 +14584,7 @@
+         }
+     },
+     "view-run": {
+-        "description": "Trigger a manual materialization run for a saved query. This immediately refreshes the materialized table with the latest data. The view must already be materialized. Use 'view-run-history' to check run status.",
++        "description": "Trigger a manual materialization run for a saved query. By default, this refreshes only the selected view. Set direction to upstream to also run all dependencies. Set direction to downstream to also run all dependents. Both options include the selected view and run the views in dependency order. Do not set full_refresh when you set direction. Use 'view-run-history' to check each view's status.",
+         "category": "Data warehouse",
+         "feature": "data_warehouse",
+         "summary": "Run saved query",
+diff --git a/services/mcp/schema/tool-definitions-all.json b/services/mcp/schema/tool-definitions-all.json
+index 22fa442f08e2..d6a437829a59 100644
+--- a/services/mcp/schema/tool-definitions-all.json
++++ b/services/mcp/schema/tool-definitions-all.json
+@@ -15330,7 +15330,7 @@
+         }
+     },
+     "view-run": {
+-        "description": "Trigger a manual materialization run for a saved query. This immediately refreshes the materialized table with the latest data. The view must already be materialized. Use 'view-run-history' to check run status.",
++        "description": "Trigger a manual materialization run for a saved query. By default, this refreshes only the selected view. Set direction to upstream to also run all dependencies. Set direction to downstream to also run all dependents. Both options include the selected view and run the views in dependency order. Do not set full_refresh when you set direction. Use 'view-run-history' to check each view's status.",
+         "category": "Data warehouse",
+         "feature": "data_warehouse",
+         "summary": "Run saved query",
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 8653642384b7..9b237e05ed3e 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -68874,6 +68874,18 @@ export namespace Schemas {
+       aggregates: MaterializationPreviewAggregate[];
+     }
+ 
++    /**
++     * * `upstream` - Upstream
++     * * `downstream` - Downstream
++     */
++    export type MaterializationRunDirectionEnum = typeof MaterializationRunDirectionEnum[keyof typeof MaterializationRunDirectionEnum];
++
++
++    export const MaterializationRunDirectionEnum = {
++      Upstream: 'upstream',
++      Downstream: 'downstream',
++    } as const;
++
+     /**
+      * Input for materializing the labeled training feature matrix into the run's sandbox.
+      */
+@@ -70194,6 +70206,19 @@ export namespace Schemas {
+       resumed: boolean;
+     }
+ 
++    export interface NodeRun {
++      /** Run this view with all upstream dependencies or all downstream dependents.
++       *
++       * * `upstream` - Upstream
++       * * `downstream` - Downstream */
++      direction: MaterializationRunDirectionEnum;
++    }
++
++    export interface NodeRunResponse {
++      /** The nodes included in the dependency run. */
++      node_ids: string[];
++    }
++
+     /**
+      * Parent resource this notebook is attached to, or `null`. Returns `{type: 'account', id: <uuid>}` for account-linked notebooks; used by the frontend to route breadcrumbs back to the resource's list.
+      * @nullable
+@@ -102643,6 +102668,16 @@ export namespace Schemas {
+     export interface SavedQueryRun {
+       /** Rebuild the whole table instead of updating it incrementally. Has no effect on a view that is not incremental. This is how you reprocess history after changing what the query means without changing its text, or after upstream data was corrected. */
+       full_refresh?: boolean;
++      /** Run this view with all upstream dependencies or all downstream dependents. Omit this field to run only this view. You cannot use it with full_refresh.
++       *
++       * * `upstream` - Upstream
++       * * `downstream` - Downstream */
++      direction?: MaterializationRunDirectionEnum;
++    }
++
++    export interface SavedQueryRunResponse {
++      /** The data model nodes included in the run. */
++      node_ids: string[];
+     }
+ 
+     /**
+diff --git a/services/mcp/src/generated/data_warehouse/api.ts b/services/mcp/src/generated/data_warehouse/api.ts
+index 5b8a6d5a9283..41919070b8e3 100644
+--- a/services/mcp/src/generated/data_warehouse/api.ts
++++ b/services/mcp/src/generated/data_warehouse/api.ts
+@@ -753,6 +753,13 @@ export const WarehouseSavedQueriesRunCreateBody = () => zod
+             .describe(
+                 'Rebuild the whole table instead of updating it incrementally. Has no effect on a view that is not incremental. This is how you reprocess history after changing what the query means without changing its text, or after upstream data was corrected.'
+             ),
++        direction: zod
++            .enum(['upstream', 'downstream'])
++            .describe('\* `upstream` - Upstream\n\* `downstream` - Downstream')
++            .optional()
++            .describe(
++                'Run this view with all upstream dependencies or all downstream dependents. Omit this field to run only this view. You cannot use it with full_refresh.\n\n\* `upstream` - Upstream\n\* `downstream` - Downstream'
++            ),
+     })
+     .describe('Body of the `run` action.')
+ 
+diff --git a/services/mcp/src/tools/generated/data_warehouse.ts b/services/mcp/src/tools/generated/data_warehouse.ts
+index bf1c506f8053..756592311361 100644
+--- a/services/mcp/src/tools/generated/data_warehouse.ts
++++ b/services/mcp/src/tools/generated/data_warehouse.ts
+@@ -465,7 +465,7 @@ const ViewRunSchema = () => {
+     )
+ }
+ 
+-const viewRun = (): ToolBase<ReturnType<typeof ViewRunSchema>, unknown> => ({
++const viewRun = (): ToolBase<ReturnType<typeof ViewRunSchema>, WithPostHogUrl<Schemas.SavedQueryRunResponse>> => ({
+     name: 'view-run',
+     schema: ViewRunSchema(),
+     handler: async (context: Context, params: z.infer<ReturnType<typeof ViewRunSchema>>) => {
+@@ -474,7 +474,10 @@ const viewRun = (): ToolBase<ReturnType<typeof ViewRunSchema>, unknown> => ({
+         if (params.full_refresh !== undefined) {
+             body['full_refresh'] = params.full_refresh
+         }
+-        const result = await context.api.request<unknown>({
++        if (params.direction !== undefined) {
++            body['direction'] = params.direction
++        }
++        const result = await context.api.request<Schemas.SavedQueryRunResponse>({
+             method: 'POST',
+             path: `/api/projects/${encodeURIComponent(String(projectId))}/warehouse_saved_queries/${encodeURIComponent(String(params.id))}/run/`,
+             body,

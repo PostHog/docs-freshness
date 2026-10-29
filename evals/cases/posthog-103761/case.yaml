@@ -1,0 +1,9 @@
+id: posthog-103761
+codePr: 103761
+mergeSha: 514b87dbfe06f80b129fc0ec68fbc70257703e5c
+docsPr: 20382
+docsBaseSha: b92e7cae3983fe0a6a3a60652007f745ce766e20
+section: experiments
+referenceKind: carbon-unit
+pages:
+  - contents/docs/experiments/metrics.mdx

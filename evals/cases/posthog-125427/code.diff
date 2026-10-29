@@ -1,0 +1,308 @@
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+index 75ae4834dda5..9f2aaeb80d42 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+@@ -9269,17 +9269,17 @@ Today (5): `accounts`, `features`, `guides`, `pages`, `visitors`
+ 
+ Diffed against: <https://engageapi.pendo.io/api/collections/16265887/Tzm6jvKG>
+ 
+-- [ ] `aggregation source: events` — the raw usage event stream - Pendo's headline dataset and the basis of every engagement metric (high)
++- [x] `aggregation source: events` — the raw usage event stream - Pendo's headline dataset and the basis of every engagement metric (high)
+ - [x] `aggregation source: featureEvents` — feature click events joined to the features table already synced (high)
+ - [x] `aggregation source: pageEvents` — page view events joined to the pages table already synced (high)
+ - [x] `GET /api/v1/tracktype` — lookup resolving custom track event type IDs; also needed to interpret trackEvents (high)
+ - [x] `aggregation source: trackEvents` — custom-instrumented events, the analog of product analytics custom events (high)
+ - [ ] `aggregation source: guideEvents (plus guidesSeen)` — guide impressions and interactions for the guides table already synced (medium)
+ - [ ] `aggregation source: pollEvents / pollsSeen` — poll and NPS responses, the source of Pendo's NPS reporting (medium)
+-- [ ] `aggregation source: surveyResponses` — survey response rows for voice-of-customer analysis (medium)
++- [x] `aggregation source: surveyResponses` — survey response rows for voice-of-customer analysis (medium)
+ - [ ] `GET /api/v1/segment` — segment definitions, the lookup used to slice visitors and accounts already synced (medium)
+-- [ ] `aggregation source: groups` — page/feature group (product area) lookup used to roll up features and pages (medium)
+-- [ ] `GET /api/v1/report and /api/v1/report/{reportId}/results.json` — saved report definitions plus their materialized results (medium)
++- [x] `aggregation source: groups` — page/feature group (product area) lookup used to roll up features and pages (medium)
++- [x] `GET /api/v1/report and /api/v1/report/{reportId}/results.json` — saved report definitions plus their materialized results (medium) (definitions only; results.json has a different column set per report and re-projects the visitors and accounts tables)
+ - [ ] `GET /api/v1/guide/{guideId}/history` — guide state/version transition history (low)
+ 
+ Note: engageapi.pendo.io is a Postman-published doc; I pulled the raw collection JSON from the documenter API it loads. PostHog does NOT discover tables dynamically - PENDO_ENDPOINTS in products/warehouse_sources/backend/temporal/data_imports/sources/pendo/settings.py is a fixed dict of 5. It already POSTs to /api/v1/aggregation for visitors and accounts, so every aggregation event source below is a config-level addition on machinery that already exists. Pendo's entire behavioral dataset (events, pageEvents, featureEvents, trackEvents, guideEvents, pollEvents, surveyResponses) is currently unavailable, so the source syncs only the object metadata and none of the usage.
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/canonical_descriptions.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/canonical_descriptions.py
+index f1316e3452c2..b72ef5bf6311 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/canonical_descriptions.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/canonical_descriptions.py
+@@ -154,4 +154,80 @@
+             "lastTime": "Time of the most recent event in this bucket, as a Unix timestamp in milliseconds.",
+         },
+     },
++    "events": {
++        "description": "Daily count of all events Pendo recorded, tagged or not, grouped per visitor, account and browser context.",
++        "docs_url": "https://engageapi.pendo.io/#7c8479b8-3843-403c-94a9-04cbdf542db9",
++        "columns": {
++            "id": "Surrogate key for the bucket, a hash of every field except the counts.",
++            "visitorId": "The visitor ID associated with the events.",
++            "accountId": "The account ID associated with the events.",
++            "appId": "ID of the application the events were collected in.",
++            "day": "Midnight of the bucket's day in the subscription's timezone, as a Unix timestamp in milliseconds.",
++            "week": "Midnight of the Sunday that starts the bucket's week, as a Unix timestamp in milliseconds.",
++            "month": "Midnight of the first day of the bucket's month, as a Unix timestamp in milliseconds.",
++            "numEvents": "Number of events in this bucket.",
++            "numMinutes": "Number of unique minutes with activity across the events in this bucket.",
++            "server": "The hostname of the URL at the time of the events.",
++            "remoteIp": "The IP address captured at the time of the events.",
++            "userAgent": "The browser and operating system of the visitor.",
++            "tabId": "Identifier of the browser window or tab the events came from.",
++            "properties": "Historical metadata and event properties captured with the events.",
++        },
++    },
++    "survey_responses": {
++        "description": "One visitor's submission to a Pendo survey, with the questions asked and the answers given.",
++        "docs_url": "https://engageapi.pendo.io/#7c8479b8-3843-403c-94a9-04cbdf542db9",
++        "columns": {
++            "id": "Unique identifier for the survey response.",
++            "surveyId": "ID of the survey this response belongs to.",
++            "type": "The survey type, such as product market fit, customer satisfaction or UX-Lite.",
++            "visitorId": "Visitor ID of the respondent.",
++            "accountId": "Account ID associated with the respondent.",
++            "surveyQuestions": "Ordered list of the question texts shown to the visitor, matching surveyAnswers by position.",
++            "surveyAnswers": "Ordered list of the answer texts the visitor submitted, matching surveyQuestions by position.",
++            "surveyItemIds": "Ordered list of survey item IDs, matching surveyQuestions by position.",
++            "surveyAnswerIds": "Ordered list of the selected answer IDs, matching surveyAnswers by position.",
++            "surveyOccurrence": "Length of the survey's recurrence window in milliseconds, or 0 when none is set.",
++            "appIds": "IDs of the applications associated with the survey.",
++            "productAreas": "IDs of the product areas associated with the survey.",
++            "createdAt": "Time of the first response, as a Unix timestamp in milliseconds.",
++            "lastUpdatedAt": "Time of the most recent response, as a Unix timestamp in milliseconds.",
++        },
++    },
++    "product_areas": {
++        "description": "A product area (Pendo group) that pages, features and other items roll up into.",
++        "docs_url": "https://engageapi.pendo.io/#7c8479b8-3843-403c-94a9-04cbdf542db9",
++        "columns": {
++            "id": "Unique identifier for the product area.",
++            "name": "The product area's display name.",
++            "description": "The description added to the product area in Pendo.",
++            "type": "The group type, which is group for a product area.",
++            "color": "Display color assigned to the product area in Pendo.",
++            "length": "Number of items (pages, features and so on) associated with the product area.",
++            "feedbackProductId": "Identifier of the product area in Pendo Feedback.",
++            "feedbackVisibility": "Roles that can view the product area in Pendo Feedback.",
++            "createdAt": "Time at which the product area was created, as a Unix timestamp in milliseconds.",
++            "lastUpdatedAt": "Time at which the product area was last updated, as a Unix timestamp in milliseconds.",
++            "createdByUser": "The user who created the product area.",
++            "lastUpdatedByUser": "The user who last updated the product area.",
++        },
++    },
++    "reports": {
++        "description": "A saved visitor, account, path, funnel or Data Explorer report definition in Pendo.",
++        "docs_url": "https://engageapi.pendo.io/#8c849a0c-1fbc-4e95-9491-f802f4f8e942",
++        "columns": {
++            "id": "Unique identifier for the report.",
++            "name": "The report's display name.",
++            "kind": "The type of object, which is Report.",
++            "shared": "Whether the report is visible to other users.",
++            "definition": "The report's structure, such as its chosen columns, application, segment and type.",
++            "aggregation": "The aggregation Pendo runs to produce the report's contents.",
++            "rootVersionId": "Identifier of the report's root entity, which normally matches id.",
++            "stableVersionId": "Identifier of the report's current version.",
++            "createdAt": "Time at which the report was created, as a Unix timestamp in milliseconds.",
++            "lastUpdatedAt": "Time at which the report was last updated, as a Unix timestamp in milliseconds.",
++            "createdByUser": "The user who created the report.",
++            "lastUpdatedByUser": "The user who last updated the report.",
++        },
++    },
+ }
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/pendo.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/pendo.py
+index f088c67f68c6..8a64b5ca7da0 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/pendo.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/pendo.py
+@@ -44,10 +44,20 @@
+ EVENTS_REPROCESSING_OVERLAP_DAYS = 7
+ # A busy day can hold a very large number of buckets; hand them to the pipeline in bounded batches.
+ EVENT_BATCH_SIZE = 5000
+-# Measures Pendo sums into each event bucket. The remaining fields identify the bucket, so they
+-# alone form its id and a re-read of a still-open day updates the row instead of duplicating it.
++# Values Pendo aggregates into each event bucket, which change as new events arrive. The remaining
++# fields identify the bucket, so they alone form its id and a re-read of a still-open day updates
++# the row instead of duplicating it.
+ EVENT_MEASURE_FIELDS = frozenset(
+-    {"numEvents", "numMinutes", "rageClickCount", "errorClickCount", "deadClickCount", "uTurnCount", "lastTime"}
++    {
++        "numEvents",
++        "numMinutes",
++        "rageClickCount",
++        "errorClickCount",
++        "deadClickCount",
++        "uTurnCount",
++        "lastTime",
++        "lastKeyFrameTimestamp",
++    }
+ )
+ 
+ 
+@@ -130,10 +140,11 @@ def _iter_list_endpoint(
+     logger: FilteringBoundLogger,
+     resumable_source_manager: ResumableSourceManager[PendoResumeConfig],
+     start_offset: int,
++    all_apps: bool,
+ ) -> Iterator[list[dict[str, Any]]]:
+     # `expand=*` returns objects across every app in a multi-app subscription rather than
+     # just the default app.
+-    url = f"{base_url}{path}?expand=*"
++    url = f"{base_url}{path}?expand=*" if all_apps else f"{base_url}{path}"
+     response = _request(session, "GET", url, logger)
+     data = response.json()
+     items: list[dict[str, Any]] = data if isinstance(data, list) else data.get("results", [])
+@@ -232,9 +243,12 @@ def _iter_events(
+     resumable_source_manager: ResumableSourceManager[PendoResumeConfig],
+     start_day: date,
+     end_day: date,
++    all_apps: bool,
++    grouped: bool,
+ ) -> Iterator[list[dict[str, Any]]]:
+     url = f"{base_url}{AGGREGATION_PATH}"
+     day = start_day
++    source_params = {"appId": EVENT_ALL_APPS} if all_apps else None
+ 
+     while day <= end_day:
+         anchor = datetime.combine(day, time(), tzinfo=UTC) + EVENT_WINDOW_ANCHOR
+@@ -245,7 +259,7 @@ def _iter_events(
+                 "pipeline": [
+                     {
+                         "source": {
+-                            event_source: {"appId": EVENT_ALL_APPS},
++                            event_source: source_params,
+                             "timeSeries": {"period": "dayRange", "first": int(anchor.timestamp() * 1000), "count": 1},
+                         }
+                     }
+@@ -267,7 +281,8 @@ def _iter_events(
+             # Only the day's last batch moves the cursor past it, so a resume re-reads a partly written day.
+             if start + EVENT_BATCH_SIZE >= len(rows):
+                 resumable_source_manager.save_state(PendoResumeConfig(next_day=day.isoformat()))
+-            yield [_with_bucket_id(row) for row in rows[start : start + EVENT_BATCH_SIZE]]
++            batch = rows[start : start + EVENT_BATCH_SIZE]
++            yield [_with_bucket_id(row) for row in batch] if grouped else batch
+ 
+ 
+ def get_rows(
+@@ -301,6 +316,8 @@ def get_rows(
+             resumable_source_manager,
+             start_day,
+             end_day,
++            config.all_apps,
++            config.grouped_events,
+         )
+     elif config.is_aggregation:
+         if config.aggregation_source is None:
+@@ -330,6 +347,7 @@ def get_rows(
+             logger,
+             resumable_source_manager,
+             start_offset,
++            config.all_apps,
+         )
+ 
+ 
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/settings.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/settings.py
+index 22f418f77f6c..3fc83e89b607 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/settings.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/settings.py
+@@ -26,13 +26,19 @@
+ class PendoEndpointConfig:
+     name: str
+     primary_keys: list[str]
+-    # GET list endpoints (feature/page/guide/tracktype) set `path`; aggregation endpoints
+-    # (visitors/accounts) set `aggregation_source` and POST to /api/v1/aggregation. Event
++    # GET list endpoints (feature/page/guide/tracktype/report) set `path`; aggregation endpoints
++    # (visitors/accounts/groups) set `aggregation_source` and POST to /api/v1/aggregation. Event
+     # endpoints set `event_source` and POST a day-windowed `timeSeries` to the same endpoint.
+     path: Optional[str] = None
+     aggregation_source: Optional[str] = None
+     event_source: Optional[str] = None
+     incremental_fields: list[IncrementalField] = field(default_factory=list)
++    # App-scoped objects and events only cover the default app unless the request asks for every
++    # app. Reports and survey responses are not app-scoped and document no such parameter.
++    all_apps: bool = True
++    # Grouped event sources return buckets with no id of their own. Ungrouped sources, such as
++    # survey responses, return one row per record with a Pendo `id`.
++    grouped_events: bool = True
+ 
+     @property
+     def is_aggregation(self) -> bool:
+@@ -53,6 +59,15 @@ def is_events(self) -> bool:
+     }
+ ]
+ 
++SURVEY_RESPONSE_INCREMENTAL_FIELDS: list[IncrementalField] = [
++    {
++        "label": "lastUpdatedAt",
++        "type": IncrementalFieldType.Integer,
++        "field": "lastUpdatedAt",
++        "field_type": IncrementalFieldType.Integer,
++    }
++]
++
+ # Object and visitor/account endpoints are full refresh: Pendo's list endpoints expose no
+ # server-side timestamp filter, and the aggregation endpoint's time filters only apply to event
+ # sources. A client-side cursor would still read every row each run, so it would not be a
+@@ -62,9 +77,17 @@ def is_events(self) -> bool:
+     "pages": PendoEndpointConfig(name="pages", path="/api/v1/page", primary_keys=["id"]),
+     "guides": PendoEndpointConfig(name="guides", path="/api/v1/guide", primary_keys=["id"]),
+     "track_types": PendoEndpointConfig(name="track_types", path="/api/v1/tracktype", primary_keys=["id"]),
++    # Only the report definitions: each report's results.json has its own column set, and the
++    # rows re-project the visitors and accounts tables.
++    "reports": PendoEndpointConfig(name="reports", path="/api/v1/report", primary_keys=["id"], all_apps=False),
+     "visitors": PendoEndpointConfig(name="visitors", aggregation_source="visitors", primary_keys=["visitorId"]),
+     "accounts": PendoEndpointConfig(name="accounts", aggregation_source="accounts", primary_keys=["accountId"]),
++    # Pendo's `groups` source holds product areas.
++    "product_areas": PendoEndpointConfig(name="product_areas", aggregation_source="groups", primary_keys=["id"]),
+     # Event rows have no id of their own, so `id` is a hash of the bucket's grouping fields.
++    "events": PendoEndpointConfig(
++        name="events", event_source="events", primary_keys=["id"], incremental_fields=DAY_INCREMENTAL_FIELDS
++    ),
+     "page_events": PendoEndpointConfig(
+         name="page_events", event_source="pageEvents", primary_keys=["id"], incremental_fields=DAY_INCREMENTAL_FIELDS
+     ),
+@@ -77,6 +100,14 @@ def is_events(self) -> bool:
+     "track_events": PendoEndpointConfig(
+         name="track_events", event_source="trackEvents", primary_keys=["id"], incremental_fields=DAY_INCREMENTAL_FIELDS
+     ),
++    "survey_responses": PendoEndpointConfig(
++        name="survey_responses",
++        event_source="surveyResponses",
++        primary_keys=["id"],
++        incremental_fields=SURVEY_RESPONSE_INCREMENTAL_FIELDS,
++        all_apps=False,
++        grouped_events=False,
++    ),
+ }
+ 
+ ENDPOINTS = tuple(PENDO_ENDPOINTS.keys())
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/source.py
+index 825f370e5748..fa82aa6dbe87 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pendo/source.py
+@@ -35,6 +35,14 @@
+ from products.warehouse_sources.backend.types import ExternalDataSourceType
+ 
+ 
++def _schema_description(endpoint: str) -> str | None:
++    config = PENDO_ENDPOINTS[endpoint]
++    if not config.is_events:
++        return None
++    lookback = f"Only syncs the last {EVENTS_DEFAULT_LOOKBACK_DAYS} days on initial sync"
++    return f"Daily event buckets. {lookback}" if config.grouped_events else lookback
++
++
+ @SourceRegistry.register
+ class PendoSource(ResumableSource[PendoSourceConfig, PendoResumeConfig]):
+     codebase_detection = detect(
+@@ -145,11 +153,7 @@ def get_schemas(
+                 supports_incremental=PENDO_ENDPOINTS[endpoint].is_events,
+                 supports_append=False,
+                 incremental_fields=INCREMENTAL_FIELDS.get(endpoint, []),
+-                description=(
+-                    f"Daily event buckets. Only syncs the last {EVENTS_DEFAULT_LOOKBACK_DAYS} days on initial sync"
+-                    if PENDO_ENDPOINTS[endpoint].is_events
+-                    else None
+-                ),
++                description=_schema_description(endpoint),
+             )
+             for endpoint in ENDPOINTS
+         ]

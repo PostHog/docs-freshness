@@ -1,0 +1,370 @@
+diff --git a/docs/internal/wizard-runs.md b/docs/internal/wizard-runs.md
+index 3d6cac1800c2..a7c73781b0b7 100644
+--- a/docs/internal/wizard-runs.md
++++ b/docs/internal/wizard-runs.md
+@@ -99,6 +99,8 @@ The server picks the `posthog-integration` program and uses the project's GitHub
+ When the repository is missing from the integration's cached repository list, the server refreshes the list once, at most once a minute, before it refuses with `repository_not_accessible`.
+ A `branch` is cloned instead of the default branch and becomes the pull request's base branch.
+ The status response returns `status`, `stage`, `error_code`, `error_message`, `pull_request_url`, the task names and statuses, and a `next_step` sentence for the agent to relay.
++The MCP server exposes them as the `wizard-install-start` and `wizard-install-status` tools.
++The `installing-posthog-from-chat` skill walks an agent from connecting GitHub to sharing the pull request.
+ 
+ Both endpoints accept browser sessions and OAuth access tokens, not personal API keys.
+ Start needs `task:write` and status needs `task:read`.
+diff --git a/products/wizard/mcp/tools.yaml b/products/wizard/mcp/tools.yaml
+new file mode 100644
+index 000000000000..578714defbf6
+--- /dev/null
++++ b/products/wizard/mcp/tools.yaml
+@@ -0,0 +1,39 @@
++# MCP tool definitions. Tools are opt-in: an operation is exposed only when it has an entry here.
++# List operations without an entry: pnpm --filter=@posthog/mcp run scaffold-yaml -- --candidates --product wizard
++# Add one: pnpm --filter=@posthog/mcp run scaffold-yaml -- --add <operationId> --product wizard
++# To keep an operation off on purpose, set enabled: false and give a disabled_reason.
++category: Wizard
++feature: wizard
++url_prefix: /wizard/runs
++ui_apps: {}
++tools:
++    wizard-install-start:
++        operation: wizard_installs_create
++        enabled: true
++        annotations:
++            readOnly: false
++            destructive: false
++            idempotent: false
++        title: Start PostHog setup on a GitHub repository
++        description: >
++            Start Wizard, PostHog's setup agent, in the cloud on a GitHub repository of the current project. The setup
++            agent adds the PostHog SDK and first events to the code and opens a pull request for the user to review. The
++            project must be connected to GitHub, and the repository must be one the GitHub connection can access
++            (integrations-github-repos-retrieve). To connect GitHub, give the user the link <base
++            URL>/integrations/connect/github/?project_id=<project id>&connect_from=mcp. In this version the setup agent
++            works at the repository root, so a monorepo app in a subdirectory may not be set up. Pass an idempotency_key
++            and reuse it when you retry the same request. Each user can have one setup run active per project. Returns
++            run_id; poll wizard-install-status with it about every 30 seconds until the status is completed, failed, or
++            cancelled.
++    wizard-install-status:
++        operation: wizard_installs_retrieve
++        enabled: true
++        title: Get PostHog setup run status
++        description: >
++            Get the status of a setup run started with wizard-install-start: lifecycle status, current stage, task list,
++            failure reason, and the pull request URL once it exists. Poll about every 30 seconds while status is created
++            or running. Always relay next_step to the user; it says what is happening or what to do next. When
++            pull_request_url is set, share it so the user can review and merge the changes.
++        param_overrides:
++            run_id:
++                description: The run_id returned by wizard-install-start.
+diff --git a/products/wizard/skills/installing-posthog-from-chat/SKILL.md b/products/wizard/skills/installing-posthog-from-chat/SKILL.md
+new file mode 100644
+index 000000000000..e071f5796478
+--- /dev/null
++++ b/products/wizard/skills/installing-posthog-from-chat/SKILL.md
+@@ -0,0 +1,69 @@
++---
++name: installing-posthog-from-chat
++description: >-
++  Set up PostHog in a user's GitHub repository from a chat, without a terminal. Wizard, PostHog's
++  setup agent, runs in the cloud, adds the SDK and first events, and opens a pull request. Use when
++  a user in ChatGPT, Claude, or another chat client asks to install, add, or set up PostHog in
++  their app or repository, or asks for a pull request that adds PostHog. Covers connecting GitHub,
++  picking the repository, starting the run, polling it, and sharing the pull request.
++---
++
++# Installing PostHog from chat
++
++Wizard is PostHog's setup agent. With `wizard-install-start` it runs in a cloud workspace on a GitHub repository, makes the code changes, and opens a pull request. The user reviews and merges that pull request. Nothing changes on their default branch until they do.
++
++Work through the steps in order. Skip a step when its outcome is already known from the conversation.
++
++## 1. Connect GitHub
++
++The run uses the project's GitHub connection, so the project needs one.
++
++1. Call `integrations-list` and look for an integration with kind `github`.
++2. When there is none, give the user this link, built from the base URL and project ID in your context: `<base URL>/integrations/connect/github/?project_id=<project id>&connect_from=mcp`. They install the PostHog GitHub App and choose which repositories it can access. Wait until they say they are done, then call `integrations-list` again.
++
++## 2. Pick the repository
++
++Call `integrations-github-repos-retrieve` with the GitHub integration's ID. Use `search` when the user named the repository, and page with `offset` when `has_more` is true.
++
++- One clear match: confirm it with the user in one line.
++- Several matches: list them and ask which one.
++- No match: the GitHub App cannot access it. Ask the user to add the repository to the app's repository access in GitHub, then search again.
++
++Pass the repository as `full_name` (`owner/name`).
++
++The setup agent works at the repository root. If the user describes a monorepo where the app lives in a subdirectory, tell them the run may not find it, and offer to try anyway.
++
++## 3. Start the run
++
++Call `wizard-install-start` with:
++
++- `repository`: the `owner/name` from step 2.
++- `branch`: only when the user wants a branch other than the default one. The pull request targets that branch.
++- `idempotency_key`: a fresh unique value for this request. Reuse the same value if you retry after a network error, so the retry returns the same run.
++
++Errors the user can act on:
++
++| Error code                  | What to do                                                                                               |
++| --------------------------- | -------------------------------------------------------------------------------------------------------- |
++| `github_not_connected`      | Go back to step 1.                                                                                       |
++| `repository_not_accessible` | Ask the user to add the repository to the PostHog GitHub App, then retry with a new `idempotency_key`.   |
++| `run_already_active`        | The user already has a run in progress in this project. Ask them to wait for it, or check it in PostHog. |
++| HTTP 429                    | The user reached the hourly or daily limit for setup runs. Relay the message. Don't retry right away.    |
++
++Tell the user the run started and share the `url` from the response, where they can follow it in PostHog.
++
++## 4. Poll the run
++
++Call `wizard-install-status` with the `run_id` about every 30 seconds while `status` is `created` or `running`. A run usually takes several minutes.
++
++- Relay `next_step` to the user when it changes. It is written to be passed on as is.
++- Mention progress from `tasks` when it helps, but don't send an update on every poll.
++- Stop polling when `status` is `completed`, `failed`, or `cancelled`.
++
++When the client cannot wait that long in one turn, tell the user the run is in progress and check again when they come back.
++
++## 5. Share the result
++
++- `completed` with `pull_request_url`: share the link. Say the user should review the changes and merge the pull request to finish setting up PostHog.
++- `completed` without `pull_request_url`: the setup agent changed nothing, often because PostHog is already set up. Relay `next_step`.
++- `failed`: relay `next_step` and `error_message`. Offer to start a new run when `next_step` suggests one.
+diff --git a/services/mcp/schema/generated-tool-definitions.json b/services/mcp/schema/generated-tool-definitions.json
+index 9cf118a19357..90c121275542 100644
+--- a/services/mcp/schema/generated-tool-definitions.json
++++ b/services/mcp/schema/generated-tool-definitions.json
+@@ -14927,6 +14927,34 @@
+             "readOnlyHint": true
+         }
+     },
++    "wizard-install-start": {
++        "description": "Start Wizard, PostHog's setup agent, in the cloud on a GitHub repository of the current project. The setup agent adds the PostHog SDK and first events to the code and opens a pull request for the user to review. The project must be connected to GitHub, and the repository must be one the GitHub connection can access (integrations-github-repos-retrieve). To connect GitHub, give the user the link <base URL>/integrations/connect/github/?project_id=<project id>&connect_from=mcp. In this version the setup agent works at the repository root, so a monorepo app in a subdirectory may not be set up. Pass an idempotency_key and reuse it when you retry the same request. Each user can have one setup run active per project. Returns run_id; poll wizard-install-status with it about every 30 seconds until the status is completed, failed, or cancelled.",
++        "category": "Wizard",
++        "feature": "wizard",
++        "summary": "Start PostHog setup on a GitHub repository",
++        "title": "Start PostHog setup on a GitHub repository",
++        "required_scopes": ["task:write"],
++        "annotations": {
++            "destructiveHint": false,
++            "idempotentHint": false,
++            "openWorldHint": true,
++            "readOnlyHint": false
++        }
++    },
++    "wizard-install-status": {
++        "description": "Get the status of a setup run started with wizard-install-start: lifecycle status, current stage, task list, failure reason, and the pull request URL once it exists. Poll about every 30 seconds while status is created or running. Always relay next_step to the user; it says what is happening or what to do next. When pull_request_url is set, share it so the user can review and merge the changes.",
++        "category": "Wizard",
++        "feature": "wizard",
++        "summary": "Get PostHog setup run status",
++        "title": "Get PostHog setup run status",
++        "required_scopes": ["task:read"],
++        "annotations": {
++            "destructiveHint": false,
++            "idempotentHint": true,
++            "openWorldHint": true,
++            "readOnlyHint": true
++        }
++    },
+     "workflow-health": {
+         "description": "Per-workflow CI health over a window: run count, success rate, p50/p95 duration, and last failure time. Use this for \"is CI getting faster or slower\", \"which GitHub Actions workflow is the slow or flaky long pole\", and CI duration trends. Success rate covers runs that succeeded or ended in failure, timeout, startup failure, or staleness. Skipped, cancelled, neutral, and action-required runs are excluded. p50/p95 are over successful runs only, so superseded cancels and failed runs never bias the duration percentile. Runs under 10 seconds that did no work are excluded when longer successful runs exist. An all-fast workflow uses every successful run. Pass run_scope to report on one group of runs: default_branch, pull_request (PR branches only, same-repo PRs: fork PRs carry no PR attribution), merge_queue, or all. To get a trend, call this over two adjacent windows and compare.",
+         "category": "Engineering analytics",
+diff --git a/services/mcp/schema/tool-definitions-all.json b/services/mcp/schema/tool-definitions-all.json
+index 06d4a6fa02b4..e08af5191fec 100644
+--- a/services/mcp/schema/tool-definitions-all.json
++++ b/services/mcp/schema/tool-definitions-all.json
+@@ -15617,6 +15617,34 @@
+             "readOnlyHint": true
+         }
+     },
++    "wizard-install-start": {
++        "description": "Start Wizard, PostHog's setup agent, in the cloud on a GitHub repository of the current project. The setup agent adds the PostHog SDK and first events to the code and opens a pull request for the user to review. The project must be connected to GitHub, and the repository must be one the GitHub connection can access (integrations-github-repos-retrieve). To connect GitHub, give the user the link <base URL>/integrations/connect/github/?project_id=<project id>&connect_from=mcp. In this version the setup agent works at the repository root, so a monorepo app in a subdirectory may not be set up. Pass an idempotency_key and reuse it when you retry the same request. Each user can have one setup run active per project. Returns run_id; poll wizard-install-status with it about every 30 seconds until the status is completed, failed, or cancelled.",
++        "category": "Wizard",
++        "feature": "wizard",
++        "summary": "Start PostHog setup on a GitHub repository",
++        "title": "Start PostHog setup on a GitHub repository",
++        "required_scopes": ["task:write"],
++        "annotations": {
++            "destructiveHint": false,
++            "idempotentHint": false,
++            "openWorldHint": true,
++            "readOnlyHint": false
++        }
++    },
++    "wizard-install-status": {
++        "description": "Get the status of a setup run started with wizard-install-start: lifecycle status, current stage, task list, failure reason, and the pull request URL once it exists. Poll about every 30 seconds while status is created or running. Always relay next_step to the user; it says what is happening or what to do next. When pull_request_url is set, share it so the user can review and merge the changes.",
++        "category": "Wizard",
++        "feature": "wizard",
++        "summary": "Get PostHog setup run status",
++        "title": "Get PostHog setup run status",
++        "required_scopes": ["task:read"],
++        "annotations": {
++            "destructiveHint": false,
++            "idempotentHint": true,
++            "openWorldHint": true,
++            "readOnlyHint": true
++        }
++    },
+     "workflow-health": {
+         "description": "Per-workflow CI health over a window: run count, success rate, p50/p95 duration, and last failure time. Use this for \"is CI getting faster or slower\", \"which GitHub Actions workflow is the slow or flaky long pole\", and CI duration trends. Success rate covers runs that succeeded or ended in failure, timeout, startup failure, or staleness. Skipped, cancelled, neutral, and action-required runs are excluded. p50/p95 are over successful runs only, so superseded cancels and failed runs never bias the duration percentile. Runs under 10 seconds that did no work are excluded when longer successful runs exist. An all-fast workflow uses every successful run. Pass run_scope to report on one group of runs: default_branch, pull_request (PR branches only, same-repo PRs: fork PRs carry no PR attribution), merge_queue, or all. To get a trend, call this over two adjacent windows and compare.",
+         "category": "Engineering analytics",
+diff --git a/services/mcp/src/generated/wizard/api.ts b/services/mcp/src/generated/wizard/api.ts
+new file mode 100644
+index 000000000000..8f377d69b3da
+--- /dev/null
++++ b/services/mcp/src/generated/wizard/api.ts
+@@ -0,0 +1,65 @@
++/**
++ * Auto-generated from the Django backend OpenAPI schema.
++ * MCP service uses these Zod schemas for generated tool handlers.
++ * To regenerate: hogli build:openapi
++ *
++ * PostHog API - MCP 2 enabled ops
++ * OpenAPI spec version: 1.0.0
++ */
++import * as zod from 'zod'
++
++/**
++ * Start the setup agent in the cloud on a GitHub repository of this project. It adds PostHog to the code and opens a pull request. Each user can have one setup run active per project at a time.
++ * @summary Start a setup run
++ */
++export const WizardInstallsCreateParams = () => zod.object({
++    project_id: zod
++        .string()
++        .describe(
++            "Project ID of the project you're trying to access. To find the ID of the project, make a call to \/api\/projects\/."
++        ),
++})
++
++export const wizardInstallsCreateBodyRepositoryMax = 255
++
++export const wizardInstallsCreateBodyBranchMax = 255
++
++export const wizardInstallsCreateBodyIdempotencyKeyMax = 255
++
++export const WizardInstallsCreateBody = () => zod.object({
++    repository: zod
++        .string()
++        .max(wizardInstallsCreateBodyRepositoryMax)
++        .describe(
++            "GitHub repository to set up, in owner\/name format. The project's GitHub connection must have access to it."
++        ),
++    branch: zod
++        .string()
++        .max(wizardInstallsCreateBodyBranchMax)
++        .optional()
++        .describe(
++            "Branch to start from and to open the pull request against. Defaults to the repository's default branch."
++        ),
++    idempotency_key: zod
++        .string()
++        .max(wizardInstallsCreateBodyIdempotencyKeyMax)
++        .optional()
++        .describe(
++            'Unique key for this request. A retry with the same key returns the same run instead of starting another.'
++        ),
++})
++
++/**
++ * Get the status of a cloud setup run, its task list, the pull request link once it exists, and a next step to relay to the user.
++ * @summary Get a setup run's status
++ */
++export const wizardInstallsRetrievePathRunIdRegExp = new RegExp('^[0-9a-fA-F-]{36}$')
++
++export const WizardInstallsRetrieveParams = () => zod.object({
++    project_id: zod
++        .string()
++        .describe(
++            "Project ID of the project you're trying to access. To find the ID of the project, make a call to \/api\/projects\/."
++        ),
++    run_id: zod.string().regex(wizardInstallsRetrievePathRunIdRegExp),
++})
+diff --git a/services/mcp/src/tools/generated/index.ts b/services/mcp/src/tools/generated/index.ts
+index e010927684fc..7b91db4461d1 100644
+--- a/services/mcp/src/tools/generated/index.ts
++++ b/services/mcp/src/tools/generated/index.ts
+@@ -66,6 +66,7 @@ import { GENERATED_TOOLS as visual_review } from './visual_review'
+ import { GENERATED_TOOLS as warehouse_sources } from './warehouse_sources'
+ import { GENERATED_TOOLS as warehouse_suggestions } from './warehouse_suggestions'
+ import { GENERATED_TOOLS as web_analytics } from './web_analytics'
++import { GENERATED_TOOLS as wizard } from './wizard'
+ import { GENERATED_TOOLS as workflows } from './workflows'
+ 
+ export const GENERATED_TOOL_MAP: Record<string, () => ToolBase<ZodObjectAny>> = {
+@@ -134,5 +135,6 @@ export const GENERATED_TOOL_MAP: Record<string, () => ToolBase<ZodObjectAny>> =
+     ...warehouse_sources,
+     ...warehouse_suggestions,
+     ...web_analytics,
++    ...wizard,
+     ...workflows,
+ }
+diff --git a/services/mcp/src/tools/generated/wizard.ts b/services/mcp/src/tools/generated/wizard.ts
+new file mode 100644
+index 000000000000..cb576621d87b
+--- /dev/null
++++ b/services/mcp/src/tools/generated/wizard.ts
+@@ -0,0 +1,63 @@
++// AUTO-GENERATED from products/wizard/mcp/tools.yaml + OpenAPI — do not edit
++import { z } from 'zod'
++
++import type { Schemas } from '@/api/generated'
++import * as orvalSchemas from '@/generated/wizard/api'
++import type { Context, ToolBase, ZodObjectAny } from '@/tools/types'
++
++const WizardInstallStartSchema = () => {
++    const WizardInstallsCreateBody = orvalSchemas.WizardInstallsCreateBody()
++    return WizardInstallsCreateBody
++}
++
++const wizardInstallStart = (): ToolBase<ReturnType<typeof WizardInstallStartSchema>, Schemas.WizardInstallStart> => ({
++    name: 'wizard-install-start',
++    schema: WizardInstallStartSchema(),
++    handler: async (context: Context, params: z.infer<ReturnType<typeof WizardInstallStartSchema>>) => {
++        const projectId = await context.stateManager.getProjectId()
++        const body: Record<string, unknown> = {}
++        if (params.repository !== undefined) {
++            body['repository'] = params.repository
++        }
++        if (params.branch !== undefined) {
++            body['branch'] = params.branch
++        }
++        if (params.idempotency_key !== undefined) {
++            body['idempotency_key'] = params.idempotency_key
++        }
++        const result = await context.api.request<Schemas.WizardInstallStart>({
++            method: 'POST',
++            path: `/api/projects/${encodeURIComponent(String(projectId))}/wizard/installs/`,
++            body,
++        })
++        return result
++    },
++})
++
++const WizardInstallStatusSchema = () => {
++    const WizardInstallsRetrieveParams = orvalSchemas.WizardInstallsRetrieveParams()
++    return WizardInstallsRetrieveParams.omit({ project_id: true }).extend({
++        run_id: WizardInstallsRetrieveParams.shape['run_id'].describe('The run_id returned by wizard-install-start.'),
++    })
++}
++
++const wizardInstallStatus = (): ToolBase<
++    ReturnType<typeof WizardInstallStatusSchema>,
++    Schemas.WizardInstallStatus
++> => ({
++    name: 'wizard-install-status',
++    schema: WizardInstallStatusSchema(),
++    handler: async (context: Context, params: z.infer<ReturnType<typeof WizardInstallStatusSchema>>) => {
++        const projectId = await context.stateManager.getProjectId()
++        const result = await context.api.request<Schemas.WizardInstallStatus>({
++            method: 'GET',
++            path: `/api/projects/${encodeURIComponent(String(projectId))}/wizard/installs/${encodeURIComponent(String(params.run_id))}/`,
++        })
++        return result
++    },
++})
++
++export const GENERATED_TOOLS: Record<string, () => ToolBase<ZodObjectAny>> = {
++    'wizard-install-start': wizardInstallStart,
++    'wizard-install-status': wizardInstallStatus,
++}

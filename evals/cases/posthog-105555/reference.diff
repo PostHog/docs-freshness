@@ -1,0 +1,79 @@
+diff --git a/contents/docs/feature-flags/cutting-costs.mdx b/contents/docs/feature-flags/cutting-costs.mdx
+index 81189a979cad..446d1de61be0 100644
+--- a/contents/docs/feature-flags/cutting-costs.mdx
++++ b/contents/docs/feature-flags/cutting-costs.mdx
+@@ -78,13 +78,20 @@ Surveys rely on feature flags internally. Using `advanced_disable_feature_flags`
+ 
+ ## Reducing local evaluation costs
+ 
+-If you're using [local evaluation](/docs/feature-flags/local-evaluation), your bill may be high because of too many requests to fetch feature flag definitions. By default, PostHog fetches these every 30 seconds.
++If you're using [local evaluation](/docs/feature-flags/local-evaluation), your bill depends on how often each server instance polls for feature flag definitions, and on whether those definitions changed since the last poll. By default, PostHog fetches definitions every 30 seconds.
+ 
+-Each request charges 10 credits, so assuming your server is constantly running and making 2 requests per minute (the default setting), this will charge `10 * 2 * 60 * 24 * 30 = 864,000 credits` each month.
++A poll is charged in one of two ways:
+ 
+-You can reduce this by increasing the [feature flag polling interval](/docs/feature-flags/local-evaluation#step-2-initialize-posthog-with-your-personal-api-key) when initializing PostHog. For example, every 5 minutes instead of every 30 seconds.
++- **The definitions changed**, or the instance just started: PostHog returns the full definitions. This is charged as 10 requests.
++- **Nothing changed**: the SDK sends the ETag of the definitions it already holds, PostHog replies `304 Not Modified` with no body, and the poll is charged as 1 request.
+ 
+-The drawback of this approach is that whenever you make an update to a feature flag using the PostHog UI, it takes 5 minutes (instead of 30 seconds) for that change to roll to your server.
++For a single server that runs all month at the default interval, the unchanged polls add up to `2 * 60 * 24 * 30 = 86,400 requests`, plus 10 requests for every poll that returns new definitions. Older SDK versions without ETag support are charged 10 requests for every poll, so the same server costs `10 * 2 * 60 * 24 * 30 = 864,000 requests`.
++
++To keep this cost down:
++
++1. **Use an SDK version that sends ETags.** Support arrived in Node.js 5.17.2, Python 7.13.0, Go 1.12.2, Ruby 3.4.0, PHP 3.7.3, .NET 2.4.2, and Java (posthog-server) 2.2.0. These versions send the ETag automatically.
++2. **Increase the [polling interval](/docs/feature-flags/local-evaluation#step-2-initialize-posthog-with-your-feature-flags-secure-api-key)** when initializing PostHog, for example every 5 minutes instead of every 30 seconds. The drawback is that a flag change takes up to 5 minutes (instead of 30 seconds) to reach your server.
++3. **Share definitions across instances.** Every instance polls on its own, so 20 instances cost 20 times as much as one. With an [external cache provider](/docs/feature-flags/local-evaluation/distributed-environments), one instance polls and the others read from the shared cache.
+ 
+ <CalloutBox icon="IconWarning" title="Edge/Lambda environments" type="caution">
+ 
+diff --git a/contents/docs/feature-flags/local-evaluation/_snippets/distributed-environments-intro.mdx b/contents/docs/feature-flags/local-evaluation/_snippets/distributed-environments-intro.mdx
+index 08ec649cae31..34ee87499d11 100644
+--- a/contents/docs/feature-flags/local-evaluation/_snippets/distributed-environments-intro.mdx
++++ b/contents/docs/feature-flags/local-evaluation/_snippets/distributed-environments-intro.mdx
+@@ -1,5 +1,7 @@
+ When using [local evaluation](/docs/feature-flags/local-evaluation), the SDK fetches feature flag definitions and stores them in memory. This works well for single-instance applications, but in distributed or stateless environments (multiple servers, edge workers, lambdas), each instance fetches its own copy, wasting API calls and adding latency on cold starts.
+ 
++Each instance also polls on its own schedule, and each poll is billed. A poll that returns unchanged definitions is charged as 1 flag request, and a poll that returns new definitions, including the first fetch after an instance starts, is charged as 10. See [reducing local evaluation costs](/docs/feature-flags/cutting-costs#reducing-local-evaluation-costs) for details. A shared cache brings this down to one polling instance, which matters most when you run many instances or they restart often.
++
+ An **external cache provider** lets you store flag definitions in shared storage (Redis, database, Cloudflare KV, etc.) so all instances can read from a single source.
+ 
+ This enables you to:
+diff --git a/contents/docs/feature-flags/local-evaluation/index.mdx b/contents/docs/feature-flags/local-evaluation/index.mdx
+index a04da81d45b1..31417a7a951f 100644
+--- a/contents/docs/feature-flags/local-evaluation/index.mdx
++++ b/contents/docs/feature-flags/local-evaluation/index.mdx
+@@ -56,7 +56,7 @@ sequenceDiagram
+ 
+ Notice that PostHog is not involved at evaluation time. The tradeoff: **you are responsible for providing every property the flag's release conditions depend on**. If you forget to pass a property, the SDK can't evaluate the flag locally and will either fall back to a remote request or return `undefined` (depending on your configuration).
+ 
+-Local evaluation is also more cost-effective: with remote evaluation, every flag check is a billable request, whereas local evaluation only bills for the periodic request to fetch flag definitions (counted as 10 flag requests each). For high-traffic services, this can significantly reduce your flag usage costs.
++Local evaluation is also more cost-effective: with remote evaluation, every flag check is a billable request, whereas local evaluation only bills for the periodic poll for flag definitions (counted as 10 flag requests when the definitions changed, and 1 when they didn't). For high-traffic services, this can significantly reduce your flag usage costs.
+ 
+ Each flag definition includes a `version` number that the SDK uses to detect changes. PostHog increments this version whenever you modify the flag itself. It also increments the version when any [cohort](/docs/data/cohorts) referenced by the flag — directly or through nested cohorts — has its conditions changed. This ensures your SDK cache stays in sync even when the flag's effective definition changes through a cohort update rather than a direct flag edit.
+ 
+@@ -74,9 +74,11 @@ When you initialize PostHog with your feature flags secure API key, PostHog will
+ 
+ By default, PostHog fetches these definitions every 30 seconds (or 5 minutes in the Go SDK). However, you can change this frequency by specifying a different value in the polling interval argument.
+ 
+-> **Note:** For billing purposes, we count the request to fetch the feature flag definitions as being equivalent to `10 flags` requests.
++> **Note:** For billing purposes, we count a request that returns the feature flag definitions as being equivalent to `10 flags` requests.
+ >
+ > This is because one of these requests can compute feature flags for hundreds or thousands of users. It ensures local evaluation is priced fairly while remaining the most cost-effective option (by far!).
++>
++> Most polls don't return the definitions. The SDK sends the ETag of the definitions it already holds, and when nothing changed PostHog replies `304 Not Modified` with an empty body. That poll is charged as 1 flag request. See [reducing local evaluation costs](/docs/feature-flags/cutting-costs#reducing-local-evaluation-costs) for the SDK versions that send ETags.
+ 
+ import ConfigureFlagsSecureKey from "../../integrate/_snippets/configure-flags-secure-key.mdx";
+ 
+diff --git a/contents/docs/feature-flags/snippets/flag-charge-estimate.mdx b/contents/docs/feature-flags/snippets/flag-charge-estimate.mdx
+index 9be122410919..150c5be92b81 100644
+--- a/contents/docs/feature-flags/snippets/flag-charge-estimate.mdx
++++ b/contents/docs/feature-flags/snippets/flag-charge-estimate.mdx
+@@ -24,6 +24,6 @@ If you're not using [local evaluation](/docs/feature-flags/local-evaluation), a
+ 
+ ##### With local evaluation
+ 
+-If you're using [local evaluation](/docs/feature-flags/local-evaluation), each local evaluation request is equivalent to, and charged as, 10 feature flag requests. Local evaluation calls, by default, are made every 30 seconds. Assuming your server is constantly running and making 2 requests per minute, you will be charged `10 * 2 * 60 * 24 * 30 = 864,000 feature flag requests` each month.
++If you're using [local evaluation](/docs/feature-flags/local-evaluation), each poll for feature flag definitions is charged as 10 feature flag requests when the definitions changed, and as 1 request when they didn't. The SDK sends the ETag of the definitions it holds, and PostHog answers `304 Not Modified` when nothing changed. Polls are made every 30 seconds by default. Assuming your server is constantly running, making 2 polls per minute, and your flags rarely change, you will be charged about `2 * 60 * 24 * 30 = 86,400 feature flag requests` each month, plus 10 requests for each poll that returns new definitions. SDK versions without ETag support are charged 10 requests for every poll, which adds up to `10 * 2 * 60 * 24 * 30 = 864,000 feature flag requests`. See [reducing local evaluation costs](/docs/feature-flags/cutting-costs#reducing-local-evaluation-costs) for the supported versions.
+ 
+ > **Note:** This figure is for a single server and a single instance of PostHog. If you have multiple servers, PostHog instances, or a different poll duration, you need to multiply your estimates too.

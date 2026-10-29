@@ -1,0 +1,923 @@
+diff --git a/frontend/src/queries/schema.json b/frontend/src/queries/schema.json
+index 503301835d34..ed5b35ebf803 100644
+--- a/frontend/src/queries/schema.json
++++ b/frontend/src/queries/schema.json
+@@ -24710,8 +24710,8 @@
+                     "description": "For mean metrics: event source."
+                 },
+                 "start_event": {
+-                    "$ref": "#/definitions/ExperimentApiEventSource",
+-                    "description": "For retention metrics: start event."
++                    "$ref": "#/definitions/ExperimentApiRetentionStart",
++                    "description": "For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment's exposure event; start_handling and conversion window are ignored then."
+                 },
+                 "start_handling": {
+                     "enum": ["first_seen", "last_seen"],
+@@ -24735,6 +24735,51 @@
+             "required": ["kind", "metric_type"],
+             "type": "object"
+         },
++        "ExperimentApiRetentionStart": {
++            "additionalProperties": false,
++            "description": "Slim start source for retention metrics in API payloads. kind stays required so a payload without it fails validation instead of silently becoming an exposure start.",
++            "properties": {
++                "event": {
++                    "description": "Event name, e.g. '$pageview'. Required for EventsNode.",
++                    "type": "string"
++                },
++                "id": {
++                    "$ref": "#/definitions/integer",
++                    "description": "Action ID. Required for ActionsNode."
++                },
++                "kind": {
++                    "description": "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset.",
++                    "enum": ["EventsNode", "ActionsNode", "ExperimentExposureNode"],
++                    "type": "string"
++                },
++                "math": {
++                    "$ref": "#/definitions/ExperimentMetricMathType",
++                    "description": "How to aggregate this source. Defaults to 'total' (event count). Use 'sum' together with math_property to aggregate a numeric property — e.g. a ratio numerator of revenue per order. Other options: 'avg', 'min', 'max', 'unique_session', 'dau', 'unique_group', 'hogql'."
++                },
++                "math_group_type_index": {
++                    "description": "Group type index to aggregate over. Required when math is 'unique_group'.",
++                    "enum": [0, 1, 2, 3, 4],
++                    "type": "number"
++                },
++                "math_hogql": {
++                    "description": "HogQL aggregation expression. Required when math is 'hogql' — without it the metric silently falls back to a plain count/sum.",
++                    "type": "string"
++                },
++                "math_property": {
++                    "description": "Numeric event property to aggregate when math is 'sum', 'avg', 'min', or 'max' (e.g. 'revenue').",
++                    "type": "string"
++                },
++                "properties": {
++                    "description": "Event property filters to narrow which events are counted.",
++                    "items": {
++                        "$ref": "#/definitions/EventPropertyFilter"
++                    },
++                    "type": "array"
++                }
++            },
++            "required": ["kind"],
++            "type": "object"
++        },
+         "ExperimentBreakdownResult": {
+             "additionalProperties": false,
+             "description": "Represents experiment results for a single breakdown combination. Each breakdown is treated as an independent A/B test with its own baseline and variants. For multiple breakdowns, values are in the same order as breakdownFilter.breakdowns.",
+diff --git a/frontend/src/queries/schema/schema-general.ts b/frontend/src/queries/schema/schema-general.ts
+index 50087b057db8..5ade824cada0 100644
+--- a/frontend/src/queries/schema/schema-general.ts
++++ b/frontend/src/queries/schema/schema-general.ts
+@@ -5586,6 +5586,14 @@ export interface ExperimentApiEventSource {
+     properties?: EventPropertyFilter[]
+ }
+ 
++/** Slim start source for retention metrics in API payloads. kind stays required so a
++ *  payload without it fails validation instead of silently becoming an exposure start. */
++export interface ExperimentApiRetentionStart extends Omit<ExperimentApiEventSource, 'kind'> {
++    /** Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure
++     *  event; the other fields then stay unset. */
++    kind: 'EventsNode' | 'ActionsNode' | 'ExperimentExposureNode'
++}
++
+ /** Experiment metric for API create/update. All metric-type-specific
+  *  fields are optional; discriminated by metric_type at runtime. */
+ export interface ExperimentApiMetric {
+@@ -5638,8 +5646,9 @@ export interface ExperimentApiMetric {
+     /** For ratio metrics: winsorization applied to the denominator aggregate. Leave unset for a
+      *  binomial-style denominator, which is never clamped. */
+     denominator_outlier_handling?: ExperimentMetricOutlierHandling
+-    /** For retention metrics: start event. */
+-    start_event?: ExperimentApiEventSource
++    /** For retention metrics: start event. Pass {"kind": "ExperimentExposureNode"} to start retention
++     *  from the experiment's exposure event; start_handling and conversion window are ignored then. */
++    start_event?: ExperimentApiRetentionStart
+     /** For retention metrics: completion event. */
+     completion_event?: ExperimentApiEventSource
+     retention_window_start?: integer
+diff --git a/frontend/src/scenes/experiments/ExperimentMetricForm.tsx b/frontend/src/scenes/experiments/ExperimentMetricForm.tsx
+index 5ba410d29c42..79d9ac1c5fca 100644
+--- a/frontend/src/scenes/experiments/ExperimentMetricForm.tsx
++++ b/frontend/src/scenes/experiments/ExperimentMetricForm.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useState } from 'react'
++import { useEffect, useRef, useState } from 'react'
+ 
+ import { IconInfo, IconPencil } from '@posthog/icons'
+ import { LemonBanner, LemonInput } from '@posthog/lemon-ui'
+@@ -148,6 +148,8 @@ export function ExperimentMetricForm({
+     const allowedMathTypes = getAllowedMathTypes(metric.metric_type)
+     const [eventCount, setEventCount] = useState<number | null>(null)
+     const [isLoading, setIsLoading] = useState(false)
++    // holds the literal start event while the exposure sentinel is selected, so switching back restores it
++    const previousStartEvent = useRef<ExperimentMetricSource | null>(null)
+ 
+     const getEventTypeLabel = (): string => {
+         if (isExperimentMeanMetric(metric)) {
+@@ -498,34 +500,68 @@ export function ExperimentMetricForm({
+                                     <IconInfo className="ml-1 text-muted" />
+                                 </Tooltip>
+                             </LemonLabel>
+-                            <ActionFilter
+-                                bordered
+-                                filters={
+-                                    isExperimentExposureNode(metric.start_event)
+-                                        ? {}
+-                                        : createFilterForSource(metric.start_event)
+-                                }
+-                                setFilters={(filters) => {
+-                                    const source = filterToMetricSource(
+-                                        filters.actions,
+-                                        filters.events,
+-                                        filters.data_warehouse
+-                                    )
+-                                    if (source) {
+-                                        handleSetMetric({ ...metric, start_event: source })
++                            <LemonRadio
++                                className="my-1.5"
++                                data-attr="experiment-retention-start-source"
++                                orientation="horizontal"
++                                value={isExperimentExposureNode(metric.start_event) ? 'exposure' : 'custom'}
++                                onChange={(value) => {
++                                    if (value === 'exposure') {
++                                        if (!isExperimentExposureNode(metric.start_event)) {
++                                            previousStartEvent.current = metric.start_event
++                                        }
++                                        handleSetMetric({
++                                            ...metric,
++                                            start_event: { kind: NodeKind.ExperimentExposureNode },
++                                        })
++                                    } else {
++                                        handleSetMetric({
++                                            ...metric,
++                                            start_event: previousStartEvent.current ?? {
++                                                kind: NodeKind.EventsNode,
++                                                event: '$pageview',
++                                                name: '$pageview',
++                                                math: ExperimentMetricMathType.TotalCount,
++                                            },
++                                        })
+                                     }
+                                 }}
+-                                typeKey="experiment-metric-start-event"
+-                                buttonCopy="Add start event"
+-                                showSeriesIndicator={false}
+-                                hideRename={true}
+-                                entitiesLimit={1}
+-                                showNumericalPropsOnly={true}
+-                                mathAvailability={mathAvailability}
+-                                allowedMathTypes={allowedMathTypes}
+-                                dataWarehousePopoverFields={dataWarehousePopoverFields}
+-                                {...commonActionFilterProps}
++                                options={[
++                                    { value: 'custom', label: 'Custom event' },
++                                    { value: 'exposure', label: 'Experiment exposure' },
++                                ]}
+                             />
++                            {isExperimentExposureNode(metric.start_event) ? (
++                                <div className="text-muted text-xs">
++                                    Retention starts from each user's first exposure to the experiment. In a shared
++                                    metric, each experiment uses its own exposure event.
++                                </div>
++                            ) : (
++                                <ActionFilter
++                                    bordered
++                                    filters={createFilterForSource(metric.start_event)}
++                                    setFilters={(filters) => {
++                                        const source = filterToMetricSource(
++                                            filters.actions,
++                                            filters.events,
++                                            filters.data_warehouse
++                                        )
++                                        if (source) {
++                                            handleSetMetric({ ...metric, start_event: source })
++                                        }
++                                    }}
++                                    typeKey="experiment-metric-start-event"
++                                    buttonCopy="Add start event"
++                                    showSeriesIndicator={false}
++                                    hideRename={true}
++                                    entitiesLimit={1}
++                                    showNumericalPropsOnly={true}
++                                    mathAvailability={mathAvailability}
++                                    allowedMathTypes={allowedMathTypes}
++                                    dataWarehousePopoverFields={dataWarehousePopoverFields}
++                                    {...commonActionFilterProps}
++                                />
++                            )}
+                         </div>
+ 
+                         <div>
+@@ -622,36 +658,42 @@ export function ExperimentMetricForm({
+                                     ]}
+                                 />
+                             </div>
+-                            <span className="text-muted text-xs">After the start event</span>
++                            <span className="text-muted text-xs">
++                                {isExperimentExposureNode(metric.start_event)
++                                    ? "After the user's first exposure"
++                                    : 'After the start event'}
++                            </span>
+                         </div>
+ 
+-                        <div>
+-                            <LemonLabel className="mb-1">
+-                                When users have multiple start events
+-                                <Tooltip title="Choose how to handle users who perform the start event multiple times during the experiment.">
+-                                    <IconInfo className="ml-1 text-muted" />
+-                                </Tooltip>
+-                            </LemonLabel>
+-                            <LemonSelect
+-                                value={metric.start_handling || 'first_seen'}
+-                                onChange={(value) => {
+-                                    handleSetMetric({
+-                                        ...metric,
+-                                        start_handling: value as 'first_seen' | 'last_seen',
+-                                    })
+-                                }}
+-                                options={[
+-                                    {
+-                                        label: 'Use first start event',
+-                                        value: 'first_seen',
+-                                    },
+-                                    {
+-                                        label: 'Use last start event',
+-                                        value: 'last_seen',
+-                                    },
+-                                ]}
+-                            />
+-                        </div>
++                        {!isExperimentExposureNode(metric.start_event) && (
++                            <div>
++                                <LemonLabel className="mb-1">
++                                    When users have multiple start events
++                                    <Tooltip title="Choose how to handle users who perform the start event multiple times during the experiment.">
++                                        <IconInfo className="ml-1 text-muted" />
++                                    </Tooltip>
++                                </LemonLabel>
++                                <LemonSelect
++                                    value={metric.start_handling || 'first_seen'}
++                                    onChange={(value) => {
++                                        handleSetMetric({
++                                            ...metric,
++                                            start_handling: value as 'first_seen' | 'last_seen',
++                                        })
++                                    }}
++                                    options={[
++                                        {
++                                            label: 'Use first start event',
++                                            value: 'first_seen',
++                                        },
++                                        {
++                                            label: 'Use last start event',
++                                            value: 'last_seen',
++                                        },
++                                    ]}
++                                />
++                            </div>
++                        )}
+                     </div>
+                 )}
+             </SceneSection>
+@@ -672,8 +714,13 @@ export function ExperimentMetricForm({
+                 </div>
+             </SceneSection>
+             <SceneDivider />
+-            <ExperimentMetricConversionWindowFilter metric={metric} handleSetMetric={handleSetMetric} />
+-            <SceneDivider />
++            {/* The backend ignores the conversion window for exposure-anchored retention: the retention window already anchors on exposure */}
++            {!(isExperimentRetentionMetric(metric) && isExperimentExposureNode(metric.start_event)) && (
++                <>
++                    <ExperimentMetricConversionWindowFilter metric={metric} handleSetMetric={handleSetMetric} />
++                    <SceneDivider />
++                </>
++            )}
+             {isExperimentFunnelMetric(metric) && (
+                 <>
+                     <ExperimentMetricFunnelOrderSelector metric={metric} handleSetMetric={handleSetMetric} />
+diff --git a/frontend/src/scenes/experiments/utils.ts b/frontend/src/scenes/experiments/utils.ts
+index 5a76a6d60f85..8e01fbd0cfdd 100644
+--- a/frontend/src/scenes/experiments/utils.ts
++++ b/frontend/src/scenes/experiments/utils.ts
+@@ -881,8 +881,11 @@ const getEventCountSeries = (metric: ExperimentMetric): AnyEntityNode[] => {
+ 
+     const source: ExperimentMetricSource | null = match(metric)
+         .when(isExperimentRatioMetric, (ratioMetric) => ratioMetric.numerator)
++        // An exposure-anchored start has no literal event to preview, so show completion-event activity
+         .when(isExperimentRetentionMetric, (retentionMetric) =>
+-            isExperimentExposureNode(retentionMetric.start_event) ? null : retentionMetric.start_event
++            isExperimentExposureNode(retentionMetric.start_event)
++                ? retentionMetric.completion_event
++                : retentionMetric.start_event
+         )
+         .when(isExperimentMeanMetric, (meanMetric) => meanMetric.source)
+         .otherwise(() => null)
+diff --git a/posthog/schema.py b/posthog/schema.py
+index 80f6e964e17f..acb5cd49cf19 100644
+--- a/posthog/schema.py
++++ b/posthog/schema.py
+@@ -153,6 +153,7 @@
+     Key10 as Key10,
+     Kind as Kind,
+     Kind1 as Kind1,
++    Kind2 as Kind2,
+     LegendPosition as LegendPosition,
+     LifecycleToggle as LifecycleToggle,
+     LimitContext as LimitContext,
+@@ -5232,103 +5233,52 @@ class ExperimentApiEventSource(BaseModel):
+     )
+ 
+ 
+-class ExperimentApiMetric(BaseModel):
++class ExperimentApiRetentionStart(BaseModel):
+     model_config = ConfigDict(
+         extra="forbid",
+     )
+-    completion_event: ExperimentApiEventSource | None = Field(
+-        default=None, description="For retention metrics: completion event."
+-    )
+-    conversion_window: int | None = Field(
+-        default=None,
+-        description=(
+-            "Only count metric events within this many units after the user's first"
+-            " exposure. Requires conversion_window_unit: a window without a unit is"
+-            " ignored and the metric counts events until the experiment ends. Omit both"
+-            " to count until the experiment ends."
+-        ),
+-    )
+-    conversion_window_unit: FunnelConversionWindowTimeUnit | None = Field(
++    event: str | None = Field(
+         default=None,
+-        description=(
+-            "Unit for conversion_window: 'second', 'minute', 'hour', 'day', 'week' or"
+-            " 'month'. Required when conversion_window is set."
+-        ),
+-    )
+-    denominator: ExperimentApiEventSource | None = Field(
+-        default=None, description="For ratio metrics: denominator source."
++        description="Event name, e.g. '$pageview'. Required for EventsNode.",
+     )
+-    denominator_outlier_handling: ExperimentMetricOutlierHandling | None = Field(
+-        default=None,
++    id: int | None = Field(default=None, description="Action ID. Required for ActionsNode.")
++    kind: Kind2 = Field(
++        ...,
+         description=(
+-            "For ratio metrics: winsorization applied to the denominator aggregate."
+-            " Leave unset for a binomial-style denominator, which is never clamped."
++            "Pass 'ExperimentExposureNode' to start retention from the experiment's own"
++            " exposure event; the other fields then stay unset."
+         ),
+     )
+-    funnel_order_type: StepOrderValue | None = Field(
++    math: ExperimentMetricMathType | None = Field(
+         default=None,
+         description=(
+-            "For funnel metrics: how the steps must occur. 'ordered' (default) or"
+-            " 'unordered'. Do not use 'strict': experiment funnels give wrong counts"
+-            " with it."
++            "How to aggregate this source. Defaults to 'total' (event count). Use 'sum'"
++            " together with math_property to aggregate a numeric property — e.g. a"
++            " ratio numerator of revenue per order. Other options: 'avg', 'min', 'max',"
++            " 'unique_session', 'dau', 'unique_group', 'hogql'."
+         ),
+     )
+-    goal: ExperimentMetricGoal | None = Field(
+-        default=None, description="Whether higher or lower values indicate success."
+-    )
+-    ignore_zeros: bool | None = Field(
+-        default=None,
+-        description=("For mean metrics: exclude zero values when computing the winsorization percentile thresholds."),
+-    )
+-    kind: Literal["ExperimentMetric"] = "ExperimentMetric"
+-    lower_bound_percentile: confloat(ge=0.0, le=1.0) | None = Field(
++    math_group_type_index: MathGroupTypeIndex | None = Field(
+         default=None,
+-        description=(
+-            "For mean metrics: winsorization lower percentile bound, as a fraction in"
+-            " [0, 1] (e.g. 0.01 for the 1st percentile). Per-user values below this"
+-            " percentile are clamped to it before aggregation."
+-        ),
++        description=("Group type index to aggregate over. Required when math is 'unique_group'."),
+     )
+-    metric_type: ExperimentMetricType
+-    name: str | None = Field(default=None, description="Human-readable metric name.")
+-    numerator: ExperimentApiEventSource | None = Field(default=None, description="For ratio metrics: numerator source.")
+-    numerator_outlier_handling: ExperimentMetricOutlierHandling | None = Field(
++    math_hogql: str | None = Field(
+         default=None,
+         description=(
+-            "For ratio metrics: winsorization applied to the numerator aggregate,"
+-            " independently of the denominator and each with its own percentile"
+-            " thresholds."
++            "HogQL aggregation expression. Required when math is 'hogql' — without it"
++            " the metric silently falls back to a plain count/sum."
+         ),
+     )
+-    retention_window_end: int | None = None
+-    retention_window_start: int | None = None
+-    retention_window_unit: FunnelConversionWindowTimeUnit | None = None
+-    series: list[ExperimentApiEventSource] | None = Field(
+-        default=None,
+-        description="For funnel metrics: array of EventsNode/ActionsNode steps.",
+-    )
+-    source: ExperimentApiEventSource | None = Field(default=None, description="For mean metrics: event source.")
+-    start_event: ExperimentApiEventSource | None = Field(
+-        default=None, description="For retention metrics: start event."
+-    )
+-    start_handling: StartHandling | None = None
+-    threshold: float | None = Field(
++    math_property: str | None = Field(
+         default=None,
+         description=(
+-            "For mean metrics: when set, reports the percentage of users whose per-user"
+-            " summed/counted value reaches or exceeds this threshold. Only meaningful"
+-            " for sum/count math types."
++            "Numeric event property to aggregate when math is 'sum', 'avg', 'min', or 'max' (e.g. 'revenue')."
+         ),
+     )
+-    upper_bound_percentile: confloat(ge=0.0, le=1.0) | None = Field(
++    properties: list[EventPropertyFilter] | None = Field(
+         default=None,
+-        description=(
+-            "For mean metrics: winsorization upper percentile bound, as a fraction in"
+-            " [0, 1] (e.g. 0.99 for the 99th percentile). Per-user values above this"
+-            " percentile are clamped to it before aggregation."
+-        ),
++        description="Event property filters to narrow which events are counted.",
+     )
+-    uuid: str | None = Field(default=None, description="Unique identifier. Auto-generated if omitted.")
+ 
+ 
+ class ExperimentExposureQueryResponse(BaseModel):
+@@ -17724,6 +17674,110 @@ class EventsQueryResponse(BaseModel):
+     )
+ 
+ 
++class ExperimentApiMetric(BaseModel):
++    model_config = ConfigDict(
++        extra="forbid",
++    )
++    completion_event: ExperimentApiEventSource | None = Field(
++        default=None, description="For retention metrics: completion event."
++    )
++    conversion_window: int | None = Field(
++        default=None,
++        description=(
++            "Only count metric events within this many units after the user's first"
++            " exposure. Requires conversion_window_unit: a window without a unit is"
++            " ignored and the metric counts events until the experiment ends. Omit both"
++            " to count until the experiment ends."
++        ),
++    )
++    conversion_window_unit: FunnelConversionWindowTimeUnit | None = Field(
++        default=None,
++        description=(
++            "Unit for conversion_window: 'second', 'minute', 'hour', 'day', 'week' or"
++            " 'month'. Required when conversion_window is set."
++        ),
++    )
++    denominator: ExperimentApiEventSource | None = Field(
++        default=None, description="For ratio metrics: denominator source."
++    )
++    denominator_outlier_handling: ExperimentMetricOutlierHandling | None = Field(
++        default=None,
++        description=(
++            "For ratio metrics: winsorization applied to the denominator aggregate."
++            " Leave unset for a binomial-style denominator, which is never clamped."
++        ),
++    )
++    funnel_order_type: StepOrderValue | None = Field(
++        default=None,
++        description=(
++            "For funnel metrics: how the steps must occur. 'ordered' (default) or"
++            " 'unordered'. Do not use 'strict': experiment funnels give wrong counts"
++            " with it."
++        ),
++    )
++    goal: ExperimentMetricGoal | None = Field(
++        default=None, description="Whether higher or lower values indicate success."
++    )
++    ignore_zeros: bool | None = Field(
++        default=None,
++        description=("For mean metrics: exclude zero values when computing the winsorization percentile thresholds."),
++    )
++    kind: Literal["ExperimentMetric"] = "ExperimentMetric"
++    lower_bound_percentile: confloat(ge=0.0, le=1.0) | None = Field(
++        default=None,
++        description=(
++            "For mean metrics: winsorization lower percentile bound, as a fraction in"
++            " [0, 1] (e.g. 0.01 for the 1st percentile). Per-user values below this"
++            " percentile are clamped to it before aggregation."
++        ),
++    )
++    metric_type: ExperimentMetricType
++    name: str | None = Field(default=None, description="Human-readable metric name.")
++    numerator: ExperimentApiEventSource | None = Field(default=None, description="For ratio metrics: numerator source.")
++    numerator_outlier_handling: ExperimentMetricOutlierHandling | None = Field(
++        default=None,
++        description=(
++            "For ratio metrics: winsorization applied to the numerator aggregate,"
++            " independently of the denominator and each with its own percentile"
++            " thresholds."
++        ),
++    )
++    retention_window_end: int | None = None
++    retention_window_start: int | None = None
++    retention_window_unit: FunnelConversionWindowTimeUnit | None = None
++    series: list[ExperimentApiEventSource] | None = Field(
++        default=None,
++        description="For funnel metrics: array of EventsNode/ActionsNode steps.",
++    )
++    source: ExperimentApiEventSource | None = Field(default=None, description="For mean metrics: event source.")
++    start_event: ExperimentApiRetentionStart | None = Field(
++        default=None,
++        description=(
++            'For retention metrics: start event. Pass {"kind":'
++            ' "ExperimentExposureNode"} to start retention from the experiment\'s'
++            " exposure event; start_handling and conversion window are ignored then."
++        ),
++    )
++    start_handling: StartHandling | None = None
++    threshold: float | None = Field(
++        default=None,
++        description=(
++            "For mean metrics: when set, reports the percentage of users whose per-user"
++            " summed/counted value reaches or exceeds this threshold. Only meaningful"
++            " for sum/count math types."
++        ),
++    )
++    upper_bound_percentile: confloat(ge=0.0, le=1.0) | None = Field(
++        default=None,
++        description=(
++            "For mean metrics: winsorization upper percentile bound, as a fraction in"
++            " [0, 1] (e.g. 0.99 for the 99th percentile). Per-user values above this"
++            " percentile are clamped to it before aggregation."
++        ),
++    )
++    uuid: str | None = Field(default=None, description="Unique identifier. Auto-generated if omitted.")
++
++
+ class ExperimentBreakdownResult(BaseModel):
+     model_config = ConfigDict(
+         extra="forbid",
+diff --git a/posthog/schema_enums.py b/posthog/schema_enums.py
+index ff071d9ed8a6..820e61a23728 100644
+--- a/posthog/schema_enums.py
++++ b/posthog/schema_enums.py
+@@ -1259,6 +1259,12 @@ class StartHandling(StrEnum):
+     LAST_SEEN = "last_seen"
+ 
+ 
++class Kind2(StrEnum):
++    EVENTS_NODE = "EventsNode"
++    ACTIONS_NODE = "ActionsNode"
++    EXPERIMENT_EXPOSURE_NODE = "ExperimentExposureNode"
++
++
+ class ConversionRateInputType(StrEnum):
+     MANUAL = "manual"
+     AUTOMATIC = "automatic"
+diff --git a/products/experiments/backend/presentation/serializers.py b/products/experiments/backend/presentation/serializers.py
+index 4646c683a765..5d70a23e4aeb 100644
+--- a/products/experiments/backend/presentation/serializers.py
++++ b/products/experiments/backend/presentation/serializers.py
+@@ -402,7 +402,8 @@ class ExperimentSerializer(ExperimentBaseSerializer):
+             "'mean' (set source to an EventsNode with an event name), "
+             "'funnel' (set series to an array of EventsNode steps), "
+             "'ratio' (set numerator and denominator EventsNode entries), or "
+-            "'retention' (set start_event and completion_event). "
++            "'retention' (set start_event and completion_event; pass start_event "
++            '{"kind": "ExperimentExposureNode"} to start retention from the experiment\'s exposure event). '
+             "Use the read-data-schema tool with query kind 'events' to find available events in the project."
+         ),
+     )
+diff --git a/products/experiments/frontend/generated/api.schemas.ts b/products/experiments/frontend/generated/api.schemas.ts
+index 4147e0a0e738..28ed8a29fcab 100644
+--- a/products/experiments/frontend/generated/api.schemas.ts
++++ b/products/experiments/frontend/generated/api.schemas.ts
+@@ -1420,6 +1420,33 @@ export const ExperimentMetricTypeApi = {
+     Retention: 'retention',
+ } as const
+ 
++export type Kind2Api = (typeof Kind2Api)[keyof typeof Kind2Api]
++
++export const Kind2Api = {
++    EventsNode: 'EventsNode',
++    ActionsNode: 'ActionsNode',
++    ExperimentExposureNode: 'ExperimentExposureNode',
++} as const
++
++export interface ExperimentApiRetentionStartApi {
++    /** Event name, e.g. '$pageview'. Required for EventsNode. */
++    event?: string | null
++    /** Action ID. Required for ActionsNode. */
++    id?: number | null
++    /** Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset. */
++    kind: Kind2Api
++    /** How to aggregate this source. Defaults to 'total' (event count). Use 'sum' together with math_property to aggregate a numeric property — e.g. a ratio numerator of revenue per order. Other options: 'avg', 'min', 'max', 'unique_session', 'dau', 'unique_group', 'hogql'. */
++    math?: ExperimentMetricMathTypeApi | null
++    /** Group type index to aggregate over. Required when math is 'unique_group'. */
++    math_group_type_index?: MathGroupTypeIndexApi | null
++    /** HogQL aggregation expression. Required when math is 'hogql' — without it the metric silently falls back to a plain count/sum. */
++    math_hogql?: string | null
++    /** Numeric event property to aggregate when math is 'sum', 'avg', 'min', or 'max' (e.g. 'revenue'). */
++    math_property?: string | null
++    /** Event property filters to narrow which events are counted. */
++    properties?: EventPropertyFilterApi[] | null
++}
++
+ export type StartHandlingApi = (typeof StartHandlingApi)[keyof typeof StartHandlingApi]
+ 
+ export const StartHandlingApi = {
+@@ -1461,8 +1488,8 @@ export interface ExperimentApiMetricApi {
+     series?: ExperimentApiEventSourceApi[] | null
+     /** For mean metrics: event source. */
+     source?: ExperimentApiEventSourceApi | null
+-    /** For retention metrics: start event. */
+-    start_event?: ExperimentApiEventSourceApi | null
++    /** For retention metrics: start event. Pass {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event; start_handling and conversion window are ignored then. */
++    start_event?: ExperimentApiRetentionStartApi | null
+     start_handling?: StartHandlingApi | null
+     /** For mean metrics: when set, reports the percentage of users whose per-user summed/counted value reaches or exceeds this threshold. Only meaningful for sum/count math types. */
+     threshold?: number | null
+@@ -1540,7 +1567,7 @@ export interface ExperimentWriteApi {
+     type?: ExperimentTypeEnumApi | null
+     /** Exposure configuration including filter test accounts and custom exposure events. */
+     exposure_criteria?: ExperimentApiExposureCriteriaApi | null
+-    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+     metrics?: _ExperimentApiMetricsListApi | null
+     /** Secondary metrics for additional measurements. Same format as primary metrics. */
+     metrics_secondary?: _ExperimentApiMetricsListApi | null
+@@ -1683,7 +1710,7 @@ export interface ExperimentApi {
+     type?: ExperimentTypeEnumApi | null
+     /** Exposure configuration including filter test accounts and custom exposure events. */
+     exposure_criteria?: ExperimentApiExposureCriteriaApi | null
+-    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+     metrics?: _ExperimentApiMetricsListApi | null
+     /** Secondary metrics for additional measurements. Same format as primary metrics. */
+     metrics_secondary?: _ExperimentApiMetricsListApi | null
+@@ -1822,7 +1849,7 @@ export interface PatchedExperimentWriteApi {
+     type?: ExperimentTypeEnumApi | null
+     /** Exposure configuration including filter test accounts and custom exposure events. */
+     exposure_criteria?: ExperimentApiExposureCriteriaApi | null
+-    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++    /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+     metrics?: _ExperimentApiMetricsListApi | null
+     /** Secondary metrics for additional measurements. Same format as primary metrics. */
+     metrics_secondary?: _ExperimentApiMetricsListApi | null
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index 82980be0276d..bc8df55fb4be 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -37890,6 +37890,34 @@ export namespace Schemas {
+       Retention: 'retention',
+     } as const;
+ 
++    export type Kind2 = typeof Kind2[keyof typeof Kind2];
++
++
++    export const Kind2 = {
++      EventsNode: 'EventsNode',
++      ActionsNode: 'ActionsNode',
++      ExperimentExposureNode: 'ExperimentExposureNode',
++    } as const;
++
++    export interface ExperimentApiRetentionStart {
++      /** Event name, e.g. '$pageview'. Required for EventsNode. */
++      event?: string | null;
++      /** Action ID. Required for ActionsNode. */
++      id?: number | null;
++      /** Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset. */
++      kind: Kind2;
++      /** How to aggregate this source. Defaults to 'total' (event count). Use 'sum' together with math_property to aggregate a numeric property — e.g. a ratio numerator of revenue per order. Other options: 'avg', 'min', 'max', 'unique_session', 'dau', 'unique_group', 'hogql'. */
++      math?: ExperimentMetricMathType | null;
++      /** Group type index to aggregate over. Required when math is 'unique_group'. */
++      math_group_type_index?: MathGroupTypeIndex | null;
++      /** HogQL aggregation expression. Required when math is 'hogql' — without it the metric silently falls back to a plain count/sum. */
++      math_hogql?: string | null;
++      /** Numeric event property to aggregate when math is 'sum', 'avg', 'min', or 'max' (e.g. 'revenue'). */
++      math_property?: string | null;
++      /** Event property filters to narrow which events are counted. */
++      properties?: EventPropertyFilter[] | null;
++    }
++
+     export interface ExperimentApiMetric {
+       /** For retention metrics: completion event. */
+       completion_event?: ExperimentApiEventSource | null;
+@@ -37924,8 +37952,8 @@ export namespace Schemas {
+       series?: ExperimentApiEventSource[] | null;
+       /** For mean metrics: event source. */
+       source?: ExperimentApiEventSource | null;
+-      /** For retention metrics: start event. */
+-      start_event?: ExperimentApiEventSource | null;
++      /** For retention metrics: start event. Pass {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event; start_handling and conversion window are ignored then. */
++      start_event?: ExperimentApiRetentionStart | null;
+       start_handling?: StartHandling | null;
+       /** For mean metrics: when set, reports the percentage of users whose per-user summed/counted value reaches or exceeds this threshold. Only meaningful for sum/count math types. */
+       threshold?: number | null;
+@@ -38018,7 +38046,7 @@ export namespace Schemas {
+       type?: ExperimentTypeEnum | null;
+       /** Exposure configuration including filter test accounts and custom exposure events. */
+       exposure_criteria?: ExperimentApiExposureCriteria | null;
+-      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+       metrics?: _ExperimentApiMetricsList | null;
+       /** Secondary metrics for additional measurements. Same format as primary metrics. */
+       metrics_secondary?: _ExperimentApiMetricsList | null;
+@@ -39810,7 +39838,7 @@ export namespace Schemas {
+       type?: ExperimentTypeEnum | null;
+       /** Exposure configuration including filter test accounts and custom exposure events. */
+       exposure_criteria?: ExperimentApiExposureCriteria | null;
+-      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+       metrics?: _ExperimentApiMetricsList | null;
+       /** Secondary metrics for additional measurements. Same format as primary metrics. */
+       metrics_secondary?: _ExperimentApiMetricsList | null;
+@@ -69597,7 +69625,7 @@ export namespace Schemas {
+       type?: ExperimentTypeEnum | null;
+       /** Exposure configuration including filter test accounts and custom exposure events. */
+       exposure_criteria?: ExperimentApiExposureCriteria | null;
+-      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
++      /** Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {"kind": "ExperimentExposureNode"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project. */
+       metrics?: _ExperimentApiMetricsList | null;
+       /** Secondary metrics for additional measurements. Same format as primary metrics. */
+       metrics_secondary?: _ExperimentApiMetricsList | null;
+diff --git a/services/mcp/src/generated/experiments/api.ts b/services/mcp/src/generated/experiments/api.ts
+index 2b971e92b709..26d094f7dbb8 100644
+--- a/services/mcp/src/generated/experiments/api.ts
++++ b/services/mcp/src/generated/experiments/api.ts
+@@ -5455,7 +5455,11 @@ export const ExperimentsCreateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -5586,7 +5590,9 @@ export const ExperimentsCreateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])
+@@ -5617,7 +5623,7 @@ export const ExperimentsCreateBody = () => zod
+             ])
+             .optional()
+             .describe(
+-                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
++                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
+             ),
+         metrics_secondary: zod
+             .union([
+@@ -6491,7 +6497,11 @@ export const ExperimentsCreateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -6622,7 +6632,9 @@ export const ExperimentsCreateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])
+@@ -11406,7 +11418,11 @@ export const ExperimentsPartialUpdateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -11537,7 +11553,9 @@ export const ExperimentsPartialUpdateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])
+@@ -11568,7 +11586,7 @@ export const ExperimentsPartialUpdateBody = () => zod
+             ])
+             .optional()
+             .describe(
+-                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
++                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
+             ),
+         metrics_secondary: zod
+             .union([
+@@ -12446,7 +12464,11 @@ export const ExperimentsPartialUpdateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -12577,7 +12599,9 @@ export const ExperimentsPartialUpdateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])
+@@ -17336,7 +17360,11 @@ export const ExperimentsDuplicateCreateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -17467,7 +17495,9 @@ export const ExperimentsDuplicateCreateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])
+@@ -17498,7 +17528,7 @@ export const ExperimentsDuplicateCreateBody = () => zod
+             ])
+             .optional()
+             .describe(
+-                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
++                "Primary experiment metrics. Each metric must have kind='ExperimentMetric' and a metric_type: 'mean' (set source to an EventsNode with an event name), 'funnel' (set series to an array of EventsNode steps), 'ratio' (set numerator and denominator EventsNode entries), or 'retention' (set start_event and completion_event; pass start_event {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment's exposure event). Use the read-data-schema tool with query kind 'events' to find available events in the project."
+             ),
+         metrics_secondary: zod
+             .union([
+@@ -18376,7 +18406,11 @@ export const ExperimentsDuplicateCreateBody = () => zod
+                                             .union([zod.number(), zod.null()])
+                                             .optional()
+                                             .describe('Action ID. Required for ActionsNode.'),
+-                                        kind: zod.enum(['EventsNode', 'ActionsNode']),
++                                        kind: zod
++                                            .enum(['EventsNode', 'ActionsNode', 'ExperimentExposureNode'])
++                                            .describe(
++                                                "Pass 'ExperimentExposureNode' to start retention from the experiment's own exposure event; the other fields then stay unset."
++                                            ),
+                                         math: zod
+                                             .union([
+                                                 zod.enum([
+@@ -18507,7 +18541,9 @@ export const ExperimentsDuplicateCreateBody = () => zod
+                                     zod.null(),
+                                 ])
+                                 .optional()
+-                                .describe('For retention metrics: start event.'),
++                                .describe(
++                                    'For retention metrics: start event. Pass {\"kind\": \"ExperimentExposureNode\"} to start retention from the experiment\'s exposure event; start_handling and conversion window are ignored then.'
++                                ),
+                             start_handling: zod.union([zod.enum(['first_seen', 'last_seen']), zod.null()]).optional(),
+                             threshold: zod
+                                 .union([zod.number(), zod.null()])

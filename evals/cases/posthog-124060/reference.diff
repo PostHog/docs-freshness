@@ -1,0 +1,34 @@
+diff --git a/contents/docs/self-driving/setup.mdx b/contents/docs/self-driving/setup.mdx
+index b43aed78e024..4d7a3ea055a2 100644
+--- a/contents/docs/self-driving/setup.mdx
++++ b/contents/docs/self-driving/setup.mdx
+@@ -32,7 +32,7 @@ The fastest way to turn on self-driving is our setup wizard:
+ 
+ The wizard checks whether PostHog is already installed and capturing events. If it isn't, it installs PostHog first, then continues straight into self-driving. From there it enables your signal sources, sets up your scouts, and hands you a link to your inbox.
+ 
+-The signal sources it can turn on include [error tracking](/docs/error-tracking), [session replay](/docs/session-replay), and external sources like Jira, Zendesk, GitHub Issues, and Linear. The more you enable, the more PostHog can watch to make your product self-driving.
++The signal sources it can turn on include [Error Tracking](/docs/error-tracking), [Session Replay](/docs/session-replay), and external sources like Jira, Zendesk, GitHub Issues, and Linear. The more you enable, the more PostHog can watch to make your product self-driving.
+ 
+ <CalloutBox icon="IconInfo" title="AI data processing required" type="fyi">
+ 
+@@ -56,7 +56,7 @@ The manual path enables the same self-driving as the wizard. You still need [AI
+ 
+ <Step title="Connect Slack" badge="recommended">
+ 
+-Add the [PostHog Slack app](/docs/slack) so you can summon agents and review their work from your team's channels. You connect your Slack workspace once, and each teammate who wants to ship a pull request connects their own GitHub. PostHog also posts a notification to the **#posthog-inbox** channel whenever a new report lands, so your team sees work as it comes in.
++Add the [PostHog Slack app](/docs/slack) so you can summon agents and review their work from your team's channels. You connect your Slack workspace once, and each teammate who wants to ship a pull request connects their own GitHub. PostHog also posts a notification to the `#posthog-inbox` channel whenever a new report lands, so your team sees work as it comes in.
+ 
+ </Step>
+ 
+diff --git a/contents/docs/tasks/index.mdx b/contents/docs/tasks/index.mdx
+index ec39286d2716..69571c0dc3ff 100644
+--- a/contents/docs/tasks/index.mdx
++++ b/contents/docs/tasks/index.mdx
+@@ -7,6 +7,7 @@ showTitle: true
+ 
+ PostHog uses shared task infrastructure to run agents across its products. Use these guides when your scripts or agent instructions need to work with a PostHog task environment.
+ 
++- [Cloud Tasks security](/docs/tasks/security) covers code access, snapshot storage, and network controls.
+ - [Agent instructions](/docs/tasks/agent-instructions) – Give standing instructions to the cloud agents in your project.
+ - [Detect a PostHog task environment](/docs/tasks/agent-environment) – Check the environment variables that PostHog supplies in a cloud sandbox.
+ - [Task-runs API reference](/docs/api/task-runs) – Read and manage task runs through the API.

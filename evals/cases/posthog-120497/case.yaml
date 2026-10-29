@@ -1,0 +1,9 @@
+id: posthog-120497
+codePr: 120497
+mergeSha: 697267bac62614e5254ea9691ddd76caba8ac523
+docsPr: 21412
+docsBaseSha: 4bd266d3babfd2990393f680726b4feae2eae5f7
+section: cdp
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/cdp/sources/courier.md

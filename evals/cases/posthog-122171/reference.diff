@@ -1,0 +1,26 @@
+diff --git a/contents/docs/mcp-analytics/events.mdx b/contents/docs/mcp-analytics/events.mdx
+index a600d786fe3d..3022e794bc50 100644
+--- a/contents/docs/mcp-analytics/events.mdx
++++ b/contents/docs/mcp-analytics/events.mdx
+@@ -30,7 +30,7 @@ Present on most `mcp_*` events.
+ 
+ | Wire key                 | Type                                | Source                                                                                                                                                                                                |
+ | ------------------------ | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+-| `$session_id` | string | The MCP session ID (`ses_<32-hex>`). Go also emits `ses_<UUIDv7>` for a session it generates. See [session resolution](#session-resolution) below. |
++| `$session_id` | string | The MCP session ID (`ses_<32-hex>`). Go also emits `ses_<UUIDv7>` for a session it generates. A custom ID you pass must be 128 characters or fewer. See [session resolution](#session-resolution) below. |
+ | `$mcp_source`            | string                              | Always `"posthog_mcp_analytics"`. Use this to filter out non-MCP events when querying mixed projects. The Go SDK's `$mcp_unknown_tool`, `$mcp_input_required`, and `$mcp_missing_capability` events don't carry it.                                                                                                 |
+ | `$mcp_resource_name`     | string                              | Tool or prompt name, or on resource events the resource URI with its credentials redacted (see [Privacy](/docs/mcp-analytics/privacy))                                                                                                                                                                        |
+ | `$mcp_tool_name`         | string                              | Same as `$mcp_resource_name`, but only on `$mcp_tool_call`. The Go SDK also sets it on `$mcp_unknown_tool` and `$mcp_input_required`                                                                                                                                            |
+diff --git a/contents/docs/mcp-analytics/installation/typescript.mdx b/contents/docs/mcp-analytics/installation/typescript.mdx
+index 0fdf381c4d80..82fef46f007c 100644
+--- a/contents/docs/mcp-analytics/installation/typescript.mdx
++++ b/contents/docs/mcp-analytics/installation/typescript.mdx
+@@ -337,7 +337,7 @@ Every capture method takes these fields:
+ | Field | Becomes | Notes |
+ | --- | --- | --- |
+ | `distinctId` | `distinct_id` | Turns on person processing. Omit it for anonymous traffic. |
+-| `sessionId` | `$session_id` | Omitted when you don't pass one. |
++| `sessionId` | `$session_id` | Omitted when you don't pass one. Keep it to 128 characters or fewer. |
+ | `protocolVersion` | `$mcp_protocol_version` | Pass the revision of each request. |
+ | `clientUserAgent` | `$mcp_client_user_agent` | The raw `User-Agent` header on HTTP transports. |
+ | `vendorClient` | `$mcp_vendor_client` | A vendor client header, such as `x-anthropic-client`. |

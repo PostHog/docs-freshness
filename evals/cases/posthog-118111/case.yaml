@@ -1,0 +1,9 @@
+id: posthog-118111
+codePr: 118111
+mergeSha: 767ad681843da710bd20f7430c330e9cc992a85b
+docsPr: 21297
+docsBaseSha: 40c55bdd59d1c1c0d5d7e85ffc16c755ebb0c195
+section: logs
+referenceKind: carbon-unit
+pages:
+  - contents/docs/logs/alerts.mdx

@@ -1,0 +1,5 @@
+evals/cases/
+evals/drafts/
+evals/results/
+pnpm-lock.yaml
+evals/.build/

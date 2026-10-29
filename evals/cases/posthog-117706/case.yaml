@@ -1,0 +1,9 @@
+id: posthog-117706
+codePr: 117706
+mergeSha: aa57604215366c96392e5337a2e49db8aec55564
+docsPr: 21246
+docsBaseSha: ec6b4447484d516df9376eca69e0c83d5ef7a100
+section: cdp
+referenceKind: edited-inkeep
+pages:
+  - contents/docs/cdp/sources/aws-security-hub.md

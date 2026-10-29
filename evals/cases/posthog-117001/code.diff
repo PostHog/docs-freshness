@@ -1,0 +1,154 @@
+diff --git a/docs/internal/ai-observability-judge-inputs.md b/docs/internal/ai-observability-judge-inputs.md
+index 54bf6e394ab8..2e65a4f83674 100644
+--- a/docs/internal/ai-observability-judge-inputs.md
++++ b/docs/internal/ai-observability-judge-inputs.md
+@@ -170,13 +170,11 @@ N/A and skipped numeric runs omit the score, while zero remains a graded result.
+ Separate properties preserve the existing boolean property's type and saved queries.
+ The numeric property uses normal numeric inference and can be aggregated in Insights.
+ Numeric queries use `toFloat(properties.$ai_evaluation_numeric_result)` to also handle properties whose metadata has not been registered yet.
+-No property-definition migration is required before enabling `llm-analytics-numeric-evaluations`.
++No property-definition migration is required for numeric evaluations.
+ 
+ ## Categorical outputs
+ 
+ Hog and LLM judge evaluations support categorical output for generation, trace, and session targets.
+-Creation is gated by `llm-analytics-categorical-evaluations`, disabled by default, in the API and frontend.
+-Existing evaluations remain editable and continue running when the flag is off.
+ 
+ The output configuration defines `options` as `{key, label}` pairs, `selection_mode` as `single` or `multiple`, and optional `allows_na`.
+ Each evaluation supports 1 to 100 categories, enforced by the API and editor.
+diff --git a/frontend/src/lib/constants.tsx b/frontend/src/lib/constants.tsx
+index e091db53ea9c..9e76c4a43abf 100644
+--- a/frontend/src/lib/constants.tsx
++++ b/frontend/src/lib/constants.tsx
+@@ -386,12 +386,10 @@ export const FEATURE_FLAGS = {
+     LEGACY_OAUTH_RECONNECT_WARNING: 'legacy-oauth-reconnect-warning', // owner: @jabahamondes #team-web-analytics — kill-switch for the retiring-OAuth-app reconnect banner
+     LIVE_EVENTS_RICH_FILTERS: 'live-events-rich-filters', // owner: @jordanm-posthog #team-web-analytics
+     LIVESTREAM_HOGQL: 'livestream-hogql', // owner: @benjackwhite #team-replay, swaps livestream service calls for HogQL queries
+-    LLM_ANALYTICS_CATEGORICAL_EVALS: 'llm-analytics-categorical-evaluations', // owner: #team-ai-observability
+     LLM_ANALYTICS_CLUSTERING_ADMIN: 'llm-analytics-clustering-admin', // owner: #team-ai-observability
+     LLM_ANALYTICS_COMMUNITY_SKILLS: 'llm-analytics-community-skills', // owner: #team-ai-observability
+     LLM_ANALYTICS_DATASETS: 'llm-analytics-datasets', // owner: #team-ai-observability #team-posthog-ai
+     LLM_ANALYTICS_EVAL_SETTLING_STRATEGY: 'llm-analytics-eval-settling-strategy', // owner: #team-ai-observability
+-    LLM_ANALYTICS_NUMERIC_EVALS: 'llm-analytics-numeric-evaluations', // owner: #team-ai-observability
+     LLM_ANALYTICS_SYSTEM_ONE_EVALUATIONS: 'llm-analytics-system-one-evaluations', // owner: #team-ai-observability
+     LLM_ANALYTICS_TAGS: 'llm-analytics-tags', // owner: #team-ai-observability
+     LLM_ANALYTICS_TRACE_NAVIGATION: 'llm-analytics-trace-navigation', // owner: #team-ai-observability
+diff --git a/products/ai_observability/backend/api/evaluations.py b/products/ai_observability/backend/api/evaluations.py
+index 251209b65afe..3f60f94a6646 100644
+--- a/products/ai_observability/backend/api/evaluations.py
++++ b/products/ai_observability/backend/api/evaluations.py
+@@ -30,7 +30,7 @@
+ from posthog.hogql_queries.ai.ai_table_resolver import AIEventsUnavailableError, query_ai_events
+ from posthog.hogql_queries.ai.utils import HEAVY_COLUMN_NAMES, merge_heavy_properties
+ from posthog.models.team import Team
+-from posthog.permissions import AccessControlPermission, posthog_feature_flag_enabled
++from posthog.permissions import AccessControlPermission
+ from posthog.temporal.ai_observability.eval_reports.output_types import get_outcome_definition
+ from posthog.temporal.ai_observability.message_utils import extract_text_from_messages
+ from posthog.temporal.ai_observability.model_resolution import active_key_fallback
+@@ -89,28 +89,6 @@
+ 
+ logger = structlog.get_logger(__name__)
+ 
+-NUMERIC_EVALUATIONS_FEATURE_FLAG = "llm-analytics-numeric-evaluations"
+-CATEGORICAL_EVALUATIONS_FEATURE_FLAG = "llm-analytics-categorical-evaluations"
+-
+-
+-def _evaluation_output_enabled(serializer: serializers.BaseSerializer, flag_key: str) -> bool:
+-    request = serializer.context.get("request")
+-    get_team = serializer.context.get("get_team")
+-    user = getattr(request, "user", None)
+-    if user is None or not getattr(user, "is_authenticated", False) or not callable(get_team):
+-        return False
+-
+-    team = get_team()
+-    try:
+-        return posthog_feature_flag_enabled(
+-            flag_key,
+-            str(user.distinct_id),
+-            organization_id=team.organization_id,
+-            team_id=team.id,
+-        )
+-    except Exception:
+-        return False
+-
+ 
+ @extend_schema_field(
+     {
+@@ -568,18 +546,6 @@ def _uses_decision_model(self, data: dict[str, object]) -> bool:
+     def validate(self, data):
+         evaluation_type = data.get("evaluation_type") or getattr(self.instance, "evaluation_type", None)
+         output_type = data.get("output_type") or getattr(self.instance, "output_type", None)
+-        flag_key = {
+-            "numeric": NUMERIC_EVALUATIONS_FEATURE_FLAG,
+-            "categorical": CATEGORICAL_EVALUATIONS_FEATURE_FLAG,
+-        }.get(str(output_type))
+-        if (
+-            flag_key
+-            and (self.instance is None or self.instance.output_type != output_type)
+-            and not _evaluation_output_enabled(self, flag_key)
+-        ):
+-            raise serializers.ValidationError(
+-                {"output_type": f"{str(output_type).capitalize()} evaluations are not enabled for this project."}
+-            )
+         if (
+             self.instance
+             and output_type != self.instance.output_type
+diff --git a/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx b/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
+index d9127bfa7721..1c1a3c0196ca 100644
+--- a/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
++++ b/products/ai_observability/frontend/evaluations/AIObservabilityEvaluation.tsx
+@@ -102,7 +102,6 @@ export function AIObservabilityEvaluation(): JSX.Element {
+     } = useValues(llmEvaluationLogic)
+     const { searchParams } = useValues(router)
+     const { featureFlags } = useValues(featureFlagLogic)
+-    const numericEvaluationsEnabled = !!featureFlags[FEATURE_FLAGS.LLM_ANALYTICS_NUMERIC_EVALS]
+     const settlingStrategyEnabled = !!featureFlags[FEATURE_FLAGS.LLM_ANALYTICS_EVAL_SETTLING_STRATEGY]
+     const {
+         setEvaluationName,
+@@ -120,7 +119,6 @@ export function AIObservabilityEvaluation(): JSX.Element {
+         patchTargetConfig,
+         setActiveTab,
+     } = useActions(llmEvaluationLogic)
+-    const categoricalEvaluationsEnabled = !!featureFlags[FEATURE_FLAGS.LLM_ANALYTICS_CATEGORICAL_EVALS]
+     const { push } = useActions(router)
+     const triggersRef = useRef<HTMLDivElement>(null)
+     const settingsUrl = combineUrl(urls.aiObservabilityEvaluations(), { ...searchParams, tab: 'settings' }).url
+@@ -713,22 +711,8 @@ export function AIObservabilityEvaluation(): JSX.Element {
+                                                         value={evaluation.output_type}
+                                                         options={[
+                                                             { value: 'boolean', label: 'Boolean' },
+-                                                            {
+-                                                                value: 'categorical',
+-                                                                label: 'Categorical',
+-                                                                disabledReason:
+-                                                                    isNewEvaluation && !categoricalEvaluationsEnabled
+-                                                                        ? 'Categorical evaluations are not enabled for this project.'
+-                                                                        : undefined,
+-                                                            },
+-                                                            {
+-                                                                value: 'numeric',
+-                                                                label: 'Numeric score',
+-                                                                disabledReason:
+-                                                                    isNewEvaluation && !numericEvaluationsEnabled
+-                                                                        ? 'Numeric evaluations are not enabled for this project.'
+-                                                                        : undefined,
+-                                                            },
++                                                            { value: 'categorical', label: 'Categorical' },
++                                                            { value: 'numeric', label: 'Numeric score' },
+                                                         ]}
+                                                         onChange={(value) =>
+                                                             setOutputType(
+diff --git a/products/ai_observability/skills/creating-online-evaluations/references/evaluation-payload.md.j2 b/products/ai_observability/skills/creating-online-evaluations/references/evaluation-payload.md.j2
+index 554fe8585936..9fdb5a602fcd 100644
+--- a/products/ai_observability/skills/creating-online-evaluations/references/evaluation-payload.md.j2
++++ b/products/ai_observability/skills/creating-online-evaluations/references/evaluation-payload.md.j2
+@@ -22,7 +22,6 @@ schemas below are rendered from the backend Pydantic models at build time, so th
+ Valid `(evaluation_type, output_type)` pairs: `(hog, boolean)`, `(llm_judge, boolean)`,
+ `(hog, numeric)`, `(llm_judge, numeric)`, `(sentiment, sentiment)`.
+ The output type cannot change after creation.
+-Numeric evaluations require the `llm-analytics-numeric-evaluations` rollout flag for the project. Existing numeric evaluations remain editable when it is off.
+ 
+ ## `target` and `target_config`
+ 

@@ -1,0 +1,1024 @@
+diff --git a/docs/internal/feature-flags/billing.md b/docs/internal/feature-flags/billing.md
+index 1b929faa8e5a..b22547c55234 100644
+--- a/docs/internal/feature-flags/billing.md
++++ b/docs/internal/feature-flags/billing.md
+@@ -47,10 +47,11 @@ When a feature flag request is processed, the Rust service increments Redis coun
+ 
+ The service stores counts in Redis hashes using time-bucketed fields:
+ 
+-| Request Type     | Team Key                                      | SDK Key                                                      |
+-| ---------------- | --------------------------------------------- | ------------------------------------------------------------ |
+-| `/decide`        | `posthog:decide_requests:{team_id}`           | `posthog:decide_requests:sdk:{team_id}:{sdk_name}`           |
+-| Local evaluation | `posthog:local_evaluation_requests:{team_id}` | `posthog:local_evaluation_requests:sdk:{team_id}:{sdk_name}` |
++| Request Type           | Team Key                                                   | SDK Key                                                                   |
++| ---------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------- |
++| `/decide`              | `posthog:decide_requests:{team_id}`                        | `posthog:decide_requests:sdk:{team_id}:{sdk_name}`                        |
++| Local evaluation (200) | `posthog:local_evaluation_requests:{team_id}`              | `posthog:local_evaluation_requests:sdk:{team_id}:{sdk_name}`              |
++| Local evaluation (304) | `posthog:local_evaluation_not_modified_requests:{team_id}` | `posthog:local_evaluation_not_modified_requests:sdk:{team_id}:{sdk_name}` |
+ 
+ ### Time bucketing
+ 
+@@ -93,7 +94,15 @@ Rust's `/flags/definitions` endpoint enforces billing quotas. When a team exceed
+ }
+ ```
+ 
+-The Rust endpoint checks `FeatureFlagsLimiter.is_limited(token)` before the ETag comparison and cache fetch. If the quota is exceeded, all requests (including conditional ones) return HTTP 402 — no 304 is issued while a team is over quota. Requests that pass the quota check but result in a 304 (ETag match) are not counted toward billing usage, matching Django's behavior.
++The Rust endpoint checks `FeatureFlagsLimiter.is_limited(token)` before the ETag comparison and cache fetch. If the quota is exceeded, all requests (including conditional ones) return HTTP 402 — no 304 is issued while a team is over quota.
++
++### Conditional requests (ETag)
++
++A request that passes the quota check and results in a 304 (ETag match) is counted on the separate `local_evaluation_not_modified_requests` counter. The usage report bills these at 1 unit each, the same as a `/decide` request, instead of the 10 units a full local evaluation response costs.
++
++304 billing rolls out per team through `FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_TEAMS` (a team ID list, `all`, or empty for off, the default). A team outside the list gets its 304s for free, as before.
++
++A 304 for definitions that hold only survey or product tour flags is not billed, the same as a 200. The service memoizes per team and ETag whether the definitions hold a billable flag, so it reads the payload once per pod per ETag rather than on every poll. The memo is sized by `DEFINITIONS_BILLABLE_CACHE_CAPACITY` and an entry lives for `DEFINITIONS_BILLABLE_CACHE_TTL_SECONDS` (default one hour), which bounds how long a wrong answer can last. Only a payload served from Redis decides, because an S3 copy can lag the ETag by a version. A payload that came from S3, failed to read, or took longer than 500 ms leaves that poll unbilled, and the miss is remembered for 30 seconds so a degraded payload tier is not hammered by every poll. These unbilled polls show as `flags_flag_definitions_not_modified_billing_total{outcome="unknown"}`, which is why the 304 billing counter can run below the ETag hit counter.
+ 
+ ### SDK tracking
+ 
+@@ -185,10 +194,11 @@ The aggregation task emits events to PostHog's internal analytics instance.
+ 
+ ### Event types
+ 
+-| Event Name               | Description                                    |
+-| ------------------------ | ---------------------------------------------- |
+-| `decide usage`           | Counts from `/decide` endpoint requests        |
+-| `local evaluation usage` | Counts from local evaluation endpoint requests |
++| Event Name                            | Description                                             |
++| ------------------------------------- | ------------------------------------------------------- |
++| `decide usage`                        | Counts from `/decide` endpoint requests                 |
++| `local evaluation usage`              | Counts from local evaluation requests answered with 200 |
++| `local evaluation not modified usage` | Counts from local evaluation requests answered with 304 |
+ 
+ ### Event properties
+ 
+@@ -229,16 +239,17 @@ The usage report task queries ClickHouse for aggregated billing data.
+ 
+ ### Billable calculation
+ 
+-Local evaluation requests are weighted 10x compared to decide requests:
++Local evaluation requests that return full flag definitions are weighted 10x compared to decide requests. Local evaluation requests answered with 304 are weighted like decide requests:
+ 
+ ```python
+ billable_feature_flag_requests_count_in_period = (
+     decide_requests_count_in_period
+     + (local_evaluation_requests_count_in_period * 10)
++    + local_evaluation_not_modified_requests_count_in_period
+ )
+ ```
+ 
+-This reflects the higher resource cost of local evaluation requests, which return full flag definitions rather than just evaluation results.
++This reflects the higher resource cost of full local evaluation responses, which return full flag definitions rather than just evaluation results.
+ 
+ ### Token validation
+ 
+@@ -257,6 +268,7 @@ AND has([%(validity_token)s], replaceRegexpAll(JSONExtractRaw(properties, 'token
+ | Distributed lock                 | Prevent concurrent processing of the same team's data                              |
+ | Redis pipelining                 | Minimize network round-trips for better performance                                |
+ | 10x local evaluation weight      | Local evaluation returns full flag definitions, requiring more server resources    |
++| 1x weight for 304 responses      | A 304 serves no definitions payload, so it costs the same as a `/decide` request   |
+ | Selective billing                | Survey and product tour flags are internal features, not customer-billable         |
+ | SDK breakdown for analytics only | Billing charges per request regardless of SDK; breakdown is for internal analytics |
+ 
+diff --git a/docs/internal/feature-flags/rust-service-overview.md b/docs/internal/feature-flags/rust-service-overview.md
+index f282e0112acf..dafadab161e2 100644
+--- a/docs/internal/feature-flags/rust-service-overview.md
++++ b/docs/internal/feature-flags/rust-service-overview.md
+@@ -148,7 +148,7 @@ Billing quota enforcement matches Django's `/api/feature_flag/local_evaluation`
+ 
+ - **Quota check**: Uses `FeatureFlagsLimiter.is_limited(token)` to verify the team hasn't exceeded their feature flag request quota. Returns HTTP 402 with a JSON body (`{"type": "quota_limited", "code": "payment_required", ...}`) when the quota is exceeded.
+ - **Non-billable flag filtering**: Usage tracking skips requests where the response contains only non-billable flags — i.e., flags with keys starting with `survey-targeting-` or `product-tour-targeting-`. The shared `is_billable_flag_key()` predicate (in `flag_analytics.rs`) is used by both this endpoint and the `/flags` billing handler.
+-- **304 responses skip billing**: Usage is recorded after the ETag/304 path, so conditional responses that return `304 Not Modified` are not counted toward billing. This matches Django's behavior.
++- **304 responses bill 1 unit**: A conditional response that returns `304 Not Modified` is recorded on its own counter and billed at the `/flags` rate, a tenth of a full response, for teams in `FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_TEAMS`. See [Conditional requests (ETag)](billing.md#conditional-requests-etag) for the billable-flag memo and what goes unbilled.
+ 
+ ## Request and response types
+ 
+diff --git a/ee/billing/quota_limiting.py b/ee/billing/quota_limiting.py
+index f1fd6d9274d9..2a318f6c8bfd 100644
+--- a/ee/billing/quota_limiting.py
++++ b/ee/billing/quota_limiting.py
+@@ -26,6 +26,7 @@
+ from posthog.models.team.team import Team
+ from posthog.redis import get_client
+ from posthog.tasks.usage_report import (
++    billable_feature_flag_requests,
+     combine_posthog_code_credits,
+     convert_team_usage_rows_to_dict,
+     get_self_driving_credits_used_in_period_for_org,
+@@ -1166,6 +1167,15 @@ def update_all_orgs_billing_quotas(
+                 FlagRequestType.LOCAL_EVALUATION,
+             )
+         ),
++        "teams_with_local_evaluation_not_modified_requests_count": convert_team_usage_rows_to_dict(
++            _timed_query(
++                "local_evaluation_not_modified_requests",
++                get_teams_with_feature_flag_requests_count_in_period,
++                period.start,
++                period.end,
++                FlagRequestType.LOCAL_EVALUATION_NOT_MODIFIED,
++            )
++        ),
+         "teams_with_api_queries_read_bytes": convert_team_usage_rows_to_dict(api_queries_usage["read_bytes"]),
+         "teams_with_cdp_trigger_events_metrics": convert_team_usage_rows_to_dict(
+             _timed_query("cdp_invocations", get_teams_with_cdp_billable_invocations_in_period, period.start, period.end)
+@@ -1258,14 +1268,18 @@ def update_all_orgs_billing_quotas(
+     for team in teams:
+         decide_requests = all_data["teams_with_decide_requests_count"].get(team.id, 0)
+         local_evaluation_requests = all_data["teams_with_local_evaluation_requests_count"].get(team.id, 0)
++        local_evaluation_not_modified_requests = all_data[
++            "teams_with_local_evaluation_not_modified_requests_count"
++        ].get(team.id, 0)
+ 
+         team_report = UsageCounters(
+             events=all_data["teams_with_event_count_in_period"].get(team.id, 0),
+             exceptions=all_data["teams_with_exceptions_captured_in_period"].get(team.id, 0),
+             recordings=all_data["teams_with_recording_count_in_period"].get(team.id, 0),
+             rows_synced=all_data["teams_with_rows_synced_in_period"].get(team.id, 0),
+-            feature_flag_requests=decide_requests
+-            + (local_evaluation_requests * 10),  # Same weighting as in _get_team_report
++            feature_flag_requests=billable_feature_flag_requests(
++                decide_requests, local_evaluation_requests, local_evaluation_not_modified_requests
++            ),
+             api_queries_read_bytes=all_data["teams_with_api_queries_read_bytes"].get(team.id, 0),
+             survey_responses=all_data["teams_with_survey_responses_count_in_period"].get(team.id, 0),
+             llm_events=all_data["teams_with_ai_event_count_in_period"].get(team.id, 0),
+diff --git a/posthog/constants.py b/posthog/constants.py
+index 75748b422642..78279a73d314 100644
+--- a/posthog/constants.py
++++ b/posthog/constants.py
+@@ -326,6 +326,7 @@ class EventDefinitionType(StrEnum):
+ class FlagRequestType(StrEnum):
+     DECIDE = "decide"
+     LOCAL_EVALUATION = "local-evaluation"
++    LOCAL_EVALUATION_NOT_MODIFIED = "local-evaluation-not-modified"
+     REMOTE_CONFIG = "remote-config"
+ 
+ 
+diff --git a/posthog/tasks/usage_report.py b/posthog/tasks/usage_report.py
+index 42c6e82e5436..39978d1f647a 100644
+--- a/posthog/tasks/usage_report.py
++++ b/posthog/tasks/usage_report.py
+@@ -55,6 +55,7 @@
+ from products.dashboards.backend.models.dashboard import Dashboard
+ from products.data_modeling.backend.facade.models import DataWarehouseSavedQuery
+ from products.error_tracking.backend.facade import api as error_tracking_api
++from products.feature_flags.backend.flag_analytics import USAGE_EVENT_NAMES
+ from products.feature_flags.backend.models.feature_flag import FeatureFlag
+ from products.replay_vision.backend.billing import (
+     get_replay_vision_credits_by_team,
+@@ -217,6 +218,7 @@ class UsageReportCounters:
+     ff_active_count: int
+     decide_requests_count_in_period: int
+     local_evaluation_requests_count_in_period: int
++    local_evaluation_not_modified_requests_count_in_period: int
+     billable_feature_flag_requests_count_in_period: int
+ 
+     # Queries
+@@ -1390,7 +1392,7 @@ def get_teams_with_feature_flag_requests_count_in_period(
+     team_to_query = 1 if get_instance_region() == "EU" else 2
+     validity_token = settings.DECIDE_BILLING_ANALYTICS_TOKEN
+ 
+-    target_event = "decide usage" if request_type == FlagRequestType.DECIDE else "local evaluation usage"
++    target_event = USAGE_EVENT_NAMES[request_type]
+ 
+     use_new = use_new_events_schema(None)
+     count_expr, _ = get_property_string_expr("events", "count", "'count'", "properties", use_new_events_schema=use_new)
+@@ -1431,7 +1433,7 @@ def get_teams_with_feature_flag_requests_sdk_breakdown_in_period(
+     team_to_query = 1 if get_instance_region() == "EU" else 2
+     validity_token = settings.DECIDE_BILLING_ANALYTICS_TOKEN
+ 
+-    target_event = "decide usage" if request_type == FlagRequestType.DECIDE else "local evaluation usage"
++    target_event = USAGE_EVENT_NAMES[request_type]
+ 
+     use_new = use_new_events_schema(None)
+     sdk_breakdown_expr, _ = get_property_string_expr(
+@@ -2860,6 +2862,11 @@ def capture_report(
+             capture_exception(err, {"distinct_id": distinct_id, "organization_id": organization_id})
+ 
+ 
++def billable_feature_flag_requests(decide: int, local_evaluation: int, local_evaluation_not_modified: int) -> int:
++    """A full local evaluation response costs ten decide requests; a 304 costs one."""
++    return decide + local_evaluation * 10 + local_evaluation_not_modified
++
++
+ # extend this with future usage based products
+ def has_non_zero_usage(report: UsageReportCounters) -> bool:
+     return (
+@@ -2869,6 +2876,7 @@ def has_non_zero_usage(report: UsageReportCounters) -> bool:
+         or report.mobile_recording_count_in_period > 0
+         or report.decide_requests_count_in_period > 0
+         or report.local_evaluation_requests_count_in_period > 0
++        or report.local_evaluation_not_modified_requests_count_in_period > 0
+         or report.survey_responses_count_in_period > 0
+         or report.rows_synced_in_period > 0
+         or report.free_historical_rows_synced_in_period > 0
+@@ -3009,6 +3017,9 @@ def _get_all_usage_data(period_start: datetime, period_end: datetime) -> dict[st
+         "teams_with_local_evaluation_requests_count_in_period": get_teams_with_feature_flag_requests_count_in_period(
+             period_start, period_end, FlagRequestType.LOCAL_EVALUATION
+         ),
++        "teams_with_local_evaluation_not_modified_requests_count_in_period": get_teams_with_feature_flag_requests_count_in_period(
++            period_start, period_end, FlagRequestType.LOCAL_EVALUATION_NOT_MODIFIED
++        ),
+         "teams_with_group_types_total": count_group_type_mappings_per_team(),
+         "teams_with_dashboard_count": list(
+             Dashboard.objects.values("team_id").annotate(total=Count("id")).order_by("team_id")
+@@ -3246,6 +3257,9 @@ def _get_team_report(all_data: dict[str, Any], team: Team) -> UsageReportCounter
+     local_evaluation_requests_count_in_period = all_data["teams_with_local_evaluation_requests_count_in_period"].get(
+         team.id, 0
+     )
++    local_evaluation_not_modified_requests_count_in_period = all_data[
++        "teams_with_local_evaluation_not_modified_requests_count_in_period"
++    ].get(team.id, 0)
+     logs_bytes_in_period = all_data["teams_with_logs_bytes_in_period"].get(team.id, 0)
+     apm_tracing_bytes_in_period = all_data["teams_with_apm_tracing_bytes_in_period"].get(team.id, 0)
+     return UsageReportCounters(
+@@ -3284,8 +3298,12 @@ def _get_team_report(all_data: dict[str, Any], team: Team) -> UsageReportCounter
+         group_types_total=all_data["teams_with_group_types_total"].get(team.id, 0),
+         decide_requests_count_in_period=decide_requests_count_in_period,
+         local_evaluation_requests_count_in_period=local_evaluation_requests_count_in_period,
+-        billable_feature_flag_requests_count_in_period=decide_requests_count_in_period
+-        + (local_evaluation_requests_count_in_period * 10),
++        local_evaluation_not_modified_requests_count_in_period=local_evaluation_not_modified_requests_count_in_period,
++        billable_feature_flag_requests_count_in_period=billable_feature_flag_requests(
++            decide_requests_count_in_period,
++            local_evaluation_requests_count_in_period,
++            local_evaluation_not_modified_requests_count_in_period,
++        ),
+         dashboard_count=all_data["teams_with_dashboard_count"].get(team.id, 0),
+         dashboard_template_count=all_data["teams_with_dashboard_template_count"].get(team.id, 0),
+         dashboard_shared_count=all_data["teams_with_dashboard_shared_count"].get(team.id, 0),
+diff --git a/posthog/temporal/usage_report/activities.py b/posthog/temporal/usage_report/activities.py
+index a782c627398e..8338851eb8ce 100644
+--- a/posthog/temporal/usage_report/activities.py
++++ b/posthog/temporal/usage_report/activities.py
+@@ -23,6 +23,7 @@
+ from posthog.temporal.common.heartbeat import Heartbeater
+ from posthog.temporal.common.metrics import ExecutionTimeRecorder
+ from posthog.temporal.usage_report.aggregator import (
++    add_pre_local_evaluation_not_modified_patch_defaults,
+     add_pre_sandbox_compute_patch_defaults,
+     build_manifest,
+     build_org_reports,
+@@ -131,6 +132,7 @@ async def aggregate_and_chunk_org_reports(inputs: AggregateInputs) -> AggregateR
+         ):
+             all_data = await sync_to_async(load_all_data)(inputs.query_results)
+             add_pre_sandbox_compute_patch_defaults(all_data, inputs.query_results)
++            add_pre_local_evaluation_not_modified_patch_defaults(all_data, inputs.query_results)
+ 
+             @database_sync_to_async
+             def aggregate_per_org() -> dict[str, Any]:
+diff --git a/posthog/temporal/usage_report/aggregator.py b/posthog/temporal/usage_report/aggregator.py
+index 07833d2b1323..33a3ebca7f36 100644
+--- a/posthog/temporal/usage_report/aggregator.py
++++ b/posthog/temporal/usage_report/aggregator.py
+@@ -34,6 +34,7 @@
+ from posthog.temporal.usage_report.types import Manifest, RunQueryToS3Result, WorkflowContext
+ 
+ _SANDBOX_COMPUTE_QUERY_NAME = "sandbox_compute_usage"
++_LOCAL_EVALUATION_NOT_MODIFIED_QUERY_NAME = "teams_with_local_evaluation_not_modified_requests_count_in_period"
+ _SANDBOX_COMPUTE_DESTINATION_KEYS = (
+     "teams_with_sandbox_compute_credits_used_in_period",
+     "teams_with_sandbox_compute_cpu_millicore_seconds_in_period",
+@@ -70,6 +71,13 @@ def add_pre_sandbox_compute_patch_defaults(
+             all_data[key] = {}
+ 
+ 
++def add_pre_local_evaluation_not_modified_patch_defaults(
++    all_data: dict[str, dict[int, int]], query_results: list[RunQueryToS3Result]
++) -> None:
++    if not any(result.query_name == _LOCAL_EVALUATION_NOT_MODIFIED_QUERY_NAME for result in query_results):
++        all_data[_LOCAL_EVALUATION_NOT_MODIFIED_QUERY_NAME] = {}
++
++
+ def iter_chunk_lines(
+     org_reports: Iterable[OrgReport],
+     instance_metadata: InstanceMetadata,
+diff --git a/posthog/temporal/usage_report/queries.py b/posthog/temporal/usage_report/queries.py
+index f10de06cb86c..50d773151a50 100644
+--- a/posthog/temporal/usage_report/queries.py
++++ b/posthog/temporal/usage_report/queries.py
+@@ -362,6 +362,12 @@ class QuerySpec:
+         name="teams_with_local_evaluation_requests_count_in_period",
+         fn=lambda b, e: get_teams_with_feature_flag_requests_count_in_period(b, e, FlagRequestType.LOCAL_EVALUATION),
+     ),
++    QuerySpec(
++        name="teams_with_local_evaluation_not_modified_requests_count_in_period",
++        fn=lambda b, e: get_teams_with_feature_flag_requests_count_in_period(
++            b, e, FlagRequestType.LOCAL_EVALUATION_NOT_MODIFIED
++        ),
++    ),
+     # ---- ClickHouse: query metrics -------------------------------------------
+     QuerySpec(
+         name="teams_with_query_app_bytes_read",
+diff --git a/posthog/temporal/usage_report/workflow.py b/posthog/temporal/usage_report/workflow.py
+index 7be556e49e8c..e5da85bd846e 100644
+--- a/posthog/temporal/usage_report/workflow.py
++++ b/posthog/temporal/usage_report/workflow.py
+@@ -47,10 +47,14 @@
+ SANDBOX_COMPUTE_QUERY_NAME = "sandbox_compute_usage"
+ 
+ 
+-def _queries_for_sandbox_compute_patch(patch_applied: bool) -> list[QuerySpec]:
++LOCAL_EVALUATION_NOT_MODIFIED_QUERY_PATCH_ID = "usage-report-local-evaluation-not-modified-query-2026-09"
++LOCAL_EVALUATION_NOT_MODIFIED_QUERY_NAME = "teams_with_local_evaluation_not_modified_requests_count_in_period"
++
++
++def _queries_for_patch(queries: list[QuerySpec], query_name: str, patch_applied: bool) -> list[QuerySpec]:
+     if patch_applied:
+-        return QUERIES
+-    return [spec for spec in QUERIES if spec.name != SANDBOX_COMPUTE_QUERY_NAME]
++        return queries
++    return [spec for spec in queries if spec.name != query_name]
+ 
+ 
+ def build_context(inputs: RunUsageReportsInputs, run_id: str, now: datetime) -> WorkflowContext:
+@@ -98,7 +102,14 @@ async def run(self, inputs: RunUsageReportsInputs) -> dict:
+         status = "FAILED"
+         try:
+             ctx = build_context(inputs, run_id=workflow.info().run_id, now=started_at)
+-            queries = _queries_for_sandbox_compute_patch(workflow.patched(SANDBOX_COMPUTE_QUERY_PATCH_ID))
++            queries = _queries_for_patch(
++                QUERIES, SANDBOX_COMPUTE_QUERY_NAME, workflow.patched(SANDBOX_COMPUTE_QUERY_PATCH_ID)
++            )
++            queries = _queries_for_patch(
++                queries,
++                LOCAL_EVALUATION_NOT_MODIFIED_QUERY_NAME,
++                workflow.patched(LOCAL_EVALUATION_NOT_MODIFIED_QUERY_PATCH_ID),
++            )
+             workflow.logger.info(
+                 "Starting usage reports workflow",
+                 extra={
+diff --git a/products/feature_flags/backend/flag_analytics.py b/products/feature_flags/backend/flag_analytics.py
+index 7045c50b1a45..d7050bc01109 100644
+--- a/products/feature_flags/backend/flag_analytics.py
++++ b/products/feature_flags/backend/flag_analytics.py
+@@ -56,17 +56,20 @@
+ # locally. It's not included in CI because of tricky patching freeze time in thread issues.
+ 
+ 
+-# Remote config requests are tracked for telemetry only; billing consumes just the decide and
++# Remote config requests are tracked for telemetry only; billing consumes the decide and
+ # local evaluation events (see usage_report.py), so the remote config event never bills.
++# Local evaluation 304s get their own counter because they bill at the decide rate.
+ _REQUEST_BUCKET_PREFIXES = {
+     FlagRequestType.DECIDE: "decide_requests",
+     FlagRequestType.LOCAL_EVALUATION: "local_evaluation_requests",
++    FlagRequestType.LOCAL_EVALUATION_NOT_MODIFIED: "local_evaluation_not_modified_requests",
+     FlagRequestType.REMOTE_CONFIG: "remote_config_requests",
+ }
+ 
+ USAGE_EVENT_NAMES = {
+     FlagRequestType.DECIDE: "decide usage",
+     FlagRequestType.LOCAL_EVALUATION: "local evaluation usage",
++    FlagRequestType.LOCAL_EVALUATION_NOT_MODIFIED: "local evaluation not modified usage",
+     FlagRequestType.REMOTE_CONFIG: "remote config usage",
+ }
+ 
+@@ -218,11 +221,7 @@ def capture_team_decide_usage(ph_client: "Posthog", team_id: int, team_uuid: str
+ 
+         with client.lock(f"{REDIS_LOCK_TOKEN}:{team_id}", timeout=60, blocking=False):
+             billing_token = settings.DECIDE_BILLING_ANALYTICS_TOKEN
+-            for request_type in (
+-                FlagRequestType.DECIDE,
+-                FlagRequestType.LOCAL_EVALUATION,
+-                FlagRequestType.REMOTE_CONFIG,
+-            ):
++            for request_type in USAGE_EVENT_NAMES:
+                 _capture_team_usage_for_request_type(ph_client, client, team_id, team_uuid, request_type, billing_token)
+ 
+     except redis.exceptions.LockError:
+diff --git a/rust/feature-flags/src/api/flag_definitions.rs b/rust/feature-flags/src/api/flag_definitions.rs
+index 3b70d84dc504..5ed77bc83960 100644
+--- a/rust/feature-flags/src/api/flag_definitions.rs
++++ b/rust/feature-flags/src/api/flag_definitions.rs
+@@ -10,7 +10,7 @@ use crate::{
+     metrics::consts::{
+         FLAG_DEFINITIONS_AUTH_COUNTER, FLAG_DEFINITIONS_CACHE_HIT_COUNTER,
+         FLAG_DEFINITIONS_CACHE_MISS_COUNTER, FLAG_DEFINITIONS_ETAG_COUNTER,
+-        FLAG_DEFINITIONS_REBUILD_REQUESTED_COUNTER,
++        FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_COUNTER, FLAG_DEFINITIONS_REBUILD_REQUESTED_COUNTER,
+     },
+     router::State as AppState,
+     team::team_models::Team,
+@@ -21,7 +21,7 @@ use axum::{
+     http::{HeaderMap, Method, StatusCode},
+     response::{IntoResponse, Json, Response},
+ };
+-use common_hypercache::{HyperCacheError, KeyType};
++use common_hypercache::{CacheSource, HyperCacheError, KeyType};
+ use common_metrics::inc;
+ use common_types::TeamId;
+ use once_cell::sync::Lazy;
+@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
+ use serde_json::Value;
+ use sqlx::PgPool;
+ use std::collections::HashSet;
+-use std::time::{SystemTime, UNIX_EPOCH};
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ use tracing::{info, warn};
+ 
+ const ALLOWLIST_TTL_SECS: u64 = 60;
+@@ -113,6 +113,92 @@ pub async fn fetch_allowlist_from_db(pool: &PgPool) -> Result<Option<HashSet<Tea
+ /// This is returned as raw JSON from cache to avoid deserialization overhead
+ pub type FlagDefinitionsResponse = Value;
+ 
++/// Bound on the payload read a 304 makes when the memo has no entry for the
++/// current ETag. Matches the hypercache Redis timeout, so a slow read never
++/// holds up a 304: the poll goes unbilled and the next one retries.
++const BILLABLE_LOOKUP_TIMEOUT: Duration = Duration::from_millis(500);
++
++/// How long a failed, slow, or non-Redis payload read is remembered. While
++/// the payload tier is degraded this caps the retries at one per pod per
++/// team per interval instead of one per poll, and every poll in between
++/// stays unbilled.
++const BILLABLE_MEMO_FAILURE_TTL: Duration = Duration::from_secs(30);
++
++type BillableMemoKey = (i32, String);
++
++/// A memoized answer outlives a mismatch between the ETag and the payload it
++/// was computed from for at most `answer_ttl`: the writer can publish a new
++/// version between the ETag read and the payload read of one request. A
++/// failure to answer is kept only briefly so the next poll retries soon.
++struct BillableMemoExpiry {
++    answer_ttl: Duration,
++    failure_ttl: Duration,
++}
++
++impl moka::Expiry<BillableMemoKey, Option<bool>> for BillableMemoExpiry {
++    fn expire_after_create(
++        &self,
++        _key: &BillableMemoKey,
++        value: &Option<bool>,
++        _created_at: std::time::Instant,
++    ) -> Option<Duration> {
++        Some(match value {
++            Some(_) => self.answer_ttl,
++            None => self.failure_ttl,
++        })
++    }
++}
++
++/// Memo of whether the definitions behind a `(team, etag)` contain a billable
++/// flag, so a 304 for definitions that hold only survey or product tour flags
++/// is not billed, without reading the payload the 304 deliberately skips.
++#[derive(Clone)]
++pub struct DefinitionsBillableCache {
++    entries: moka::future::Cache<BillableMemoKey, Option<bool>>,
++}
++
++impl DefinitionsBillableCache {
++    pub fn new(max_capacity: u64, answer_ttl: Duration) -> Self {
++        Self::with_failure_ttl(max_capacity, answer_ttl, BILLABLE_MEMO_FAILURE_TTL)
++    }
++
++    fn with_failure_ttl(max_capacity: u64, answer_ttl: Duration, failure_ttl: Duration) -> Self {
++        Self {
++            entries: moka::future::Cache::builder()
++                .max_capacity(max_capacity)
++                .expire_after(BillableMemoExpiry {
++                    answer_ttl,
++                    failure_ttl,
++                })
++                .build(),
++        }
++    }
++
++    pub async fn insert(&self, team_id: i32, etag: &str, billable: bool) {
++        self.entries
++            .insert((team_id, etag.to_string()), Some(billable))
++            .await;
++    }
++
++    /// Returns the memoized status, or runs `load` once for all concurrent
++    /// callers with the same key and stores the result. `None` when the load
++    /// returns `None`, fails, or exceeds the bound; that `None` is kept for
++    /// `BILLABLE_MEMO_FAILURE_TTL` before a later call retries.
++    pub async fn get_or_load<F>(&self, team_id: i32, etag: &str, load: F) -> Option<bool>
++    where
++        F: std::future::Future<Output = Option<bool>>,
++    {
++        self.entries
++            .get_with((team_id, etag.to_string()), async {
++                tokio::time::timeout(BILLABLE_LOOKUP_TIMEOUT, load)
++                    .await
++                    .ok()
++                    .flatten()
++            })
++            .await
++    }
++}
++
+ /// Query parameters for the flag definitions endpoint
+ #[derive(Debug, Deserialize, Serialize)]
+ pub struct FlagDefinitionsQueryParams {
+@@ -235,6 +321,19 @@ pub async fn flags_definitions(
+                 &[("result".to_string(), "hit".to_string())],
+                 1,
+             );
++            if !*state.config.skip_writes
++                && state
++                    .config
++                    .flag_definitions_not_modified_billing_teams
++                    .includes_team(team.id)
++                && is_billable_for_etag(&state, &team_key, team.id, current_val).await
++            {
++                state.billing_aggregator.record(
++                    team.id,
++                    FlagRequestType::FlagDefinitionsNotModified,
++                    Some(Library::from_headers(&headers)),
++                );
++            }
+             return Ok(not_modified_response(current_val));
+         }
+     }
+@@ -251,12 +350,20 @@ pub async fn flags_definitions(
+     );
+ 
+     // Retrieve cached response from HyperCache (always with cohorts)
+-    let cached_response = get_from_cache(&state, &team_key, team.id).await?;
++    let (cached_response, cache_source) = get_from_cache(&state, &team_key, team.id).await?;
+ 
+     // Record usage for billing, filtering out non-billable flags (surveys, product tours).
+-    // Placed after the ETag/304 path intentionally: 304 responses skip billing,
+-    // matching Django's /local_evaluation behavior.
+-    if !*state.config.skip_writes && has_billable_flags(&cached_response) {
++    let billable = has_billable_flags(&cached_response);
++    if let (Some(etag), Some(billable)) = (
++        &current_etag,
++        billable_for_etag_from(&cached_response, cache_source),
++    ) {
++        state
++            .definitions_billable_cache
++            .insert(team.id, etag, billable)
++            .await;
++    }
++    if !*state.config.skip_writes && billable {
+         let library = Library::from_headers(&headers);
+         state
+             .billing_aggregator
+@@ -395,6 +502,41 @@ async fn resolve_team_from_auth(state: &AppState, headers: &HeaderMap) -> Result
+     Err(FlagError::NoAuthenticationProvided)
+ }
+ 
++/// Only Redis holds the payload the ETag was published with. An S3 fallback
++/// may be another version, so it decides nothing.
++fn billable_for_etag_from(response: &FlagDefinitionsResponse, source: CacheSource) -> Option<bool> {
++    matches!(source, CacheSource::Redis).then(|| has_billable_flags(response))
++}
++
++/// Reads the payload at most once per pod per ETag per memo TTL. An
++/// unreadable, slow, or non-Redis payload is not memoized as an answer and
++/// counts as not billable, because over-billing is the worse failure.
++async fn is_billable_for_etag(
++    state: &AppState,
++    team_key: &KeyType,
++    team_id: i32,
++    etag: &str,
++) -> bool {
++    let billable = state
++        .definitions_billable_cache
++        .get_or_load(team_id, etag, async {
++            let (response, source) = get_from_cache(state, team_key, team_id).await.ok()?;
++            billable_for_etag_from(&response, source)
++        })
++        .await;
++    let outcome = match billable {
++        Some(true) => "billable",
++        Some(false) => "not_billable",
++        None => "unknown",
++    };
++    inc(
++        FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_COUNTER,
++        &[("outcome".to_string(), outcome.to_string())],
++        1,
++    );
++    billable.unwrap_or(false)
++}
++
+ /// Retrieves the cached response using the pre-initialized HyperCacheReader
+ ///
+ /// Always uses the cache with cohorts included to match Django's behavior and ensure
+@@ -407,7 +549,7 @@ async fn get_from_cache(
+     state: &AppState,
+     team_key: &KeyType,
+     team_id: i32,
+-) -> Result<FlagDefinitionsResponse, FlagError> {
++) -> Result<(FlagDefinitionsResponse, CacheSource), FlagError> {
+     let result = state
+         .flags_with_cohorts_hypercache_reader
+         .get_with_source(team_key)
+@@ -426,7 +568,7 @@ async fn get_from_cache(
+                 source = source_name,
+                 "Cache hit for flag definitions"
+             );
+-            Ok(data)
++            Ok((data, source))
+         }
+         Err(e) => {
+             let reason = match &e {
+@@ -594,6 +736,67 @@ mod tests {
+         assert_eq!(has_billable_flags(&response), expected);
+     }
+ 
++    #[tokio::test]
++    async fn test_billable_cache_memoizes_a_successful_load() {
++        let cache = DefinitionsBillableCache::new(10, Duration::from_secs(3600));
++        assert_eq!(
++            cache.get_or_load(1, "etag", async { Some(true) }).await,
++            Some(true)
++        );
++        // A later load is never run once the key is memoized.
++        assert_eq!(
++            cache.get_or_load(1, "etag", async { None }).await,
++            Some(true)
++        );
++        // A new etag for the same team is a fresh key.
++        assert_eq!(
++            cache.get_or_load(1, "etag2", async { Some(false) }).await,
++            Some(false)
++        );
++    }
++
++    #[tokio::test]
++    async fn test_billable_cache_memoizes_a_failed_load_until_the_failure_ttl() {
++        let cache = DefinitionsBillableCache::with_failure_ttl(
++            10,
++            Duration::from_secs(3600),
++            Duration::from_millis(50),
++        );
++        assert_eq!(cache.get_or_load(1, "etag", async { None }).await, None);
++        assert_eq!(
++            cache.get_or_load(1, "etag", async { Some(true) }).await,
++            None
++        );
++        tokio::time::sleep(Duration::from_millis(100)).await;
++        assert_eq!(
++            cache.get_or_load(1, "etag", async { Some(true) }).await,
++            Some(true)
++        );
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn test_billable_cache_bounds_a_slow_load() {
++        let cache = DefinitionsBillableCache::new(10, Duration::from_secs(3600));
++        assert_eq!(
++            cache.get_or_load(1, "etag", std::future::pending()).await,
++            None
++        );
++    }
++
++    #[test]
++    fn test_billable_for_etag_from_only_trusts_redis() {
++        let response = serde_json::json!({"flags": [{"key": "billable-flag"}]});
++        assert_eq!(
++            billable_for_etag_from(&response, CacheSource::Redis),
++            Some(true)
++        );
++        assert_eq!(billable_for_etag_from(&response, CacheSource::S3), None);
++        assert_eq!(
++            billable_for_etag_from(&response, CacheSource::Fallback),
++            None
++        );
++    }
++
+     #[test]
+     fn test_extract_etag_from_header_weak() {
+         let val = axum::http::HeaderValue::from_static("W/\"a1b2c3d4e5f6g7h8\"");
+diff --git a/rust/feature-flags/src/billing/aggregator.rs b/rust/feature-flags/src/billing/aggregator.rs
+index 71b2f004a5e6..2e19ca8f24f9 100644
+--- a/rust/feature-flags/src/billing/aggregator.rs
++++ b/rust/feature-flags/src/billing/aggregator.rs
+@@ -328,6 +328,7 @@ struct Inner {
+     /// instead of an `inc()` call that allocates label strings every time.
+     record_count_decide: AtomicU64,
+     record_count_flag_definitions: AtomicU64,
++    record_count_flag_definitions_not_modified: AtomicU64,
+     shutdown_signal: Notify,
+     usage_reporter: Option<Arc<UsageReporter>>,
+ }
+@@ -348,10 +349,21 @@ impl Inner {
+             last_successful_flush_epoch_ms: AtomicU64::new(0),
+             record_count_decide: AtomicU64::new(0),
+             record_count_flag_definitions: AtomicU64::new(0),
++            record_count_flag_definitions_not_modified: AtomicU64::new(0),
+             shutdown_signal: Notify::new(),
+         })
+     }
+ 
++    fn record_counter(&self, request_type: FlagRequestType) -> &AtomicU64 {
++        match request_type {
++            FlagRequestType::Decide => &self.record_count_decide,
++            FlagRequestType::FlagDefinitions => &self.record_count_flag_definitions,
++            FlagRequestType::FlagDefinitionsNotModified => {
++                &self.record_count_flag_definitions_not_modified
++            }
++        }
++    }
++
+     /// Sum any remaining entries in `pending` plus any drained-but-uncredited
+     /// counts from an interrupted flush, and emit them as shutdown drops.
+     fn record_shutdown_drops(&self) {
+@@ -434,11 +446,9 @@ impl BillingAggregator {
+         // Bump the per-request-type atomic counter; the flusher emits the
+         // `FLAGS_BILLING_RECORDS` metric in batches at flush time so the
+         // hot path doesn't pay the per-call label clone in `inc()`.
+-        match request_type {
+-            FlagRequestType::Decide => &self.inner.record_count_decide,
+-            FlagRequestType::FlagDefinitions => &self.inner.record_count_flag_definitions,
+-        }
+-        .fetch_add(1, Ordering::Relaxed);
++        self.inner
++            .record_counter(request_type)
++            .fetch_add(1, Ordering::Relaxed);
+ 
+         let key = AggregationKey {
+             team_id,
+@@ -764,23 +774,21 @@ async fn flush_once(inner: &Arc<Inner>, policy: FlushPolicy) {
+     // FLAGS_BILLING_RECORDS. Doing this here instead of in `record()`
+     // keeps the hot path free of the per-call `apply_label_filter`
+     // allocation that `inc()` triggers.
+-    let decide_records = inner.record_count_decide.swap(0, Ordering::Relaxed);
+-    if decide_records > 0 {
+-        inc(
+-            FLAGS_BILLING_RECORDS,
+-            &record_labels_for(FlagRequestType::Decide),
+-            decide_records,
+-        );
+-    }
+-    let flag_def_records = inner
+-        .record_count_flag_definitions
+-        .swap(0, Ordering::Relaxed);
+-    if flag_def_records > 0 {
+-        inc(
+-            FLAGS_BILLING_RECORDS,
+-            &record_labels_for(FlagRequestType::FlagDefinitions),
+-            flag_def_records,
+-        );
++    for request_type in [
++        FlagRequestType::Decide,
++        FlagRequestType::FlagDefinitions,
++        FlagRequestType::FlagDefinitionsNotModified,
++    ] {
++        let records = inner
++            .record_counter(request_type)
++            .swap(0, Ordering::Relaxed);
++        if records > 0 {
++            inc(
++                FLAGS_BILLING_RECORDS,
++                &record_labels_for(request_type),
++                records,
++            );
++        }
+     }
+ 
+     // Swap pending and zero `pending_total` under the same lock so a
+@@ -1495,6 +1503,7 @@ mod tests {
+             Some(Library::PosthogJs),
+         );
+         agg.record(7, FlagRequestType::Decide, None);
++        agg.record(9, FlagRequestType::FlagDefinitionsNotModified, None);
+ 
+         let bucket = current_bucket();
+         flush_once(&agg.inner, FlushPolicy::BailOnError).await;
+@@ -1504,10 +1513,13 @@ mod tests {
+         let expected_sdk_42_def =
+             format!("posthog:local_evaluation_requests:sdk:42:posthog-js:{bucket}");
+         let expected_team_7_decide = format!("posthog:decide_requests:7:{bucket}");
+-        assert_eq!(calls.len(), 3);
++        let expected_team_9_not_modified =
++            format!("posthog:local_evaluation_not_modified_requests:9:{bucket}");
++        assert_eq!(calls.len(), 4);
+         assert!(calls.contains(&(expected_team_42_def, 1)));
+         assert!(calls.contains(&(expected_sdk_42_def, 1)));
+         assert!(calls.contains(&(expected_team_7_decide, 1)));
++        assert!(calls.contains(&(expected_team_9_not_modified, 1)));
+ 
+         // Belt-and-braces: the aggregator must never write `:shadow`-suffixed
+         // keys. A regression here would mean we're writing into the
+diff --git a/rust/feature-flags/src/billing/usage_reporter.rs b/rust/feature-flags/src/billing/usage_reporter.rs
+index cdacba264453..b74e00c7f8d8 100644
+--- a/rust/feature-flags/src/billing/usage_reporter.rs
++++ b/rust/feature-flags/src/billing/usage_reporter.rs
+@@ -280,12 +280,14 @@ fn dedup(teams: impl Iterator<Item = i64>) -> Vec<i64> {
+     teams
+ }
+ 
+-/// The two billable request types are priced apart — the nightly report weighs one local
+-/// evaluation as ten decide requests — so they cannot share a key. The weighting itself stays
+-/// out of here: a producer reports what happened, and pricing is applied downstream.
++/// Full local evaluation responses are priced apart — the nightly report weighs one as ten
++/// decide requests — so they cannot share a key with decide, while a 304 is priced like a
++/// decide request. The weighting itself stays out of here: pricing is applied downstream.
+ fn usage_key(request_type: FlagRequestType) -> &'static str {
+     match request_type {
+-        FlagRequestType::Decide => "feature_flag_requests",
++        FlagRequestType::Decide | FlagRequestType::FlagDefinitionsNotModified => {
++            "feature_flag_requests"
++        }
+         FlagRequestType::FlagDefinitions => "feature_flag_local_evaluation_requests",
+     }
+ }
+@@ -329,7 +331,7 @@ mod tests {
+     #[test]
+     fn build_records_keys_the_two_billable_request_types_apart() {
+         // The report weighs one local evaluation as ten decide requests, so a shared key
+-        // would price them the same.
++        // would price them the same. A 304 costs the same as a decide request.
+         let entries = vec![
+             (key(1, None), 3),
+             (
+@@ -339,6 +341,13 @@ mod tests {
+                 },
+                 4,
+             ),
++            (
++                AggregationKey {
++                    request_type: FlagRequestType::FlagDefinitionsNotModified,
++                    ..key(1, None)
++                },
++                5,
++            ),
+         ];
+         let records = build_records(&entries, &TeamIdCollection::All, 1);
+ 
+@@ -349,7 +358,8 @@ mod tests {
+                 .collect::<Vec<_>>(),
+             vec![
+                 ("feature_flag_requests", 3),
+-                ("feature_flag_local_evaluation_requests", 4)
++                ("feature_flag_local_evaluation_requests", 4),
++                ("feature_flag_requests", 5)
+             ]
+         );
+     }
+diff --git a/rust/feature-flags/src/config.rs b/rust/feature-flags/src/config.rs
+index b40f5ba1abc0..3846f1240a5b 100644
+--- a/rust/feature-flags/src/config.rs
++++ b/rust/feature-flags/src/config.rs
+@@ -880,6 +880,15 @@ pub struct Config {
+     #[envconfig(from = "TEAM_NEGATIVE_CACHE_TTL_SECONDS", default = "30")]
+     pub team_negative_cache_ttl_seconds: u64,
+ 
++    // In-memory memo of whether a team's flag definitions, keyed by ETag, hold a
++    // billable flag, so a /flags/definitions 304 is billed without a payload read.
++    // The TTL bounds how long a wrong answer can last, so it is tunable without a deploy.
++    #[envconfig(from = "DEFINITIONS_BILLABLE_CACHE_CAPACITY", default = "100000")]
++    pub definitions_billable_cache_capacity: u64,
++
++    #[envconfig(from = "DEFINITIONS_BILLABLE_CACHE_TTL_SECONDS", default = "3600")]
++    pub definitions_billable_cache_ttl_seconds: u64,
++
+     // Write an S3 hit back into Redis so the next reader for that key is served by Redis
+     // instead of paying another S3 read. Applies to the team metadata and remote config
+     // hypercaches, which have no in-process cache in front of them. 0 disables.
+@@ -941,6 +950,12 @@ pub struct Config {
+     pub usage_ingestion_teams: TeamIdCollection,
+     #[envconfig(from = "USAGE_INGESTION_TIMEOUT_MS", default = "5000")]
+     pub usage_ingestion_timeout_ms: u64,
++
++    // Teams whose /flags/definitions 304 responses are billed. Empty disables it, so
++    // 304 billing rolls out per team once customers have been told, and rolls back
++    // with a config change instead of a revert.
++    #[envconfig(from = "FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_TEAMS", default = "")]
++    pub flag_definitions_not_modified_billing_teams: TeamIdCollection,
+ }
+ 
+ /// Thread counts for Tokio (async I/O) and Rayon (CPU-bound parallel evaluation).
+@@ -1169,6 +1184,8 @@ impl Config {
+             thread_pool_cores: 0,
+             team_negative_cache_capacity: 10_000,
+             team_negative_cache_ttl_seconds: 30,
++            definitions_billable_cache_capacity: 100_000,
++            definitions_billable_cache_ttl_seconds: 3_600,
+             hypercache_read_repair_ttl_seconds: 600,
+             skip_pg_team_fallback: FlexBool(false),
+             service_mode: ServiceMode::All,
+@@ -1184,6 +1201,7 @@ impl Config {
+             usage_ingestion_tls: false,
+             usage_ingestion_teams: TeamIdCollection::None,
+             usage_ingestion_timeout_ms: 5_000,
++            flag_definitions_not_modified_billing_teams: TeamIdCollection::All,
+         }
+     }
+ 
+diff --git a/rust/feature-flags/src/flags/flag_analytics.rs b/rust/feature-flags/src/flags/flag_analytics.rs
+index fc8ccb31063d..128b8fc10ec3 100644
+--- a/rust/feature-flags/src/flags/flag_analytics.rs
++++ b/rust/feature-flags/src/flags/flag_analytics.rs
+@@ -24,6 +24,9 @@ pub fn get_team_request_key(team_id: i32, request_type: FlagRequestType) -> Stri
+     match request_type {
+         FlagRequestType::Decide => format!("posthog:decide_requests:{team_id}"),
+         FlagRequestType::FlagDefinitions => format!("posthog:local_evaluation_requests:{team_id}"),
++        FlagRequestType::FlagDefinitionsNotModified => {
++            format!("posthog:local_evaluation_not_modified_requests:{team_id}")
++        }
+     }
+ }
+ 
+@@ -37,6 +40,9 @@ pub fn get_team_request_library_key(
+         FlagRequestType::FlagDefinitions => {
+             format!("posthog:local_evaluation_requests:sdk:{team_id}:{library}")
+         }
++        FlagRequestType::FlagDefinitionsNotModified => {
++            format!("posthog:local_evaluation_not_modified_requests:sdk:{team_id}:{library}")
++        }
+     }
+ }
+ 
+@@ -54,6 +60,10 @@ mod tests {
+             get_team_request_key(456, FlagRequestType::FlagDefinitions),
+             "posthog:local_evaluation_requests:456"
+         );
++        assert_eq!(
++            get_team_request_key(456, FlagRequestType::FlagDefinitionsNotModified),
++            "posthog:local_evaluation_not_modified_requests:456"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -83,6 +93,14 @@ mod tests {
+             ),
+             "posthog:local_evaluation_requests:sdk:101:posthog-elixir"
+         );
++        assert_eq!(
++            get_team_request_library_key(
++                101,
++                FlagRequestType::FlagDefinitionsNotModified,
++                Library::PosthogElixir
++            ),
++            "posthog:local_evaluation_not_modified_requests:sdk:101:posthog-elixir"
++        );
+         // Test Other variant
+         assert_eq!(
+             get_team_request_library_key(102, FlagRequestType::Decide, Library::Other),
+diff --git a/rust/feature-flags/src/flags/flag_request.rs b/rust/feature-flags/src/flags/flag_request.rs
+index 0faafa11b7e2..02c1e1341c9a 100644
+--- a/rust/feature-flags/src/flags/flag_request.rs
++++ b/rust/feature-flags/src/flags/flag_request.rs
+@@ -37,6 +37,8 @@ where
+ pub enum FlagRequestType {
+     Decide,
+     FlagDefinitions,
++    /// A `/flags/definitions` poll answered with 304, billed at the `/flags` rate.
++    FlagDefinitionsNotModified,
+ }
+ 
+ impl FlagRequestType {
+@@ -44,6 +46,7 @@ impl FlagRequestType {
+         match self {
+             FlagRequestType::Decide => "decide",
+             FlagRequestType::FlagDefinitions => "flag_definitions",
++            FlagRequestType::FlagDefinitionsNotModified => "flag_definitions_not_modified",
+         }
+     }
+ }
+diff --git a/rust/feature-flags/src/metrics/consts.rs b/rust/feature-flags/src/metrics/consts.rs
+index fe6ef097db83..c06899ebacb1 100644
+--- a/rust/feature-flags/src/metrics/consts.rs
++++ b/rust/feature-flags/src/metrics/consts.rs
+@@ -382,6 +382,12 @@ pub const FLAG_DEFINITIONS_CACHE_MISS_COUNTER: &str = "flags_flag_definitions_ca
+ // redis_error = the etag read failed or the stored value did not decode)
+ pub const FLAG_DEFINITIONS_ETAG_COUNTER: &str = "flags_flag_definitions_etag_total";
+ 
++// Billing decision for a /flags/definitions 304. Labels: outcome (billable, not_billable,
++// unknown = the payload was unreadable, slow, or not served from Redis, so the poll went
++// unbilled). Compare with the etag `hit` counter to see how many 304s went unbilled.
++pub const FLAG_DEFINITIONS_NOT_MODIFIED_BILLING_COUNTER: &str =
++    "flags_flag_definitions_not_modified_billing_total";
++
+ // Per-pod resolved cluster for the /flags/definitions reader: 1 on the dedicated flags Redis,
+ // 0 on the shared one. Every emission carries a `reason` label, so
+ // `{reason="no_dedicated_client"}` separates a pod that wanted the dedicated cluster and could
+diff --git a/rust/feature-flags/src/router.rs b/rust/feature-flags/src/router.rs
+index 1fa9472af607..3acebf3b9669 100644
+--- a/rust/feature-flags/src/router.rs
++++ b/rust/feature-flags/src/router.rs
+@@ -40,6 +40,7 @@ use crate::{
+         body_read_metrics::{record_body_read, MAX_FLAGS_BODY_BYTES},
+         concurrency_metrics::{record_concurrency_enter, record_concurrency_wait},
+         endpoint, flag_definitions,
++        flag_definitions::DefinitionsBillableCache,
+         flag_definitions_rate_limiter::{FlagDefinitionsRateLimiter, RemoteConfigRateLimiter},
+         flags_rate_limiter::{FlagsRateLimiter, IpRateLimiter},
+         remote_config,
+@@ -106,6 +107,10 @@ pub struct State {
+     /// Pre-initialized HyperCacheReader for feature flags with cohorts (flags_with_cohorts.json)
+     /// Used by the /flags/definitions endpoint
+     pub flags_with_cohorts_hypercache_reader: Arc<HyperCacheReader>,
++    /// Billable status of each team's current flag definitions, keyed by ETag, so a 304 on
++    /// /flags/definitions for survey-only or product-tour-only definitions goes unbilled
++    /// without a payload read on every poll
++    pub definitions_billable_cache: DefinitionsBillableCache,
+     /// Pre-initialized HyperCacheReader for team metadata (full_metadata.json)
+     /// Uses token-based lookup instead of team_id
+     pub team_hypercache_reader: Arc<HyperCacheReader>,
+@@ -410,6 +415,10 @@ where
+         config_hypercache_reader,
+         rayon_dispatcher,
+         team_negative_cache,
++        definitions_billable_cache: DefinitionsBillableCache::new(
++            config.definitions_billable_cache_capacity,
++            std::time::Duration::from_secs(config.definitions_billable_cache_ttl_seconds),
++        ),
+         cohort_membership_provider,
+         auth_token_cache,
+         billing_aggregator,

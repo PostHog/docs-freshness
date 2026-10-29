@@ -1,0 +1,41 @@
+diff --git a/products/mcp_analytics/backend/migrations/0011_alter_mcpsession_session_id.py b/products/mcp_analytics/backend/migrations/0011_alter_mcpsession_session_id.py
+new file mode 100644
+index 000000000000..f4466938e002
+--- /dev/null
++++ b/products/mcp_analytics/backend/migrations/0011_alter_mcpsession_session_id.py
+@@ -0,0 +1,15 @@
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("mcp_analytics", "0010_alter_mcpanalyticssubmission_team_and_more"),
++    ]
++
++    operations = [
++        migrations.AlterField(
++            model_name="mcpsession",
++            name="session_id",
++            field=models.CharField(max_length=128),
++        ),
++    ]
+diff --git a/products/mcp_analytics/backend/migrations/max_migration.txt b/products/mcp_analytics/backend/migrations/max_migration.txt
+index d1d7e2755215..905bc9273f09 100644
+--- a/products/mcp_analytics/backend/migrations/max_migration.txt
++++ b/products/mcp_analytics/backend/migrations/max_migration.txt
+@@ -1 +1 @@
+-0010_alter_mcpanalyticssubmission_team_and_more
++0011_alter_mcpsession_session_id
+diff --git a/products/mcp_analytics/backend/models.py b/products/mcp_analytics/backend/models.py
+index 56482b426c2d..0dbae64f3740 100644
+--- a/products/mcp_analytics/backend/models.py
++++ b/products/mcp_analytics/backend/models.py
+@@ -113,7 +113,7 @@ class MCPSession(UUIDModel, TeamScopedRootMixin):
+     # is aggregated on the fly from $mcp_tool_call events (see logic.py); the
+     # backfill that once populated session_start/_end/duration/etc. is gone.
+     team = models.ForeignKey("posthog.Team", on_delete=models.CASCADE, related_name="+")
+-    session_id = models.CharField(max_length=64)
++    session_id = models.CharField(max_length=128)
+     intent = models.TextField(null=True, blank=True)
+ 
+     created_at = models.DateTimeField(auto_now_add=True)

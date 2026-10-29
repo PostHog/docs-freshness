@@ -1,0 +1,9 @@
+id: posthog-120738
+codePr: 120738
+mergeSha: a87364a25a5967de0c94abd354945e2d63a12bc7
+docsPr: 21520
+docsBaseSha: 253bd99ad928939358ddb43fc601829d6a9fbbf5
+section: web-analytics
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/web-analytics/marketing-analytics.mdx

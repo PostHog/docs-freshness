@@ -1,0 +1,9 @@
+id: posthog-122853
+codePr: 122853
+mergeSha: 7a8530f5953d892daeed90010a76ae90da84642b
+docsPr: 21554
+docsBaseSha: 9ba5f9ca2bc388be9f284ddcebd9b827baeaf5e2
+section: data
+referenceKind: carbon-unit
+pages:
+  - contents/docs/data/cohorts.mdx

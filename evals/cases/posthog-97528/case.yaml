@@ -1,0 +1,10 @@
+id: posthog-97528
+codePr: 97528
+mergeSha: aa0ebf3d5b49b7522f24335fe847802f136ac1fe
+docsPr: 20032
+docsBaseSha: 75e55a4afd7323d1c9f11c20c684cea386d7ba82
+section: metrics
+referenceKind: carbon-unit
+pages:
+  - contents/docs/metrics/installation/google-cloud.mdx
+  - contents/docs/metrics/installation/index.mdx

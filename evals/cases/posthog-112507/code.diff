@@ -1,0 +1,336 @@
+diff --git a/products/managed_migrations/backend/api/batch_imports.py b/products/managed_migrations/backend/api/batch_imports.py
+index 0e36f82f9448..47317f90af16 100644
+--- a/products/managed_migrations/backend/api/batch_imports.py
++++ b/products/managed_migrations/backend/api/batch_imports.py
+@@ -414,12 +414,20 @@ class BatchImportDateRangeSourceCreateSerializer(BatchImportTrialOptionsMixin, B
+         required=False,
+         allow_blank=True,
+         default="",
+-        help_text="Source access key / API key. Required for Amplitude; unused for Mixpanel, which authenticates with the project secret alone.",
++        help_text="Source access key / API key. Required for Amplitude. For Mixpanel, the service account username when mixpanel_project_id is set; otherwise unused.",
+     )
+     secret_key = serializers.CharField(
+         write_only=True,
+         required=True,
+-        help_text="Source secret. For Mixpanel this is the project API secret, found under Project settings → Access keys.",
++        help_text="Source secret. For Mixpanel, the service account secret when mixpanel_project_id is set; otherwise the project API secret, found under Project settings → Access keys.",
++    )
++    mixpanel_project_id = serializers.IntegerField(
++        write_only=True,
++        required=False,
++        allow_null=True,
++        default=None,
++        min_value=1,
++        help_text="Mixpanel project ID. Set it to authenticate with a Mixpanel service account (access_key and secret_key) instead of a project secret.",
+     )
+     is_eu_region = serializers.BooleanField(write_only=True, required=False, default=False)
+     import_events = serializers.BooleanField(write_only=True, required=False, default=True)
+@@ -443,6 +451,7 @@ class Meta:
+             "content_type",
+             "access_key",
+             "secret_key",
++            "mixpanel_project_id",
+             "is_eu_region",
+             "import_events",
+             "generate_identify_events",
+@@ -482,8 +491,16 @@ def validate(self, data):
+             if source_type == "amplitude" and (end_date - start_date) < timedelta(hours=1):
+                 raise serializers.ValidationError("Date range must be at least 1 hour for Amplitude migrations.")
+ 
+-        # For Amplitude, validate required fields and event-type selection
+         source_type = data.get("source_type")
++        if data.get("mixpanel_project_id") is not None:
++            if source_type != "mixpanel":
++                raise serializers.ValidationError("Mixpanel project ID only applies to Mixpanel migrations.")
++            if not data.get("access_key"):
++                raise serializers.ValidationError(
++                    "Service account username is required when a Mixpanel project ID is set."
++                )
++
++        # For Amplitude, validate required fields and event-type selection
+         if source_type == "amplitude":
+             if not data.get("access_key"):
+                 raise serializers.ValidationError("Access key is required for Amplitude migrations.")
+@@ -518,6 +535,7 @@ def create(self, validated_data: dict, **kwargs) -> BatchImport:
+                 secret_key=validated_data["secret_key"],
+                 export_source=DateRangeExportSource(source_type),
+                 is_eu_region=validated_data.get("is_eu_region", False),
++                mixpanel_project_id=validated_data.get("mixpanel_project_id"),
+             )
+ 
+             # Only apply import_events and generate_identify_events for Amplitude
+diff --git a/products/managed_migrations/backend/models/batch_imports.py b/products/managed_migrations/backend/models/batch_imports.py
+index 2f48da3329fa..8acc298df552 100644
+--- a/products/managed_migrations/backend/models/batch_imports.py
++++ b/products/managed_migrations/backend/models/batch_imports.py
+@@ -323,6 +323,7 @@ def from_date_range(
+         access_key_key: str = "api_key",
+         secret_key_key: str = "secret_key",
+         is_eu_region: bool = False,
++        mixpanel_project_id: int | None = None,
+     ) -> Self:
+         # there is a bunch of annoying business logic around how each endpoint behaves (what requests an endpoint expects, what it responds with, etc.)
+         # jam a bunch of that messy configuration here to keep it off the batch-import-worker and out of the client
+@@ -354,10 +355,20 @@ def from_date_range(
+                     base_url = "https://data-eu.mixpanel.com/api/2.0/export"
+                 else:
+                     base_url = "https://data.mixpanel.com/api/2.0/export"
+-                auth_config = {
+-                    "type": "mixpanel_auth",
+-                    "secret_key_secret": secret_key_key,
+-                }
++                if mixpanel_project_id is not None:
++                    # Service accounts can span several Mixpanel projects, so the export API needs the project ID.
++                    # The worker keeps query params already in base_url when it adds the date range.
++                    base_url = f"{base_url}?project_id={mixpanel_project_id}"
++                    auth_config = {
++                        "type": "basic_auth",
++                        "username_secret": access_key_key,
++                        "password_secret": secret_key_key,
++                    }
++                else:
++                    auth_config = {
++                        "type": "mixpanel_auth",
++                        "secret_key_secret": secret_key_key,
++                    }
+                 additional_config = {
+                     "extractor_type": "plain_gzip",
+                     "is_compressed": True,
+diff --git a/products/managed_migrations/frontend/ManagedMigration.tsx b/products/managed_migrations/frontend/ManagedMigration.tsx
+index ebe1d4fe262c..4ee76a9e526c 100644
+--- a/products/managed_migrations/frontend/ManagedMigration.tsx
++++ b/products/managed_migrations/frontend/ManagedMigration.tsx
+@@ -335,9 +335,59 @@ export function ManagedMigration(): JSX.Element {
+                         />
+                     )}
+ 
+-                {usesIamRole ? null : managedMigration.source_type === 'mixpanel' ? (
++                {managedMigration.source_type === 'mixpanel' && (
++                    <LemonField name="mixpanel_auth_method" label="Authentication">
++                        <LemonSegmentedButton
++                            value={managedMigration.mixpanel_auth_method}
++                            onChange={(value) => setManagedMigrationValue('mixpanel_auth_method', value)}
++                            options={[
++                                { value: 'service_account', label: 'Service account' },
++                                { value: 'project_secret', label: 'Project secret' },
++                            ]}
++                            size="small"
++                        />
++                    </LemonField>
++                )}
++
++                {usesIamRole ? null : managedMigration.source_type === 'mixpanel' &&
++                  managedMigration.mixpanel_auth_method === 'service_account' ? (
++                    <>
++                        <div className="flex gap-4">
++                            <LemonField
++                                name="mixpanel_service_account_username"
++                                label="Service account username"
++                                className="flex-1"
++                            >
++                                <LemonInput />
++                            </LemonField>
++
++                            <LemonField
++                                name="mixpanel_service_account_secret"
++                                label="Service account secret"
++                                className="flex-1"
++                            >
++                                <LemonInput type="password" />
++                            </LemonField>
++                        </div>
++                        <div className="text-secondary text-xs -mt-2">
++                            Create a service account under Organization settings → Service accounts in Mixpanel, and
++                            give it access to the project you're importing. See{' '}
++                            <Link to="https://docs.mixpanel.com/reference/service-accounts" target="_blank">
++                                Mixpanel's docs
++                            </Link>
++                            .
++                        </div>
++                        <LemonField
++                            name="mixpanel_project_id"
++                            label="Project ID"
++                            help="Find this under Project settings → Project Details in Mixpanel."
++                        >
++                            <LemonInput type="number" min={1} placeholder="1234567" />
++                        </LemonField>
++                    </>
++                ) : managedMigration.source_type === 'mixpanel' ? (
+                     <LemonField
+-                        name="secret_key"
++                        name="mixpanel_project_secret"
+                         label="Project secret"
+                         help={
+                             <span>
+diff --git a/products/managed_migrations/frontend/managedMigrationLogic.ts b/products/managed_migrations/frontend/managedMigrationLogic.ts
+index 08759dc91fde..950d8463d6d7 100644
+--- a/products/managed_migrations/frontend/managedMigrationLogic.ts
++++ b/products/managed_migrations/frontend/managedMigrationLogic.ts
+@@ -51,6 +51,12 @@ export interface ManagedMigrationForm {
+     end_date?: string
+     // EU region support for amplitude/mixpanel
+     is_eu_region?: boolean
++    // Mixpanel-specific auth: a service account (username, secret and project ID) or a project secret
++    mixpanel_auth_method?: 'service_account' | 'project_secret'
++    mixpanel_service_account_username?: string
++    mixpanel_service_account_secret?: string
++    mixpanel_project_id?: number
++    mixpanel_project_secret?: string
+     // Amplitude-specific options
+     import_events?: boolean
+     generate_identify_events?: boolean
+@@ -63,6 +69,20 @@ export interface ManagedMigrationForm {
+ export const TRIAL_RECORD_LIMIT_DEFAULT = 1000
+ export const TRIAL_RECORD_LIMIT_MAX = 50000
+ 
++// The API takes the Mixpanel credentials in its generic access_key / secret_key fields
++function mixpanelCredentials(
++    values: ManagedMigrationForm
++): Pick<ManagedMigrationForm, 'access_key' | 'secret_key' | 'mixpanel_project_id'> {
++    if (values.mixpanel_auth_method === 'service_account') {
++        return {
++            access_key: values.mixpanel_service_account_username,
++            secret_key: values.mixpanel_service_account_secret,
++            mixpanel_project_id: values.mixpanel_project_id,
++        }
++    }
++    return { access_key: '', secret_key: values.mixpanel_project_secret }
++}
++
+ const NEW_MANAGED_MIGRATION: ManagedMigrationForm = {
+     source_type: 's3',
+     access_key: '',
+@@ -79,6 +99,11 @@ const NEW_MANAGED_MIGRATION: ManagedMigrationForm = {
+     start_date: '',
+     end_date: '',
+     is_eu_region: false,
++    mixpanel_auth_method: 'service_account',
++    mixpanel_service_account_username: '',
++    mixpanel_service_account_secret: '',
++    mixpanel_project_id: undefined,
++    mixpanel_project_secret: '',
+     import_events: true,
+     generate_identify_events: true,
+     generate_group_identify_events: true,
+@@ -353,6 +378,11 @@ export const managedMigrationLogic = kea<managedMigrationLogicType>([
+                 s3_bucket,
+                 start_date,
+                 end_date,
++                mixpanel_auth_method,
++                mixpanel_service_account_username,
++                mixpanel_service_account_secret,
++                mixpanel_project_id,
++                mixpanel_project_secret,
+                 import_events,
+                 generate_identify_events,
+                 generate_group_identify_events,
+@@ -361,13 +391,23 @@ export const managedMigrationLogic = kea<managedMigrationLogicType>([
+             }: ManagedMigrationForm) => {
+                 const usesIamRole = (source_type === 's3' || source_type === 's3_gzip') && s3_auth_method === 'iam_role'
+ 
+-                const errors: Record<string, string | null> = {
+-                    secret_key:
+-                        !secret_key && !usesIamRole
+-                            ? source_type === 'mixpanel'
+-                                ? 'Project secret is required'
+-                                : 'Secret key is required'
+-                            : null,
++                const errors: Record<string, string | null> = {}
++
++                if (source_type === 'mixpanel') {
++                    if (mixpanel_auth_method === 'service_account') {
++                        errors.mixpanel_service_account_username = !mixpanel_service_account_username
++                            ? 'Service account username is required'
++                            : null
++                        errors.mixpanel_service_account_secret = !mixpanel_service_account_secret
++                            ? 'Service account secret is required'
++                            : null
++                        errors.mixpanel_project_id = !mixpanel_project_id ? 'Project ID is required' : null
++                    } else {
++                        errors.mixpanel_project_secret = !mixpanel_project_secret ? 'Project secret is required' : null
++                    }
++                } else if (!usesIamRole) {
++                    errors.access_key = !access_key ? 'Access key is required' : null
++                    errors.secret_key = !secret_key ? 'Secret key is required' : null
+                 }
+ 
+                 if (is_trial) {
+@@ -377,11 +417,6 @@ export const managedMigrationLogic = kea<managedMigrationLogicType>([
+                             : null
+                 }
+ 
+-                // Mixpanel authenticates with the project secret alone — no access key.
+-                if (source_type !== 'mixpanel' && !usesIamRole) {
+-                    errors.access_key = !access_key ? 'Access key is required' : null
+-                }
+-
+                 if (usesIamRole) {
+                     errors.role_arn = !role_arn
+                         ? 'IAM role ARN is required'
+@@ -442,7 +477,9 @@ export const managedMigrationLogic = kea<managedMigrationLogicType>([
+                     ...(values.is_trial ? { is_trial: true, trial_record_limit: values.trial_record_limit } : {}),
+                     ...(usesIamRole
+                         ? { role_arn: values.role_arn }
+-                        : { access_key: values.access_key, secret_key: values.secret_key }),
++                        : values.source_type === 'mixpanel'
++                          ? mixpanelCredentials(values)
++                          : { access_key: values.access_key, secret_key: values.secret_key }),
+                 }
+                 if (values.source_type === 's3' || values.source_type === 's3_gzip') {
+                     payload = {
+diff --git a/rust/batch-import-worker/src/source/date_range_export.rs b/rust/batch-import-worker/src/source/date_range_export.rs
+index a8ebd23ca189..c05aa042dfc7 100644
+--- a/rust/batch-import-worker/src/source/date_range_export.rs
++++ b/rust/batch-import-worker/src/source/date_range_export.rs
+@@ -1008,6 +1008,51 @@ mod tests {
+         source.cleanup_after_job().await.unwrap();
+     }
+ 
++    // Mixpanel service accounts need project_id, which the job config passes inside base_url.
++    #[tokio::test]
++    async fn test_basic_auth_keeps_query_params_in_base_url() {
++        let server = MockServer::start();
++
++        let mock = server.mock(|when, then| {
++            when.method(httpmock::Method::GET)
++                .path("/export")
++                .query_param("project_id", "123")
++                .query_param("from_date", "2023-01-01")
++                .query_param("to_date", "2023-01-01")
++                .header("Authorization", "Basic c2EtdXNlcjpzYS1zZWNyZXQ=");
++            then.status(200).body(TEST_DATA);
++        });
++
++        let start = Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap();
++        let end = Utc.with_ymd_and_hms(2023, 1, 2, 0, 0, 0).unwrap();
++        let _staging = TempDir::new().unwrap();
++
++        let source = DateRangeExportSource::builder(
++            server.url("/export?project_id=123"),
++            start,
++            end,
++            86400,
++            Arc::new(MockExtractor),
++            _staging.path().to_path_buf(),
++        )
++        .with_query_params("from_date".to_string(), "to_date".to_string())
++        .with_auth(AuthConfig::BasicAuth {
++            username: "sa-user".to_string(),
++            password: "sa-secret".to_string(),
++        })
++        .with_date_format("%Y-%m-%d".to_string())
++        .with_headers(HashMap::new())
++        .build()
++        .unwrap();
++
++        source.prepare_for_job().await.unwrap();
++        let keys = source.keys().await.unwrap();
++        source.prepare_key(&keys[0]).await.unwrap();
++        source.cleanup_after_job().await.unwrap();
++
++        mock.assert();
++    }
++
+     #[tokio::test]
+     async fn test_bearer_token_auth() {
+         let server = MockServer::start();

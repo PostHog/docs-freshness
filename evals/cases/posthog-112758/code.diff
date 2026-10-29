@@ -1,0 +1,235 @@
+diff --git a/frontend/src/layout/panel-layout/navbar/NavBar.tsx b/frontend/src/layout/panel-layout/navbar/NavBar.tsx
+index 3800243ba904..3931563e4600 100644
+--- a/frontend/src/layout/panel-layout/navbar/NavBar.tsx
++++ b/frontend/src/layout/panel-layout/navbar/NavBar.tsx
+@@ -170,10 +170,11 @@ export function NavBar(): JSX.Element {
+ 
+     useShortcut({
+         name: 'ToggleLeftNav',
+-        keybind: [keyBinds.toggleLeftNav],
++        keybind: [keyBinds.toggleLeftNav, keyBinds.toggleLeftNavFallback],
+         intent: 'Toggle collapse left navigation',
+         interaction: 'function',
+         callback: toggleLayoutNavCollapsed,
++        ignoreInEditable: true,
+     })
+ 
+     function handlePanelTriggerClick(item: PanelLayoutNavIdentifier): void {
+diff --git a/frontend/src/layout/today/TodayRail.tsx b/frontend/src/layout/today/TodayRail.tsx
+index b284bcc74615..baf900944af2 100644
+--- a/frontend/src/layout/today/TodayRail.tsx
++++ b/frontend/src/layout/today/TodayRail.tsx
+@@ -2,7 +2,7 @@ import { useActions, useValues } from 'kea'
+ import { ComponentPropsWithoutRef, forwardRef } from 'react'
+ 
+ import { IconSearch, IconSidebarClose, IconSidebarOpen } from '@posthog/icons'
+-import { Button, Separator, Tooltip, TooltipContent, TooltipTrigger } from '@posthog/quill'
++import { Button, Kbd, Separator, Tooltip, TooltipContent, TooltipTrigger } from '@posthog/quill'
+ 
+ import { Logomark } from 'lib/brand'
+ import { NewAccountMenu } from 'lib/components/Account/NewAccountMenu'
+@@ -10,6 +10,7 @@ import { pendingInvitesLogic } from 'lib/components/Account/pendingInvitesLogic'
+ import { PendingInviteDot } from 'lib/components/Account/ProjectMenu'
+ import { commandLogic } from 'lib/components/Command/commandLogic'
+ import { UploadedLogo } from 'lib/lemon-ui/UploadedLogo/UploadedLogo'
++import { isMac } from 'lib/utils/dom'
+ import { organizationLogic } from 'scenes/organizationLogic'
+ 
+ import { TODAY_RAIL_ITEMS } from './todayRailItems'
+@@ -18,8 +19,8 @@ import { TODAY_RAIL_WIDTH, railPaneHref, todayShellLogic } from './todayShellLog
+ 
+ const RailUtility = forwardRef<
+     HTMLButtonElement,
+-    { label: string; children: JSX.Element } & ComponentPropsWithoutRef<typeof Button>
+->(function RailUtility({ label, children, ...props }, ref): JSX.Element {
++    { label: string; children: JSX.Element; shortcut?: string } & ComponentPropsWithoutRef<typeof Button>
++>(function RailUtility({ label, children, shortcut, ...props }, ref): JSX.Element {
+     return (
+         <Tooltip>
+             <TooltipTrigger
+@@ -37,7 +38,10 @@ const RailUtility = forwardRef<
+             >
+                 {children}
+             </TooltipTrigger>
+-            <TooltipContent side="right">{label}</TooltipContent>
++            <TooltipContent side="right">
++                {label}
++                {shortcut && <Kbd>{shortcut}</Kbd>}
++            </TooltipContent>
+         </Tooltip>
+     )
+ })
+@@ -105,6 +109,7 @@ export function TodayRail(): JSX.Element {
+                 </RailUtility>
+                 <RailUtility
+                     label={sidebarVisible ? 'Hide sidebar' : 'Show sidebar'}
++                    shortcut={isMac() ? '⌘B' : 'Ctrl+B'}
+                     data-attr="today-rail-toggle-sidebar"
+                     onClick={toggleSidebar}
+                 >
+diff --git a/frontend/src/layout/today/TodayShell.tsx b/frontend/src/layout/today/TodayShell.tsx
+index 96b012f7bcf1..89fa92454c47 100644
+--- a/frontend/src/layout/today/TodayShell.tsx
++++ b/frontend/src/layout/today/TodayShell.tsx
+@@ -8,6 +8,8 @@ import { Heading, Skeleton, ToastProvider } from '@posthog/quill'
+ import 'scenes/project-homepage/today/Today.scss'
+ import { Resizer } from 'lib/components/Resizer/Resizer'
+ import { ResizerLogicProps, resizerLogic } from 'lib/components/Resizer/resizerLogic'
++import { keyBinds } from 'lib/components/Shortcuts/shortcuts'
++import { useShortcut } from 'lib/components/Shortcuts/useShortcut'
+ import { cn } from 'lib/utils/css-classes'
+ import { lazyWithRetry } from 'lib/utils/retryImport'
+ import { TodayHomeSidebar } from 'scenes/project-homepage/today/TodayHomeSidebar'
+@@ -47,6 +49,14 @@ export function TodayShell({ className }: { className?: string }): JSX.Element {
+     // Records the tools and sessions visited while other panes are open, so each pane's Recent group is ready.
+     useMountedLogic(todayRecentsLogic)
+     const { setMobileSidebarOpen, setSidebarOpen, setSidebarWidth, toggleSidebar } = useActions(todayShellLogic)
++    useShortcut({
++        name: 'ToggleLeftNav',
++        keybind: [keyBinds.toggleLeftNav, keyBinds.toggleLeftNavFallback],
++        intent: 'Toggle collapse left navigation',
++        interaction: 'function',
++        callback: toggleSidebar,
++        ignoreInEditable: true,
++    })
+     const sidebarRef = useRef<HTMLDivElement | null>(null)
+     const drawerRef = useRef<HTMLElement | null>(null)
+     const returnFocusRef = useRef<HTMLElement | null>(null)
+diff --git a/frontend/src/lib/components/Shortcuts/Shortcut.tsx b/frontend/src/lib/components/Shortcuts/Shortcut.tsx
+index 4138d2a22a80..2158d81911f9 100644
+--- a/frontend/src/lib/components/Shortcuts/Shortcut.tsx
++++ b/frontend/src/lib/components/Shortcuts/Shortcut.tsx
+@@ -26,7 +26,18 @@ interface ShortcutProps extends Omit<ShortcutType, 'ref' | 'keybind' | 'interact
+ }
+ 
+ export const Shortcut = forwardRef<HTMLElement, ShortcutProps>(function Shortcut(
+-    { children, name, keybind, intent, interaction, scope = 'global', disabled = false, disabledReason, priority = 0 },
++    {
++        children,
++        name,
++        keybind,
++        intent,
++        interaction,
++        scope = 'global',
++        disabled = false,
++        disabledReason,
++        ignoreInEditable,
++        priority = 0,
++    },
+     forwardedRef
+ ): ReactElement {
+     const childProps = (isValidElement(children) ? children.props : {}) as Record<string, unknown>
+@@ -43,6 +54,7 @@ export const Shortcut = forwardRef<HTMLElement, ShortcutProps>(function Shortcut
+         scope,
+         disabled: isDisabled,
+         priority,
++        ignoreInEditable,
+     })
+ 
+     const mergedRef = useMergeRefs([callbackRef, forwardedRef])
+diff --git a/frontend/src/lib/components/Shortcuts/shortcutLogic.tsx b/frontend/src/lib/components/Shortcuts/shortcutLogic.tsx
+index 16cb231293f5..01d93f3cfc60 100644
+--- a/frontend/src/lib/components/Shortcuts/shortcutLogic.tsx
++++ b/frontend/src/lib/components/Shortcuts/shortcutLogic.tsx
+@@ -27,6 +27,7 @@ interface ShortcutBase {
+     keybind: string[][]
+     intent: string
+     scope?: 'global' | keyof typeof Scene
++    ignoreInEditable?: boolean
+     /** Higher priority items appear first in their group. Default: 0 */
+     priority?: number
+ }
+@@ -226,7 +227,11 @@ export const shortcutLogic = kea<shortcutLogicType>([
+                     )
+                 )
+ 
+-                if (matchingShortcut && !values.disabledShortcutNames.includes(matchingShortcut.name)) {
++                if (
++                    matchingShortcut &&
++                    !values.disabledShortcutNames.includes(matchingShortcut.name) &&
++                    !(matchingShortcut.ignoreInEditable && isEditableElement(event))
++                ) {
+                     event.preventDefault()
+                     event.stopPropagation()
+                     triggerShortcut(matchingShortcut, pressedKeys)
+diff --git a/frontend/src/lib/components/Shortcuts/shortcuts.ts b/frontend/src/lib/components/Shortcuts/shortcuts.ts
+index a1e963e71b3b..cc5d781cb2ec 100644
+--- a/frontend/src/lib/components/Shortcuts/shortcuts.ts
++++ b/frontend/src/lib/components/Shortcuts/shortcuts.ts
+@@ -3,7 +3,8 @@ export const baseModifier: string[] = ['command', 'option']
+ export const keyBinds: Record<string, string[]> = {
+     // Sequence shortcuts: use 'then' between keys (e.g., type "sql" to open SQL editor)
+     sqlEditor: ['s', 'then', 'q', 'then', 'l'],
+-    toggleLeftNav: ['['],
++    toggleLeftNav: ['command', 'b'],
++    toggleLeftNavFallback: ['['],
+     toggleRightNav: [']'],
+     helpMenu: ['?'],
+     newAccountMenu: ['g', 'then', 'a'],
+diff --git a/frontend/src/lib/components/Shortcuts/useShortcut.ts b/frontend/src/lib/components/Shortcuts/useShortcut.ts
+index dc3ebd983867..f2a93a58e354 100644
+--- a/frontend/src/lib/components/Shortcuts/useShortcut.ts
++++ b/frontend/src/lib/components/Shortcuts/useShortcut.ts
+@@ -26,6 +26,7 @@ interface UseShortcutOptionsBase {
+     scope?: ShortcutType['scope']
+     /** When true, shortcut is not registered */
+     disabled?: boolean
++    ignoreInEditable?: boolean
+     /** Higher priority items appear first in their group. Default: 0 */
+     priority?: number
+ }
+@@ -107,7 +108,16 @@ export interface UseShortcutReturn<T extends HTMLElement> {
+  * ```
+  */
+ export function useShortcut<T extends HTMLElement = HTMLElement>(options: UseShortcutOptions): UseShortcutReturn<T> {
+-    const { name, keybind, intent, interaction, scope = 'global', disabled = false, priority } = options
++    const {
++        name,
++        keybind,
++        intent,
++        interaction,
++        scope = 'global',
++        disabled = false,
++        ignoreInEditable = false,
++        priority,
++    } = options
+ 
+     const internalRef = useRef<T>(null)
+     const [isRefReady, setIsRefReady] = useState(false)
+@@ -144,6 +154,7 @@ export function useShortcut<T extends HTMLElement = HTMLElement>(options: UseSho
+                 interaction: 'function',
+                 scope,
+                 priority,
++                ignoreInEditable,
+             })
+         } else if (isRefReady && ref.current && interaction !== 'function') {
+             const platformAgnosticKeybinds = convertPlatformKeybinds(keybind)
+@@ -155,13 +166,27 @@ export function useShortcut<T extends HTMLElement = HTMLElement>(options: UseSho
+                 interaction,
+                 scope,
+                 priority,
++                ignoreInEditable,
+             })
+         }
+ 
+         return () => {
+             unregisterShortcut(name)
+         }
+-    }, [isRefReady, name, intent, interaction, scope, disabled, ref, priority, registerShortcut, unregisterShortcut]) // oxlint-disable-line react-hooks/exhaustive-deps
++        // oxlint-disable-next-line react-hooks/exhaustive-deps
++    }, [
++        isRefReady,
++        name,
++        intent,
++        interaction,
++        scope,
++        disabled,
++        ignoreInEditable,
++        ref,
++        priority,
++        registerShortcut,
++        unregisterShortcut,
++    ])
+ 
+     return { ref, callbackRef }
+ }

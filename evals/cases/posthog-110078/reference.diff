@@ -1,0 +1,31 @@
+diff --git a/contents/docs/ai-observability/playground.mdx b/contents/docs/ai-observability/playground.mdx
+index 24738f530233..fdb51c452637 100644
+--- a/contents/docs/ai-observability/playground.mdx
++++ b/contents/docs/ai-observability/playground.mdx
+@@ -98,9 +98,11 @@ This is useful for:
+ 
+ Click the save menu (prompt management icon next to the system prompt) to save or load prompts:
+ 
+-- **Save as new prompt** — Creates a new [managed prompt](/docs/prompt-management) from the current system prompt
++- **Save as new prompt** — Creates a new [managed prompt](/docs/prompt-management) from the current setup. The system prompt becomes the prompt content, and the model, parameters, tools, and messages are stored in the version's [config](/docs/prompt-management#configuration)
+ - **Save as new evaluation** — Creates a new [evaluation](/docs/ai-evals) with the prompt and model configuration
+-- **Load prompt / Load evaluation** — Load an existing prompt or evaluation into the playground
++- **Load prompt / Load evaluation** — Load an existing prompt or evaluation into the playground. Loading a prompt restores the saved model, parameters, tools, and messages, including from a pinned version. A prompt saved without playground config loads its content only
++
++When you save to a prompt, the playground writes these config keys: `model`, `provider`, `provider_key_id`, `temperature`, `max_tokens`, `top_p`, `thinking`, `reasoning_effort`, `tools`, and `messages`. Other keys in the config, for example ones written through the API, are preserved. `{{variables}}` in messages are stored as written, not substituted.
+ 
+ You can also open the playground directly from the [traces](/docs/ai-observability/traces), [prompt management](/docs/prompt-management), or [evaluations](/docs/ai-evals) pages. When you do, the playground pre-populates the model, system prompt, and messages, and links back to the source so you can save changes directly — publishing a new prompt version or updating the evaluation configuration.
+ 
+diff --git a/contents/docs/prompt-management/index.mdx b/contents/docs/prompt-management/index.mdx
+index ab637e006f2b..16b1a85efda5 100644
+--- a/contents/docs/prompt-management/index.mdx
++++ b/contents/docs/prompt-management/index.mdx
+@@ -260,6 +260,8 @@ Config is versioned together with the prompt content. Publishing a config change
+ 
+ Don't store secrets in the config. It's returned to anyone who can read the prompt.
+ 
++The [playground](/docs/ai-observability/playground#saving-and-loading) uses the config too. Saving a playground setup to a prompt stores the model, parameters, tools, and messages under keys like `model`, `temperature`, and `messages`, and loading the prompt restores them. A playground save replaces only those keys and keeps any others you wrote through the API. If your app reads the config, expect these keys on prompts saved from the playground.
++
+ ### In the app
+ 
+ When editing a prompt, click **Add configuration** and enter a JSON object, for example:

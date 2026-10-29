@@ -1,0 +1,353 @@
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+index b42864aba8b9..160cdb2b7413 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+@@ -1291,14 +1291,14 @@ Note: The Savings Plans SDK model was compared with the static table map. The of
+ 
+ ## AWS Security Hub — gaps
+ 
+-Today (4): `enabled_standards`, `findings`, `insights`, `standards`
++Today (8): `enabled_standards`, `findings`, `insights`, `members`, `products`, `security_control_definitions`, `standards`, `standards_controls`
+ 
+ Diffed against: <https://raw.githubusercontent.com/boto/botocore/develop/botocore/data/securityhub/2018-10-26/service-2.json>
+ 
+-- [ ] `Security control definitions (GET /securityControls/definitions)` — resolve SecurityControlId in findings to control titles, severity, descriptions, and remediation guidance (high)
+-- [ ] `Standards controls (GET /standards/controls/{StandardsSubscriptionArn+})` — connect enabled standards to individual controls, enablement status, severity, and disablement reasons (high)
+-- [ ] `Products (GET /products)` — resolve ProductArn in findings to vendor names and product descriptions (high)
+-- [ ] `Member accounts (GET /members)` — resolve finding account IDs to member account details and analyze security coverage across accounts (high)
++- [x] `Security control definitions (GET /securityControls/definitions)` — resolve SecurityControlId in findings to control titles, severity, descriptions, and remediation guidance (high)
++- [x] `Standards controls (GET /standards/controls/{StandardsSubscriptionArn+})` — connect enabled standards to individual controls, enablement status, severity, and disablement reasons (high)
++- [x] `Products (GET /products)` — resolve ProductArn in findings to vendor names and product descriptions (high)
++- [x] `Member accounts (GET /members)` — resolve finding account IDs to member account details and analyze security coverage across accounts (high)
+ - [ ] `Finding history (POST /findingHistory/get)` — measure remediation progress and changes in severity, compliance, and workflow status (high)
+ - [ ] `Security Hub V2 findings (GetFindingsV2, POST /findingsv2)` — analyze findings from the newer Security Hub surface that legacy CSPM GetFindings does not provide (high)
+ - [ ] `Security Hub V2 resources (GetResourcesV2, POST /resourcesv2)` — analyze resource risk and connect newer findings to a separate resource inventory (medium)
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/aws_security_hub.py b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/aws_security_hub.py
+index 616774048e9d..c75e7dd5f7c8 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/aws_security_hub.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/aws_security_hub.py
+@@ -21,6 +21,7 @@
+     ERROR_MESSAGES,
+     SECURITY_HUB_API_VERSION,
+     SUBSCRIPTION_MESSAGE,
++    SecurityHubEndpoint,
+ )
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.http import make_tracked_session
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.http.transport import BoundedRetry
+@@ -47,19 +48,23 @@ class AwsSecurityHubResumeConfig:
+     next_token: str | None = None
+     updated_after: str | None = None
+     finished: bool = False
++    parent_id: str | None = None
+ 
+ 
+ class AwsSecurityHubError(Exception):
+-    def __init__(self, code: str, message: str) -> None:
++    def __init__(self, code: str, message: str, operation: str = "") -> None:
+         self.code = code
+         self.message = message
++        self.operation = operation
+         super().__init__(f"AWS Security Hub request failed: {code} - {message}")
+ 
+-    def user_message(self, operation: str) -> str:
++    def user_message(self) -> str:
+         if "not subscribed" in self.message.lower() or self.code == "SubscriptionRequiredException":
+             return SUBSCRIPTION_MESSAGE
+         if self.code in ACCESS_DENIED_CODES:
+-            return f"Grant securityhub:{operation} to this IAM user or role. Check that Security Hub CSPM is enabled."
++            return (
++                f"Grant securityhub:{self.operation} to this IAM user or role. Check that Security Hub CSPM is enabled."
++            )
+         return ERROR_MESSAGES.get(self.code, "AWS Security Hub rejected the request. Check the connection settings.")
+ 
+ 
+@@ -111,14 +116,22 @@ def request(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+             message = str(error.get("message") or error.get("Message") or response.reason)[:500]
+             if "not subscribed" in message.lower():
+                 code = "SubscriptionRequiredException"
+-            raise AwsSecurityHubError(code, message)
++            raise AwsSecurityHubError(code, message, operation)
+         response.raise_for_status()
+         return response.json()
+ 
+ 
+ def normalize_row(item: dict[str, Any]) -> dict[str, Any]:
+     row = {_CAMEL_BOUNDARY.sub("_", key).lower(): value for key, value in item.items()}
+-    for key in ("created_at", "updated_at", "first_observed_at", "last_observed_at", "processed_at"):
++    for key in (
++        "created_at",
++        "updated_at",
++        "first_observed_at",
++        "last_observed_at",
++        "processed_at",
++        "invited_at",
++        "control_status_updated_at",
++    ):
+         if isinstance(row.get(key), str):
+             timestamp = dt.datetime.fromisoformat(row[key].replace("Z", "+00:00"))
+             row[key] = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=dt.UTC)
+@@ -146,32 +159,73 @@ def get_rows(
+         updated_after = (timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=dt.UTC)).isoformat()
+     if state:
+         updated_after = state.updated_after
+-    token = state.next_token if state else None
+     client = AwsSecurityHubClient(config, api_version)
+     try:
+-        while True:
+-            payload: dict[str, Any] = {"MaxResults": 100}
+-            if endpoint == "findings":
+-                payload["SortCriteria"] = [{"Field": "UpdatedAt", "SortOrder": "asc"}]
+-                if updated_after:
+-                    payload["Filters"] = {"UpdatedAt": [{"Start": updated_after}]}
+-            if token:
+-                payload["NextToken"] = token
+-            result = client.request(endpoint_config.operation, payload)
+-            rows = [normalize_row(item) for item in result.get(endpoint_config.result_key) or []]
+-            token = result.get("NextToken") or None
+-            manager.save_state(
+-                AwsSecurityHubResumeConfig(next_token=token, updated_after=updated_after, finished=token is None)
+-            )
+-            if rows:
+-                yield rows
+-            manager.safe_point()
+-            if token is None:
+-                return
++        filters: dict[str, Any] = {}
++        if endpoint == "findings":
++            filters["SortCriteria"] = [{"Field": "UpdatedAt", "SortOrder": "asc"}]
++            if updated_after:
++                filters["Filters"] = {"UpdatedAt": [{"Start": updated_after}]}
++        parent_ids: list[str | None] = [None]
++        parent_field = None
++        if endpoint_config.parent:
++            parent_name, parent_field = endpoint_config.parent
++            found: set[str] = set()
++            for items, _ in _pages(client, ENDPOINTS[parent_name], None, {}):
++                found.update(item[parent_field] for item in items if item.get(parent_field))
++                manager.safe_point()
++            resume_from = state.parent_id if state and state.parent_id else ""
++            # Sorted so a resumed run can skip the parents an earlier attempt finished.
++            parent_ids = [parent_id for parent_id in sorted(found) if parent_id >= resume_from]
++        start_token = state.next_token if state and parent_ids and parent_ids[0] == state.parent_id else None
++        for index, parent_id in enumerate(parent_ids):
++            path_params = {parent_field: parent_id} if parent_field else {}
++            next_parent = parent_ids[index + 1] if index + 1 < len(parent_ids) else None
++            pages = _pages(client, endpoint_config, start_token, {**filters, **path_params})
++            start_token = None
++            for items, token in pages:
++                rows = [normalize_row({**path_params, **item}) for item in items]
++                manager.save_state(
++                    AwsSecurityHubResumeConfig(
++                        next_token=token,
++                        updated_after=updated_after,
++                        finished=token is None and next_parent is None,
++                        parent_id=parent_id if token else next_parent,
++                    )
++                )
++                if rows:
++                    yield rows
++                manager.safe_point()
+     finally:
+         client.session.close()
+ 
+ 
++def _pages(
++    client: AwsSecurityHubClient, endpoint: SecurityHubEndpoint, token: str | None, extra: dict[str, Any]
++) -> Iterator[tuple[list[dict[str, Any]], str | None]]:
++    while True:
++        payload: dict[str, Any] = {"MaxResults": endpoint.page_size, **dict(endpoint.params), **extra}
++        if token:
++            payload["NextToken"] = token
++        result = client.request(endpoint.operation, payload)
++        token = result.get("NextToken") or None
++        yield result.get(endpoint.result_key) or [], token
++        if token is None:
++            return
++
++
++def _probe(client: AwsSecurityHubClient, endpoint: SecurityHubEndpoint) -> None:
++    path_params: dict[str, Any] = {}
++    if endpoint.parent:
++        parent_name, parent_field = endpoint.parent
++        parent = ENDPOINTS[parent_name]
++        items = client.request(parent.operation, {"MaxResults": 1}).get(parent.result_key) or []
++        if not items:
++            return
++        path_params[parent_field] = items[0][parent_field]
++    client.request(endpoint.operation, {"MaxResults": 1, **path_params})
++
++
+ def validate_credentials(
+     config: AwsSecurityHubSourceConfig, api_version: str, schema_name: str | None = None
+ ) -> tuple[bool, str | None]:
+@@ -183,13 +237,13 @@ def validate_credentials(
+     try:
+         client = AwsSecurityHubClient(config, api_version)
+         try:
+-            client.request(endpoint.operation, {"MaxResults": 1})
++            _probe(client, endpoint)
+         finally:
+             client.session.close()
+     except AwsSecurityHubError as error:
+         if schema_name is None and error.code in ACCESS_DENIED_CODES and "not subscribed" not in error.message.lower():
+             return True, None
+-        return False, error.user_message(endpoint.operation)
++        return False, error.user_message()
+     except ValueError as error:
+         return False, str(error)
+     except requests.RequestException:
+@@ -208,10 +262,10 @@ def probe_endpoint_permissions(
+             if endpoint is None:
+                 continue
+             try:
+-                client.request(endpoint.operation, {"MaxResults": 1})
++                _probe(client, endpoint)
+             except AwsSecurityHubError as error:
+                 if error.code in ERROR_MESSAGES:
+-                    permissions[name] = error.user_message(endpoint.operation)
++                    permissions[name] = error.user_message()
+             except requests.RequestException:
+                 continue
+     finally:
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/canonical_descriptions.py b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/canonical_descriptions.py
+index 776c398361ae..8e01e8eb5eca 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/canonical_descriptions.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/canonical_descriptions.py
+@@ -56,4 +56,62 @@
+             "group_by_attribute": "The finding attribute used to group the results.",
+         },
+     },
++    "standards_controls": {
++        "description": "Controls in each enabled security standard, with their enablement status and severity.",
++        "docs_url": "https://docs.aws.amazon.com/securityhub/1.0/APIReference/API_StandardsControl.html",
++        "columns": {
++            "standards_subscription_arn": "The ARN of the enabled standard subscription that contains the control.",
++            "standards_control_arn": "The ARN of the security standard control.",
++            "control_id": "The identifier of the control within the standard.",
++            "control_status": "Whether the control is enabled or disabled.",
++            "disabled_reason": "The reason the control was disabled.",
++            "control_status_updated_at": "When the control status last changed.",
++            "title": "The title of the control.",
++            "description": "A description of the control.",
++            "remediation_url": "A link to remediation information for the control.",
++            "severity_rating": "The severity of findings generated by the control.",
++            "related_requirements": "The requirements from the standard that the control covers.",
++        },
++    },
++    "security_control_definitions": {
++        "description": "Definitions of the security controls available in Security Hub CSPM.",
++        "docs_url": "https://docs.aws.amazon.com/securityhub/1.0/APIReference/API_SecurityControlDefinition.html",
++        "columns": {
++            "security_control_id": "The control identifier that findings reference across standards, such as ACM.1.",
++            "title": "The title of the security control.",
++            "description": "A description of the security control.",
++            "remediation_url": "A link to remediation information for the control.",
++            "severity_rating": "The severity of findings generated by the control.",
++            "current_region_availability": "Whether the control is available in the current region.",
++            "customizable_properties": "The control properties that you can customize.",
++            "parameter_definitions": "The parameters that the control supports.",
++        },
++    },
++    "products": {
++        "description": "Product integrations that can send findings to Security Hub CSPM.",
++        "docs_url": "https://docs.aws.amazon.com/securityhub/1.0/APIReference/API_Product.html",
++        "columns": {
++            "product_arn": "The ARN of the product integration, which matches product_arn on findings.",
++            "product_name": "The name of the product.",
++            "company_name": "The company that provides the product.",
++            "description": "A description of the product.",
++            "categories": "The categories assigned to the product.",
++            "integration_types": "How the product integrates with Security Hub.",
++            "marketplace_url": "The AWS Marketplace or vendor page for the product.",
++            "activation_url": "The page where you activate the integration.",
++            "product_subscription_resource_policy": "The resource policy for the product subscription.",
++        },
++    },
++    "members": {
++        "description": "Member accounts of the Security Hub CSPM administrator account.",
++        "docs_url": "https://docs.aws.amazon.com/securityhub/1.0/APIReference/API_Member.html",
++        "columns": {
++            "account_id": "The AWS account ID of the member account.",
++            "email": "The email address of the member account.",
++            "administrator_id": "The AWS account ID of the administrator account.",
++            "member_status": "The relationship status between the member and the administrator account.",
++            "invited_at": "When the administrator invited the member account.",
++            "updated_at": "When the member account was last updated.",
++        },
++    },
+ }
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/settings.py b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/settings.py
+index 662b8eb643c6..f74ee8c5a408 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/settings.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/settings.py
+@@ -1,3 +1,5 @@
++from typing import Any
++
+ from posthog.dataclasses import frozen
+ 
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import incremental_field
+@@ -12,6 +14,10 @@ class SecurityHubEndpoint:
+     result_key: str
+     primary_keys: tuple[str, ...]
+     partition_key: str | None = None
++    page_size: int = 100
++    params: tuple[tuple[str, Any], ...] = ()
++    # Endpoint whose rows supply this endpoint's required path parameter, with that row field.
++    parent: tuple[str, str] | None = None
+ 
+ 
+ ENDPOINTS: dict[str, SecurityHubEndpoint] = {
+@@ -30,6 +36,26 @@ class SecurityHubEndpoint:
+         primary_keys=("standards_subscription_arn",),
+     ),
+     "insights": SecurityHubEndpoint(operation="GetInsights", result_key="Insights", primary_keys=("insight_arn",)),
++    "standards_controls": SecurityHubEndpoint(
++        operation="DescribeStandardsControls",
++        result_key="Controls",
++        primary_keys=("standards_subscription_arn", "standards_control_arn"),
++        parent=("enabled_standards", "StandardsSubscriptionArn"),
++    ),
++    "security_control_definitions": SecurityHubEndpoint(
++        operation="ListSecurityControlDefinitions",
++        result_key="SecurityControlDefinitions",
++        primary_keys=("security_control_id",),
++    ),
++    "products": SecurityHubEndpoint(operation="DescribeProducts", result_key="Products", primary_keys=("product_arn",)),
++    "members": SecurityHubEndpoint(
++        operation="ListMembers",
++        result_key="Members",
++        primary_keys=("account_id",),
++        page_size=50,
++        # The API defaults to enabled members only. Include invited and removed accounts too.
++        params=(("OnlyAssociated", False),),
++    ),
+ }
+ 
+ INCREMENTAL_FIELDS = {"findings": [incremental_field("updated_at")]}
+@@ -38,6 +64,10 @@ class SecurityHubEndpoint:
+     "standards": "Available security standards and their descriptions.",
+     "enabled_standards": "Enabled security standards and their subscription status.",
+     "insights": "Custom insights with their filters and grouping fields. AWS managed insights are excluded.",
++    "standards_controls": "Controls in each enabled standard, with enablement status, severity, and disablement reasons.",
++    "security_control_definitions": "Security control definitions with titles, severity, and remediation guidance.",
++    "products": "Product integrations that can send findings to Security Hub, with vendor names and descriptions.",
++    "members": "Member accounts of the Security Hub administrator account and their relationship status.",
+ }
+ 
+ ACCESS_DENIED_CODES = frozenset({"AccessDenied", "AccessDeniedException", "InvalidAccessException"})
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/source.py
+index 3c7bf101e480..5dcddfa802c1 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/aws_security_hub/source.py
+@@ -127,9 +127,9 @@ def get_source_config(self) -> SourceConfig:
+             name=ExternalDataSourceType.AWSSECURITYHUB,
+             category=DataWarehouseSourceCategory.ENGINEERING___MONITORING,
+             label="AWS Security Hub",
+-            caption="""Sync Security Hub CSPM findings, standards, and custom insights from the configured AWS region.
++            caption="""Sync Security Hub CSPM findings, standards, controls, product integrations, member accounts, and custom insights from the configured AWS region.
+ 
+-Grant `securityhub:GetFindings`, `securityhub:DescribeStandards`, `securityhub:GetEnabledStandards`, and `securityhub:GetInsights` to the IAM user or role.
++Grant `securityhub:GetFindings`, `securityhub:DescribeStandards`, `securityhub:GetEnabledStandards`, `securityhub:GetInsights`, `securityhub:DescribeStandardsControls`, `securityhub:ListSecurityControlDefinitions`, `securityhub:DescribeProducts`, and `securityhub:ListMembers` to the IAM user or role.
+ Enter its access key ID and secret access key. Add a session token for temporary credentials.
+ Enable Security Hub CSPM in the selected region.
+ If you select an aggregation region, AWS can also return findings from linked regions.""",

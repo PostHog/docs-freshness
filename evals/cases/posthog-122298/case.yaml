@@ -1,0 +1,10 @@
+id: posthog-122298
+codePr: 122298
+mergeSha: 3246deb620767cdf2e62f6d2a2fec6c70dd31017
+docsPr: 21534
+docsBaseSha: 17df2aa974ee3344c49f33c81a5e8a425a865f3e
+section: data-warehouse
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/data-warehouse/surfaces/mcp.mdx
+  - contents/docs/data-warehouse/views/materialize.mdx

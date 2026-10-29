@@ -1,0 +1,473 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 5fc26e94c402..08ba17246fe0 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -10303,13 +10303,13 @@ snapshots:
+     scenes-app-heatmap-new--unauthorized-iframe--light:
+         hash: v1.k794b7964.8e355023754bf9c2c1dc31cbadba79e6b524ad9a66528c649ab150f7eaf0cc05.yqUC0NlgolBVjXQsucJcRfdlu5npQvynKZSy7oAnd_8
+     scenes-app-heatmap-recording--recording-mode-with-clickmap--dark:
+-        hash: v1.k794b7964.690a738ccf7c2d51783f90674de9f2d820c1425f7bad5ac08ef5b3d05c050c77.aNuqccZzEnE0mSzQaTa_fC4qBWKrgD95UTP6SJ8q7rE
++        hash: v1.k794b7964.e457e617751f0e20d54d0fb1615d93adf7ac6708a194fdc7114343524fdf989c.J9zCJZt9g1m_F9yoYmznRkzD5djJcj-OWhAsF3WHUWA
+     scenes-app-heatmap-recording--recording-mode-with-clickmap--light:
+-        hash: v1.k794b7964.b971c6a8c3c44007c4b2de5797ac84541c34cef1ec16e0b6d760908b4d804302.DIupEQcozzEHDmS1urKBQx7LPhToY6N0FGgL2osOcUw
++        hash: v1.k794b7964.0bad4a5d714365ad844ff79b48384739ef8390ca40d7f241196e7d0e274da07e.udqznHrwtw3P4SDGDshCPEzVaZZABAhXJ6E-TKllQnU
+     scenes-app-heatmaps-saved--list--dark:
+-        hash: v1.k794b7964.8368377e136c567c3c500c97924486837234c230858baf0eb14678b6900d68c6.qpjMZIE3Ii8vpyLrfaKjCdym7waJtp38DGez1iugMMo
++        hash: v1.k794b7964.e3164483cd3e2072dcd38300fb0d78f37e289e2978edda9e1502f812426d0b7b.GO0zd9fKlfpYxQiz8cbwsjEF1dzHXnAyW041KXDacNo
+     scenes-app-heatmaps-saved--list--light:
+-        hash: v1.k794b7964.bcb55f9131fb7e69b676a856bb1986ab861ab9461e810e588893b263c648c007.1w2wOjJ9hrohsPO9aXHcRWx3b6TdoHidKTuuoZQ4fRA
++        hash: v1.k794b7964.c1c002f27568ade97a8ef0b2c5d2346bc13a3871c59c87ebac2cdf6b3f32ba13.US5kk6X-qDeJIYRETZwoUZTSDN-9GEthkQq4eR-Kkug
+     scenes-app-hogfunctions-destination--backfills-empty--dark:
+         hash: v1.k794b7964.eb67efee739a283813a4a3389e86262a7e41ac1eeba32bb186f06fa8bfb1f825.eNxwQSwo8ogShZXZ-XuOi-T0AIJb-dNi0a032U9oBpY
+     scenes-app-hogfunctions-destination--backfills-empty--light:
+@@ -14622,6 +14622,14 @@ snapshots:
+         hash: v1.k794b7964.c17be7ebf593bcdc6ad760d1ae2035be3dadad1e049d39ef6c72b9e093a03067.KVwJMpXcfhchvEMKnnqsNnyBE6EI5d9YIUWIB-08xfY
+     utils-autocapture-preview-image--tab-relative-image-with-current-url--light:
+         hash: v1.k794b7964.3e7d7a6fa83916bae8280f36864538241c45bd4122e167b299a046939c802b03.oW1U5X9JYmxSLcn72S6kPmgj_jxgZTKyJa0uZ1kbRJs
++    web-analytics-heatmaps-pricing-notice--empty-capture-list--dark:
++        hash: v1.k794b7964.9a5b4e65070403f615b0f04b60799af6cd4d0ae75810e18bea042c54e084d945.Rc8ysk1u96jJNkCfo1DX-y__WWcmxeHyn8q6l8j3P44
++    web-analytics-heatmaps-pricing-notice--empty-capture-list--light:
++        hash: v1.k794b7964.366590d851695bbd4d573a1a3c75ac8019745528accff210d53f4b65aa3acaa5.Bhzbwns0L8jmtStA7vsat_6XhE7AVuq8SQZAdhkIRAc
++    web-analytics-heatmaps-pricing-notice--with-capture-list--dark:
++        hash: v1.k794b7964.21cf23b9805f66312f5532a7bff0e27fc0610b0ac2e19733618c2ccbd06f8846.Va_AEEAqxOOZPnbp61f79AbjFaW9DSgP5ktf9n-Ndgw
++    web-analytics-heatmaps-pricing-notice--with-capture-list--light:
++        hash: v1.k794b7964.a4d38916053a774cd9544fe0013b487ffcb381fa0f7ab5a16dae350d9ac2affc.008GczPGu7NvErZGwiBFxcqhB7y6i6IW1xQFeCrCnXU
+     web-analytics-heatmaps-screenshot-cookie-settings--admin--dark:
+         hash: v1.k794b7964.c5348c16eb78868ccb7f02aeb327e1c130dc87a2bd3179ab9a1c7cf3ff893d70.bBPSLFvlUh3vxq9dOdJFD0lClID9CSFzwgWzbw3lwiY
+     web-analytics-heatmaps-screenshot-cookie-settings--admin--light:
+diff --git a/frontend/src/lib/constants.tsx b/frontend/src/lib/constants.tsx
+index ef44c4d0ea1d..f8fb163573f5 100644
+--- a/frontend/src/lib/constants.tsx
++++ b/frontend/src/lib/constants.tsx
+@@ -210,12 +210,12 @@ export const FEATURE_FLAGS = {
+     BILLING_SKIP_FORECASTING: 'billing-skip-forecasting', // owner: @zach
+     EXPERIMENT_INTERVAL_TIMESERIES: 'experiments-interval-timeseries', // owner: @jurajmajerik #team-experiments
+     GATEWAY_PERSONAL_API_KEY: 'gateway-personal-api-key', // owner: #team-platform-features
+-    HEATMAPS_CAPTURE_ALLOWLIST_NOTICE: 'heatmaps-capture-allowlist-notice', // owner: #team-web-analytics, gates the pre-enforcement notice about heatmap capture URL rules
+     HEATMAPS_CLICKMAP_DISCRIMINATORS: 'heatmaps-clickmap-discriminators', // owner: #team-web-analytics
+     HEATMAPS_CLICKMAP_PAGINATION: 'heatmaps-clickmap-pagination', // owner: #team-web-analytics
+     HEATMAPS_COHORT_FILTER: 'heatmaps-cohort-filter', // owner: #team-web-analytics
+     HEATMAPS_CREATION_FLOW: 'heatmaps-creation-flow', // owner: #team-web-analytics, gates the guided heatmap creation wizard at /heatmaps/new
+     HEATMAPS_EVENT_FILTER: 'heatmaps-event-filter', // owner: #team-web-analytics
++    HEATMAPS_PRICING_NOTICE: 'heatmaps-capture-allowlist-notice', // owner: #team-web-analytics, gates the heatmaps pricing change notice
+     HEATMAPS_SCREENSHOT_PREWARM: 'heatmaps-screenshot-prewarm', // owner: #team-web-analytics, pre-renders the screenshot while entering a URL in the wizard
+     IMPROVED_COOKIELESS_MODE: 'improved-cookieless-mode', // owner: #team-web-analytics
+     MEMBERS_CAN_USE_PERSONAL_API_KEYS: 'members-can-use-personal-api-keys', // owner: @yasen-posthog #team-platform-features
+diff --git a/frontend/src/products.tsx b/frontend/src/products.tsx
+index 48c1f47281dd..05406ee1221a 100644
+--- a/frontend/src/products.tsx
++++ b/frontend/src/products.tsx
+@@ -2473,7 +2473,6 @@ export const getTreeItemsProducts = (): FileSystemImport[] => [
+         iconType: 'heatmap',
+         iconColor: ['var(--color-product-heatmaps-light)', 'var(--color-product-heatmaps-dark)'],
+         href: urls.heatmaps(),
+-        tags: ['beta'],
+         sceneKey: 'Heatmaps',
+         sceneKeys: ['Heatmaps'],
+     },
+diff --git a/products/replay/manifest.tsx b/products/replay/manifest.tsx
+index fe0cdc23aad9..ebc07e705bc3 100644
+--- a/products/replay/manifest.tsx
++++ b/products/replay/manifest.tsx
+@@ -73,7 +73,6 @@ export const manifest: ProductManifest = {
+             iconType: 'heatmap',
+             iconColor: ['var(--color-product-heatmaps-light)', 'var(--color-product-heatmaps-dark)'],
+             href: urls.heatmaps(),
+-            tags: ['beta'],
+             sceneKey: 'Heatmaps',
+             sceneKeys: ['Heatmaps'],
+         },
+diff --git a/products/web_analytics/frontend/heatmaps/components/HeatmapCaptureAllowlistNotice.tsx b/products/web_analytics/frontend/heatmaps/components/HeatmapCaptureAllowlistNotice.tsx
+deleted file mode 100644
+index 625b1f8161ea..000000000000
+--- a/products/web_analytics/frontend/heatmaps/components/HeatmapCaptureAllowlistNotice.tsx
++++ /dev/null
+@@ -1,72 +0,0 @@
+-import { useValues } from 'kea'
+-import { router } from 'kea-router'
+-
+-import { LemonBanner, Link } from '@posthog/lemon-ui'
+-
+-import { FEATURE_FLAGS } from 'lib/constants'
+-import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+-import { teamLogic } from 'scenes/teamLogic'
+-import { urls } from 'scenes/urls'
+-
+-import { HeatmapCaptureMode, heatmapCaptureSettingsLogic } from './heatmapCaptureSettingsLogic'
+-
+-export function shouldShowHeatmapCaptureAllowlistNotice(params: {
+-    heatmapsOptIn: boolean
+-    captureMode: HeatmapCaptureMode
+-    enforcementEnabled: boolean
+-}): boolean {
+-    return params.heatmapsOptIn && params.captureMode === 'url_allowlist' && !params.enforcementEnabled
+-}
+-
+-export function HeatmapCaptureAllowlistNotice(): JSX.Element | null {
+-    const { featureFlags } = useValues(featureFlagLogic)
+-    const { currentTeam, currentTeamId } = useValues(teamLogic)
+-    const { settings, urlAllowlist, canCaptureAllUrls, captureUrlLimit } = useValues(
+-        heatmapCaptureSettingsLogic({ teamId: currentTeamId ?? 0 })
+-    )
+-
+-    if (!featureFlags[FEATURE_FLAGS.HEATMAPS_CAPTURE_ALLOWLIST_NOTICE] || !settings) {
+-        return null
+-    }
+-
+-    if (
+-        !shouldShowHeatmapCaptureAllowlistNotice({
+-            heatmapsOptIn: !!currentTeam?.heatmaps_opt_in,
+-            captureMode: settings.capture_mode ?? 'url_allowlist',
+-            enforcementEnabled: settings.enforcement_enabled,
+-        })
+-    ) {
+-        return null
+-    }
+-
+-    if (!canCaptureAllUrls) {
+-        return (
+-            <LemonBanner
+-                type="warning"
+-                dismissKey="heatmaps-capture-allowlist-notice"
+-                action={{ children: 'Upgrade', to: urls.organizationBilling() }}
+-            >
+-                {urlAllowlist.length === 0
+-                    ? `When capture limits take effect, heatmaps stop collecting from every page. `
+-                    : `When capture limits take effect, heatmaps only collect from your listed URLs (up to ${captureUrlLimit}). Every other page stops. `}
+-                <Link to={urls.settings('environment-heatmaps')}>Review capture URLs</Link> to choose which pages to
+-                keep.
+-            </LemonBanner>
+-        )
+-    }
+-
+-    return (
+-        <LemonBanner
+-            type="warning"
+-            dismissKey="heatmaps-capture-allowlist-notice"
+-            action={{
+-                children: 'Manage capture URLs',
+-                onClick: () => router.actions.push(urls.settings('environment-heatmaps')),
+-            }}
+-        >
+-            {urlAllowlist.length === 0
+-                ? 'Heatmap capture will soon use the URL rules in settings. Add at least one URL, or choose Allow all URLs, to keep collecting heatmap data.'
+-                : 'Heatmap capture will soon be limited to the URLs you list in settings. Review them to keep collecting the heatmap data you need.'}
+-        </LemonBanner>
+-    )
+-}
+diff --git a/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.stories.tsx b/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.stories.tsx
+new file mode 100644
+index 000000000000..7df306ae9b37
+--- /dev/null
++++ b/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.stories.tsx
+@@ -0,0 +1,49 @@
++import type { Meta, StoryObj } from '@storybook/react'
++
++import { FEATURE_FLAGS } from 'lib/constants'
++
++import { mswDecorator } from '~/mocks/browser'
++
++import { HeatmapsPricingNotice } from './HeatmapsPricingNotice'
++
++const captureSettingsMock = (urlAllowlist: string[]): ReturnType<typeof mswDecorator> =>
++    mswDecorator({
++        get: {
++            '/api/projects/:id/heatmap_capture/settings/': {
++                capture_mode: 'url_allowlist',
++                url_allowlist: urlAllowlist,
++                enforcement_enabled: false,
++                can_capture_all_urls: false,
++                capture_url_limit: 3,
++            },
++            '/api/projects/:id/heatmap_capture/pages/': { pages: [] },
++        },
++    })
++
++const meta: Meta<typeof HeatmapsPricingNotice> = {
++    title: 'Web Analytics/Heatmaps/Pricing notice',
++    component: HeatmapsPricingNotice,
++    decorators: [
++        (Story) => (
++            <div className="w-200">
++                <Story />
++            </div>
++        ),
++    ],
++    parameters: {
++        featureFlags: [FEATURE_FLAGS.HEATMAPS_PRICING_NOTICE],
++        testOptions: {
++            waitForSelector: '[data-attr="heatmaps-pricing-notice-review-urls"]',
++        },
++    },
++}
++export default meta
++type Story = StoryObj<typeof HeatmapsPricingNotice>
++
++export const WithCaptureList: Story = {
++    decorators: [captureSettingsMock(['https://example.com/', 'https://example.com/pricing'])],
++}
++
++export const EmptyCaptureList: Story = {
++    decorators: [captureSettingsMock([])],
++}
+diff --git a/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.tsx b/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.tsx
+new file mode 100644
+index 000000000000..04f115450589
+--- /dev/null
++++ b/products/web_analytics/frontend/heatmaps/components/HeatmapsPricingNotice.tsx
+@@ -0,0 +1,66 @@
++import { useValues } from 'kea'
++
++import { LemonBanner, Link } from '@posthog/lemon-ui'
++
++import { FEATURE_FLAGS } from 'lib/constants'
++import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
++import { teamLogic } from 'scenes/teamLogic'
++import { urls } from 'scenes/urls'
++
++import type { HeatmapCaptureSettingsApi } from '../../generated/api.schemas'
++import { heatmapCaptureSettingsLogic } from './heatmapCaptureSettingsLogic'
++
++export function shouldShowHeatmapsPricingNotice(settings: HeatmapCaptureSettingsApi | null): boolean {
++    return !!settings && !settings.can_capture_all_urls && !settings.enforcement_enabled
++}
++
++export function HeatmapsPricingNotice(): JSX.Element | null {
++    const { featureFlags } = useValues(featureFlagLogic)
++    const { currentTeam, currentTeamId } = useValues(teamLogic)
++
++    if (!featureFlags[FEATURE_FLAGS.HEATMAPS_PRICING_NOTICE] || !currentTeam?.heatmaps_opt_in || !currentTeamId) {
++        return null
++    }
++
++    return <HeatmapsPricingNoticeBanner teamId={currentTeamId} />
++}
++
++function HeatmapsPricingNoticeBanner({ teamId }: { teamId: number }): JSX.Element | null {
++    const { settings, urlAllowlist, captureUrlLimit } = useValues(heatmapCaptureSettingsLogic({ teamId }))
++
++    if (!shouldShowHeatmapsPricingNotice(settings)) {
++        return null
++    }
++
++    return (
++        <LemonBanner
++            type="warning"
++            dismissKey="heatmaps-pricing-notice"
++            action={{
++                children: 'Upgrade',
++                to: urls.organizationBilling(),
++                'data-attr': 'heatmaps-pricing-notice-upgrade',
++            }}
++        >
++            Heatmaps is out of beta, and its pricing changes on November 15. The free plan will collect heatmap data
++            from up to {captureUrlLimit} pages, and toolbar heatmaps will need a pay-as-you-go plan.{' '}
++            {urlAllowlist.length === 0
++                ? 'Your capture list is empty, so heatmaps will stop collecting data. '
++                : 'Only the URLs in your capture list will keep collecting data. '}
++            <Link
++                to={urls.settings('environment-heatmaps', 'heatmaps-capture')}
++                data-attr="heatmaps-pricing-notice-review-urls"
++            >
++                Review capture URLs
++            </Link>{' '}
++            to choose which pages to keep.{' '}
++            <Link
++                to="https://posthog.com/docs/toolbar/heatmaps#choosing-which-pages-to-capture"
++                target="_blank"
++                data-attr="heatmaps-pricing-notice-docs"
++            >
++                Learn more
++            </Link>
++        </LemonBanner>
++    )
++}
+diff --git a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewScene.tsx b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewScene.tsx
+index f8ea1f034811..1321a6914d70 100644
+--- a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewScene.tsx
++++ b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewScene.tsx
+@@ -27,6 +27,7 @@ import { heatmapsBrowserLogic } from '../../components/heatmapsBrowserLogic'
+ import { HeatmapScreenshotAccessNotice } from '../../components/HeatmapScreenshotAccessNotice'
+ import { HeatmapsEnableCapture } from '../../components/HeatmapsEnableCapture'
+ import { HeatmapsInvalidURL } from '../../components/HeatmapsInvalidURL'
++import { HeatmapsPricingNotice } from '../../components/HeatmapsPricingNotice'
+ import { HeatmapCreationStep, heatmapCreationLogic } from './heatmapCreationLogic'
+ import { heatmapLogic } from './heatmapLogic'
+ import { HeatmapNewSceneLegacy } from './HeatmapNewSceneLegacy'
+@@ -685,6 +686,7 @@ function HeatmapCreationWizard(): JSX.Element {
+                 onNameChange={setName}
+                 forceBackTo={{ name: 'Heatmaps', path: urls.heatmaps(), key: 'heatmaps' }}
+             />
++            <HeatmapsPricingNotice />
+             <HeatmapCreationStepper />
+             {currentStep === 'page' ? <ChoosePageStep /> : null}
+             {currentStep === 'background' ? <ChooseBackgroundStep /> : null}
+diff --git a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewSceneLegacy.tsx b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewSceneLegacy.tsx
+index f227d6dada79..67050227c94a 100644
+--- a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewSceneLegacy.tsx
++++ b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapNewSceneLegacy.tsx
+@@ -21,6 +21,7 @@ import { HeatmapAdvancedSettings } from '../../components/HeatmapAdvancedSetting
+ import { heatmapsBrowserLogic } from '../../components/heatmapsBrowserLogic'
+ import { HeatmapsForbiddenURL } from '../../components/HeatmapsForbiddenURL'
+ import { HeatmapsInvalidURL } from '../../components/HeatmapsInvalidURL'
++import { HeatmapsPricingNotice } from '../../components/HeatmapsPricingNotice'
+ import { heatmapLogic } from './heatmapLogic'
+ 
+ export function HeatmapNewSceneLegacy(): JSX.Element {
+@@ -59,6 +60,7 @@ export function HeatmapNewSceneLegacy(): JSX.Element {
+                     key: 'heatmaps',
+                 }}
+             />
++            <HeatmapsPricingNotice />
+             <SceneSection title="Page URL" description="URL to your website">
+                 <LemonInputSelect
+                     mode="single"
+diff --git a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapRecordingScene.tsx b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapRecordingScene.tsx
+index 6f0b301eb7c9..e051598665ac 100644
+--- a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapRecordingScene.tsx
++++ b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapRecordingScene.tsx
+@@ -1,4 +1,3 @@
+-import { LemonBanner } from 'lib/lemon-ui/LemonBanner'
+ import { SceneExport } from 'scenes/sceneTypes'
+ 
+ import { HeatmapRecording } from '../../components/HeatmapRecording'
+@@ -10,20 +9,5 @@ export const scene: SceneExport = {
+ }
+ 
+ export function HeatmapRecordingScene(): JSX.Element {
+-    return (
+-        <div>
+-            <LemonBanner
+-                type="info"
+-                dismissKey="heatmaps-beta-banner"
+-                className="mb-4"
+-                action={{ children: 'Send feedback', id: 'heatmaps-feedback-button' }}
+-            >
+-                <p>
+-                    Heatmaps is in beta. Please let us know what you'd like to see here and/or report any issues
+-                    directly to us!
+-                </p>
+-            </LemonBanner>
+-            <HeatmapRecording />
+-        </div>
+-    )
++    return <HeatmapRecording />
+ }
+diff --git a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapScene.tsx b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapScene.tsx
+index d392d805afd6..01afbc635747 100644
+--- a/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapScene.tsx
++++ b/products/web_analytics/frontend/heatmaps/scenes/heatmap/HeatmapScene.tsx
+@@ -24,6 +24,7 @@ import { AccessControlLevel, AccessControlResourceType } from '~/types'
+ import { FilterPanel } from '../../components/FilterPanel'
+ import { HeatmapHeader } from '../../components/HeatmapHeader'
+ import { HeatmapRecordingFallback } from '../../components/HeatmapRecordingFallback'
++import { HeatmapsPricingNotice } from '../../components/HeatmapsPricingNotice'
+ import { heatmapLogic } from './heatmapLogic'
+ 
+ const HedgehogDirector = pngHoggie(directorPng)
+@@ -193,6 +194,7 @@ export function HeatmapScene({ id }: { id: string }): JSX.Element {
+                         </>
+                     }
+                 />
++                <HeatmapsPricingNotice />
+                 <HeatmapHeader />
+                 <FilterPanel lockedWidth={lockedWidth ?? undefined} previewUnavailable={previewUnavailable} />
+                 {isHeightCapped && (
+diff --git a/products/web_analytics/frontend/heatmaps/scenes/heatmaps/HeatmapsScene.tsx b/products/web_analytics/frontend/heatmaps/scenes/heatmaps/HeatmapsScene.tsx
+index 95c4eb8b93c8..29323865080b 100644
+--- a/products/web_analytics/frontend/heatmaps/scenes/heatmaps/HeatmapsScene.tsx
++++ b/products/web_analytics/frontend/heatmaps/scenes/heatmaps/HeatmapsScene.tsx
+@@ -16,7 +16,6 @@ import { MemberSelect } from 'lib/components/MemberSelect'
+ import { Shortcut } from 'lib/components/Shortcuts/Shortcut'
+ import { keyBinds } from 'lib/components/Shortcuts/shortcuts'
+ import { TZLabel } from 'lib/components/TZLabel'
+-import { LemonBanner } from 'lib/lemon-ui/LemonBanner'
+ import { More } from 'lib/lemon-ui/LemonButton/More'
+ import { createdByColumn } from 'lib/lemon-ui/LemonTable/columnUtils'
+ import { sceneConfigurations } from 'scenes/scenes'
+@@ -29,8 +28,8 @@ import { SceneTitleSection } from '~/layout/scenes/components/SceneTitleSection'
+ import { ProductKey } from '~/queries/schema/schema-general'
+ import { AccessControlLevel, AccessControlResourceType, HeatmapScreenshotType } from '~/types'
+ 
+-import { HeatmapCaptureAllowlistNotice } from '../../components/HeatmapCaptureAllowlistNotice'
+ import { heatmapCaptureSettingsLogic, isUrlCoveredByAllowlist } from '../../components/heatmapCaptureSettingsLogic'
++import { HeatmapsPricingNotice } from '../../components/HeatmapsPricingNotice'
+ import { HeatmapsWarnings } from '../../components/HeatmapsWarnings'
+ import { heatmapsEmptyState } from '../../emptyState/heatmapsEmptyState'
+ import { HEATMAPS_PER_PAGE, heatmapsSceneLogic } from './heatmapsSceneLogic'
+@@ -150,43 +149,42 @@ export function HeatmapsScene(): JSX.Element {
+                     type: sceneConfigurations[Scene.Heatmaps].iconType || 'default',
+                 }}
+                 actions={
+-                    <Shortcut
+-                        name="NewHeatmap"
+-                        keybind={[keyBinds.new]}
+-                        intent="New heatmap"
+-                        interaction="click"
+-                        scope={Scene.Heatmaps}
+-                    >
+-                        <AccessControlAction
+-                            resourceType={AccessControlResourceType.Heatmap}
+-                            minAccessLevel={AccessControlLevel.Editor}
++                    <>
++                        <LemonButton
++                            type="secondary"
++                            size="small"
++                            id="heatmaps-feedback-button"
++                            data-attr="heatmaps-feedback-button"
+                         >
+-                            <LemonButton
+-                                type="primary"
+-                                to={urls.heatmap('new')}
+-                                data-attr="heatmaps-new-heatmap-button"
+-                                size="small"
+-                                icon={<IconPlusSmall />}
+-                                tooltip="New heatmap"
++                            Send feedback
++                        </LemonButton>
++                        <Shortcut
++                            name="NewHeatmap"
++                            keybind={[keyBinds.new]}
++                            intent="New heatmap"
++                            interaction="click"
++                            scope={Scene.Heatmaps}
++                        >
++                            <AccessControlAction
++                                resourceType={AccessControlResourceType.Heatmap}
++                                minAccessLevel={AccessControlLevel.Editor}
+                             >
+-                                New heatmap
+-                            </LemonButton>
+-                        </AccessControlAction>
+-                    </Shortcut>
++                                <LemonButton
++                                    type="primary"
++                                    to={urls.heatmap('new')}
++                                    data-attr="heatmaps-new-heatmap-button"
++                                    size="small"
++                                    icon={<IconPlusSmall />}
++                                    tooltip="New heatmap"
++                                >
++                                    New heatmap
++                                </LemonButton>
++                            </AccessControlAction>
++                        </Shortcut>
++                    </>
+                 }
+             />
+-            <HeatmapCaptureAllowlistNotice />
+-            <LemonBanner
+-                type="info"
+-                dismissKey="heatmaps-beta-banner"
+-                className="mb-4"
+-                action={{ children: 'Send feedback', id: 'heatmaps-feedback-button' }}
+-            >
+-                <p>
+-                    Heatmaps is in beta. Please let us know what you'd like to see here and/or report any issues
+-                    directly to us!
+-                </p>
+-            </LemonBanner>
++            <HeatmapsPricingNotice />
+             <div className="flex justify-between gap-2 items-center flex-wrap">
+                 <Shortcut
+                     name="SearchHeatmaps"

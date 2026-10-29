@@ -1,0 +1,355 @@
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+index 609d3af7bc8e..c672e465b5b2 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/COVERAGE_GAPS_APPENDIX.md
+@@ -9414,14 +9414,14 @@ Note: Full vendor resource list read from the docs navigation plus each resource
+ 
+ ## Pinecone — gaps
+ 
+-Today (4): `backups`, `collections`, `indexes`, `restore_jobs`
++Today (7): `assistant_files`, `assistants`, `backups`, `collections`, `indexes`, `namespaces`, `restore_jobs`
+ 
+ Diffed against: <https://raw.githubusercontent.com/pinecone-io/pinecone-api/main/2026-07/db_data_2026-07.oas.yaml>
+ 
+-- [ ] `Namespaces (GET /namespaces)` — measure record counts and stored data size by namespace within each index (high)
+-- [ ] `Record IDs and Metadata (GET /vectors/list; GET /vectors/fetch)` — analyze stored record metadata and compare dataset composition across namespaces (medium)
+-- [ ] `Assistants (GET /assistant/assistants)` — track knowledge assistants and compare their status and creation dates (medium)
+-- [ ] `Assistant Files (GET /files/{assistant_name})` — analyze knowledge file inventory, processing status, and metadata by assistant (medium)
++- [x] `Namespaces (GET /namespaces)` — measure record counts and stored data size by namespace within each index (high). Added as `namespaces` (fan-out over ready serverless and BYOC `indexes`). The response carries record counts, not data size.
++- ~~`Record IDs and Metadata (GET /vectors/list; GET /vectors/fetch)` — analyze stored record metadata and compare dataset composition across namespaces (medium)~~ — skipped: it exports every record in every namespace, `fetch` always returns the vector values, and each sync would spend the customer's Pinecone read units with no server-side change filter
++- [x] `Assistants (GET /assistant/assistants)` — track knowledge assistants and compare their status and creation dates (medium). Added as `assistants`.
++- [x] `Assistant Files (GET /files/{assistant_name})` — analyze knowledge file inventory, processing status, and metadata by assistant (medium). Added as `assistant_files` (fan-out over ready `assistants`); `signed_url` is dropped.
+ 
+ Note: Parsed Pinecone's official 2026-07 database and assistant specifications. Namespace and record tables need requests to each index host. Record metadata requires listing IDs, then fetching their records; these list operations support serverless indexes. Assistant files use each assistant's host; excluded write operations, import plumbing, and authentication.
+ 
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/canonical_descriptions.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/canonical_descriptions.py
+index f07e71ded89f..39506685f1ea 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/canonical_descriptions.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/canonical_descriptions.py
+@@ -56,4 +56,44 @@
+             "percent_complete": "Completion indicator, reported as 100 for completed jobs.",
+         },
+     },
++    "namespaces": {
++        "description": "Namespaces in each ready serverless or BYOC index of the connected Pinecone project.",
++        "docs_url": "https://docs.pinecone.io/reference/api/2026-07/data-plane/listnamespaces",
++        "columns": {
++            "index_name": "Name of the index that contains the namespace.",
++            "name": "Namespace name, unique within the index.",
++            "record_count": "Total number of records in the namespace, as a decimal string.",
++            "schema": "Metadata fields that the namespace indexes for filtering.",
++            "indexed_fields": "All indexed metadata fields in the namespace.",
++        },
++    },
++    "assistants": {
++        "description": "Pinecone Assistants in the connected project.",
++        "docs_url": "https://docs.pinecone.io/reference/api/2026-07/assistant/list_assistants",
++        "columns": {
++            "name": "Assistant name, unique within the project.",
++            "instructions": "Guidance applied to all responses the assistant generates.",
++            "metadata": "Custom metadata attached to the assistant.",
++            "status": "Operational status of the assistant.",
++            "host": "Host where the assistant is deployed.",
++            "region": "Region where the assistant is deployed.",
++            "created_at": "Time the assistant was created.",
++            "updated_at": "Time the assistant was last updated.",
++        },
++    },
++    "assistant_files": {
++        "description": "Files uploaded to each ready Pinecone Assistant in the connected project.",
++        "docs_url": "https://docs.pinecone.io/reference/api/2026-07/assistant/list_files",
++        "columns": {
++            "assistant_name": "Name of the assistant that the file belongs to.",
++            "id": "Unique identifier of the file.",
++            "name": "Name of the uploaded file.",
++            "size": "File size in bytes.",
++            "metadata": "Custom metadata attached to the file.",
++            "created_on": "Time the file was uploaded.",
++            "updated_on": "Time the file was last updated.",
++            "status": "Processing state of the file.",
++            "multimodal": "Whether the file was processed as multimodal.",
++        },
++    },
+ }
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/pinecone.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/pinecone.py
+index da0e750b5e66..54aa00b8950d 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/pinecone.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/pinecone.py
+@@ -1,5 +1,9 @@
+-from collections.abc import Generator
+-from typing import TYPE_CHECKING, cast
++from collections.abc import Generator, Iterator
++from typing import TYPE_CHECKING, Any, cast
++from urllib.parse import quote, urlsplit
++
++import structlog
++from requests.exceptions import HTTPError
+ 
+ from posthog.dataclasses import frozen
+ 
+@@ -8,10 +12,22 @@
+     rest_api_resource,
+ )
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.rest_source.config_setup import create_auth
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.rest_source.paginators import (
++    BasePaginator,
++    JSONResponseCursorPaginator,
++    SinglePagePaginator,
++)
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.rest_source.rest_client import RESTClient
+ from products.warehouse_sources.backend.temporal.data_imports.sources.common.schema import schema_for_resource
+-from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import SourceResponse
+-from products.warehouse_sources.backend.temporal.data_imports.sources.pinecone.settings import BASE_URL, ENDPOINTS
++from products.warehouse_sources.backend.temporal.data_imports.sources.common.typings import (
++    PartitionFormat,
++    SourceResponse,
++)
++from products.warehouse_sources.backend.temporal.data_imports.sources.pinecone.settings import (
++    BASE_URL,
++    ENDPOINTS,
++    PineconeEndpoint,
++)
+ 
+ if TYPE_CHECKING:
+     from products.warehouse_sources.backend.temporal.data_imports.sources.common.rest_source.typing import (
+@@ -21,6 +37,13 @@
+     )
+     from products.warehouse_sources.backend.temporal.data_imports.sources.common.resumable import ResumableSourceManager
+ 
++logger = structlog.get_logger(__name__)
++
++# Index and assistant hosts come from the control plane; the API key is only ever sent to Pinecone's domain.
++DATA_PLANE_HOST_SUFFIX = ".pinecone.io"
++# A file listing can carry a signed URL that grants anyone read access to the file contents.
++DROPPED_FILE_FIELDS = ("signed_url",)
++
+ 
+ @frozen
+ class PineconeResumeConfig:
+@@ -47,7 +70,7 @@ def get_resource(endpoint: str) -> "EndpointResource":
+         "paginator": {
+             "type": "cursor",
+             "cursor_path": "pagination.next",
+-            "cursor_param": "paginationToken",
++            "cursor_param": settings.cursor_param,
+         }
+         if settings.paginated
+         else "single_page",
+@@ -63,17 +86,106 @@ def get_resource(endpoint: str) -> "EndpointResource":
+     }
+ 
+ 
+-def validate_credentials(api_key: str, api_version: str, endpoint: str) -> None:
+-    settings = schema_for_resource(ENDPOINTS, endpoint)
++def _client(api_key: str, api_version: str, base_url: str = BASE_URL) -> RESTClient:
+     config = get_client_config(api_key, api_version)
+-    client = RESTClient(
+-        base_url=config["base_url"],
++    return RESTClient(
++        base_url=base_url,
+         auth=create_auth(config["auth"]),
+         headers=config["headers"],
+         request_timeout=config["request_timeout"],
+         allowed_hosts=config["allowed_hosts"],
+         allow_redirects=False,
+     )
++
++
++def _paginator(settings: PineconeEndpoint) -> BasePaginator:
++    if settings.paginated:
++        return JSONResponseCursorPaginator(cursor_path="pagination.next", cursor_param=settings.cursor_param)
++    return SinglePagePaginator()
++
++
++def _data_plane_url(parent: str, row: dict[str, Any]) -> str | None:
++    if parent == "indexes":
++        deployment = row.get("deployment") or {}
++        status = row.get("status") or {}
++        # Pinecone lists namespaces only on serverless and BYOC indexes that are ready.
++        if deployment.get("deployment_type") == "pod" or not status.get("ready"):
++            return None
++    elif row.get("status") != "Ready":
++        return None
++    host = row.get("host")
++    if not isinstance(host, str) or not host:
++        return None
++    split = urlsplit(host if "://" in host else f"https://{host}")
++    hostname = split.hostname
++    if split.scheme != "https" or not hostname or not hostname.endswith(DATA_PLANE_HOST_SUFFIX):
++        logger.warning("pinecone_data_plane_host_skipped", parent=parent, name=row.get("name"))
++        return None
++    return f"https://{hostname}"
++
++
++def _child_row(settings: PineconeEndpoint, parent_name: str, row: dict[str, Any]) -> dict[str, Any]:
++    assert settings.parent_key is not None
++    return {
++        settings.parent_key: parent_name,
++        **{key: value for key, value in row.items() if key not in DROPPED_FILE_FIELDS},
++    }
++
++
++def fan_out_rows(
++    api_key: str,
++    api_version: str,
++    settings: PineconeEndpoint,
++    resumable_source_manager: "ResumableSourceManager[PineconeResumeConfig]",
++) -> Iterator[list[dict[str, Any]]]:
++    assert settings.parent is not None and settings.parent_key is not None
++    parent_settings = ENDPOINTS[settings.parent]
++    control_client = _client(api_key, api_version)
++    try:
++        for parents in control_client.paginate(
++            path=parent_settings.path,
++            params={"limit": 100} if parent_settings.paginated else {},
++            paginator=_paginator(parent_settings),
++            data_selector=parent_settings.data_selector,
++            data_selector_required=True,
++        ):
++            for parent in parents:
++                base_url = _data_plane_url(settings.parent, parent)
++                if base_url is None:
++                    continue
++                parent_name = str(parent["name"])
++                path = settings.path.format(**{settings.parent_key: quote(parent_name, safe="")})
++                client = _client(api_key, api_version, base_url)
++                try:
++                    # A data plane listing can omit an empty list, so a missing selector means zero rows.
++                    for rows in client.paginate(
++                        path=path,
++                        params={"limit": 100},
++                        paginator=_paginator(settings),
++                        data_selector=settings.data_selector,
++                    ):
++                        if rows:
++                            yield [_child_row(settings, parent_name, row) for row in rows]
++                        else:
++                            resumable_source_manager.safe_point()
++                except HTTPError as error:
++                    # The parent was deleted after the parent listing.
++                    if error.response is None or error.response.status_code != 404:
++                        raise
++                    resumable_source_manager.safe_point()
++                finally:
++                    client.session.close()
++            resumable_source_manager.safe_point()
++    finally:
++        control_client.session.close()
++
++
++def validate_credentials(api_key: str, api_version: str, endpoint: str) -> None:
++    settings = schema_for_resource(ENDPOINTS, endpoint)
++    # A fan-out table needs a reachable parent listing; its data plane hosts are only known per parent.
++    if settings.parent is not None:
++        settings = ENDPOINTS[settings.parent]
++    client = _client(api_key, api_version)
+     pages = cast(
+         "Generator[list[object]]",
+         client.paginate(
+@@ -99,6 +211,22 @@ def pinecone_source(
+     resumable_source_manager: "ResumableSourceManager[PineconeResumeConfig]",
+ ) -> SourceResponse:
+     settings = schema_for_resource(ENDPOINTS, endpoint)
++    partition_count = 1 if settings.partition_mode == "md5" else None
++    partition_format: PartitionFormat | None = "month" if settings.partition_mode == "datetime" else None
++
++    if settings.parent is not None:
++        return SourceResponse(
++            name=endpoint,
++            items=lambda: fan_out_rows(api_key, api_version, settings, resumable_source_manager),
++            primary_keys=[settings.parent_key, settings.primary_key] if settings.parent_key else None,
++            partition_count=partition_count,
++            partition_keys=[settings.partition_key],
++            partition_mode=settings.partition_mode,
++            partition_format=partition_format,
++            sort_mode=None,
++            supports_resume=False,
++        )
++
+     config: RESTAPIConfig = {
+         "client": get_client_config(api_key, api_version),
+         "resources": [get_resource(endpoint)],
+@@ -125,10 +253,10 @@ def save_checkpoint(state: dict[str, object] | None) -> None:
+         name=endpoint,
+         items=lambda: resource,
+         primary_keys=[settings.primary_key],
+-        partition_count=1 if settings.partition_mode == "md5" else None,
++        partition_count=partition_count,
+         partition_keys=[settings.partition_key],
+         partition_mode=settings.partition_mode,
+-        partition_format="month" if settings.partition_mode == "datetime" else None,
++        partition_format=partition_format,
+         sort_mode=None,
+         supports_resume=settings.paginated,
+     )
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/settings.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/settings.py
+index 998d5f7cf3f9..a13b0ad2fc95 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/settings.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/settings.py
+@@ -1,4 +1,4 @@
+-from typing import TYPE_CHECKING
++from typing import TYPE_CHECKING, Literal
+ 
+ from posthog.dataclasses import frozen
+ 
+@@ -18,6 +18,10 @@ class PineconeEndpoint:
+     partition_key: str
+     partition_mode: "PartitionMode"
+     paginated: bool = False
++    cursor_param: str = "paginationToken"
++    # Fan-out tables are read from each parent's own data plane host and keyed by the parent's name.
++    parent: Literal["indexes", "assistants"] | None = None
++    parent_key: str | None = None
+ 
+ 
+ ENDPOINTS: dict[str, PineconeEndpoint] = {
+@@ -44,6 +48,36 @@ class PineconeEndpoint:
+         partition_mode="md5",
+         paginated=True,
+     ),
++    "namespaces": PineconeEndpoint(
++        path="/namespaces",
++        data_selector="namespaces",
++        primary_key="name",
++        partition_key="index_name",
++        partition_mode="md5",
++        paginated=True,
++        parent="indexes",
++        parent_key="index_name",
++    ),
++    "assistants": PineconeEndpoint(
++        path="/assistant/assistants",
++        data_selector="assistants",
++        primary_key="name",
++        partition_key="name",
++        partition_mode="md5",
++        paginated=True,
++        cursor_param="pagination_token",
++    ),
++    "assistant_files": PineconeEndpoint(
++        path="/files/{assistant_name}",
++        data_selector="files",
++        primary_key="id",
++        partition_key="assistant_name",
++        partition_mode="md5",
++        paginated=True,
++        cursor_param="pagination_token",
++        parent="assistants",
++        parent_key="assistant_name",
++    ),
+ }
+ 
+ INCREMENTAL_FIELDS: dict[str, list["IncrementalField"]] = {}
+diff --git a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/source.py b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/source.py
+index 4cffc33573e6..f1f0ade97a26 100644
+--- a/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/source.py
++++ b/products/warehouse_sources/backend/temporal/data_imports/sources/pinecone/source.py
+@@ -67,7 +67,7 @@ def get_source_config(self) -> SourceConfig:
+             name=ExternalDataSourceType.PINECONE,
+             category=DataWarehouseSourceCategory.DATABASES,
+             label="Pinecone",
+-            caption="Import index, collection, backup, and restore job metadata from one Pinecone project. "
++            caption="Import index, namespace, collection, backup, restore job, and assistant metadata from one Pinecone project. "
+             "Use a project API key with permission to read the resources you select.",
+             docsUrl="https://posthog.com/docs/cdp/sources/pinecone",
+             iconPath="/static/services/pinecone.png",

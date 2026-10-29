@@ -1,0 +1,864 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index 67bc8c2c71bd..28e7bcd397a7 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -14515,9 +14515,9 @@ snapshots:
+     scenes-app-settings-environment--settings-environment-csp-reporting--light:
+         hash: v1.k794b7964.1646f3afd63d8d505447395a2c6e6529787c1838844af526160ab244cc9405cd.BIByLvztkTxYaSlgHGzrSMYnnzPDd-rJyKNb1p-ZGQI
+     scenes-app-settings-environment--settings-environment-customization--dark:
+-        hash: v1.k794b7964.2019bcc081d6f0a175c27c27d1ce52aed1947e8a6faee9f5f7d504848214fc68.RpuWJ7VvVjPTAS4AgJtF0CbbMt_uNZPlDhUmG8aqTSk
++        hash: v1.k794b7964.be0bee8d0c9b9cde01e8c84d26c968b1a3a73f1daab7fcb1bf59e279e76e52ff.M0DitNAop19AScQodmRaVuJE7kkPz19dt48qypHPp_8
+     scenes-app-settings-environment--settings-environment-customization--light:
+-        hash: v1.k794b7964.9241aef090f91d37d0cf0eb993f0d248e87625cc197c25223235254585f61112.kIymVvUKgN1fP5exlEPPUtcKGIO1lh7stBWty9ynEMk
++        hash: v1.k794b7964.bc9d6b9357797f4e31793b72347fa99bb82311e8b478d7b755095834fd9ae5ed.dMj9Qe90VQii_NvD97yAbV9c7S1BG8mdyPiToZT5tWo
+     scenes-app-settings-environment--settings-environment-danger-zone--dark:
+         hash: v1.k794b7964.84e3a358a899bc5f13f4685cf4db1bfaa95d59cf95ec4763fbedcbff55171693.7TJPAEgua5huT0mRCjjjEgAPqeoveWSs7k3Oyq-cnPQ
+     scenes-app-settings-environment--settings-environment-danger-zone--light:
+@@ -14671,9 +14671,9 @@ snapshots:
+     scenes-app-settings-project--settings-project-autocapture--light:
+         hash: v1.k794b7964.49c898ef4846589e3d6ad1425769953f59683ead6194e12f4cc7686eed47dfbf.IVt6KRNxxhx0sPjmvtM727zulmaaNCF0TywtrSugnpc
+     scenes-app-settings-project--settings-project-customization--dark:
+-        hash: v1.k794b7964.2019bcc081d6f0a175c27c27d1ce52aed1947e8a6faee9f5f7d504848214fc68.LdBF_l_Ak8C0DDLpwQrfUrF7tME5a6xricLMTu4Corw
++        hash: v1.k794b7964.be0bee8d0c9b9cde01e8c84d26c968b1a3a73f1daab7fcb1bf59e279e76e52ff._ijym-h3JBCkD9lY_fDXGL-a0AaEvof28NuiHeaHo-0
+     scenes-app-settings-project--settings-project-customization--light:
+-        hash: v1.k794b7964.9241aef090f91d37d0cf0eb993f0d248e87625cc197c25223235254585f61112.y_u-V2eH6lfe4_9sHmJAa2sLmqVhMFloinEwv6rQjZA
++        hash: v1.k794b7964.bc9d6b9357797f4e31793b72347fa99bb82311e8b478d7b755095834fd9ae5ed.cdfvFDGTsulAySN4RPxTtAU4CzlKUlps6lKvgKmUTqM
+     scenes-app-settings-project--settings-project-danger-zone--dark:
+         hash: v1.k794b7964.50b22c572c7cb5f542900de9d60d5b1524be7c0087fa45e439ef9a1b920ddb8a.F34aW_MO5u9SwCivXSrG1MgLv6KwU0LFM0JnrDlFjms
+     scenes-app-settings-project--settings-project-danger-zone--light:
+diff --git a/frontend/src/generated/core/api.schemas.ts b/frontend/src/generated/core/api.schemas.ts
+index bedd7ec749fd..1b8487de5f55 100644
+--- a/frontend/src/generated/core/api.schemas.ts
++++ b/frontend/src/generated/core/api.schemas.ts
+@@ -2812,6 +2812,11 @@ export interface ProjectBackwardCompatApi {
+      * @maxLength 200
+      */
+     name?: string
++    /**
++     * ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead.
++     * @nullable
++     */
++    logo_media_id?: string | null
+     /**
+      * Short description of what the project is about. This is helpful to give our AI agents context about your project.
+      * @maxLength 1000
+@@ -3696,6 +3701,11 @@ export interface PatchedProjectBackwardCompatApi {
+      * @maxLength 200
+      */
+     name?: string
++    /**
++     * ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead.
++     * @nullable
++     */
++    logo_media_id?: string | null
+     /**
+      * Short description of what the project is about. This is helpful to give our AI agents context about your project.
+      * @maxLength 1000
+@@ -4559,6 +4569,11 @@ export interface ProjectApi {
+      * @maxLength 200
+      */
+     name?: string
++    /**
++     * ID of the uploaded image shown as this project's logo. Null when the project has no logo.
++     * @nullable
++     */
++    readonly logo_media_id: string | null
+     /**
+      * @maxLength 1000
+      * @nullable
+diff --git a/frontend/src/lib/api.mock.ts b/frontend/src/lib/api.mock.ts
+index 1b0fed49b09e..bf75ecbd7b04 100644
+--- a/frontend/src/lib/api.mock.ts
++++ b/frontend/src/lib/api.mock.ts
+@@ -196,6 +196,7 @@ export const MOCK_DEFAULT_PROJECT: ProjectType = {
+     id: MOCK_TEAM_ID,
+     name: 'MockHog App + Marketing',
+     organization_id: MOCK_ORGANIZATION_ID,
++    logo_media_id: null,
+     created_at: '2020-06-30T09:53:35.932534Z',
+     is_pending_deletion: false,
+     deletion_scheduled_at: null,
+diff --git a/frontend/src/lib/components/Account/NewAccountMenu.tsx b/frontend/src/lib/components/Account/NewAccountMenu.tsx
+index 001533817f5e..401fdb494a07 100644
+--- a/frontend/src/lib/components/Account/NewAccountMenu.tsx
++++ b/frontend/src/lib/components/Account/NewAccountMenu.tsx
+@@ -27,6 +27,7 @@ import { cn } from 'lib/utils/css-classes'
+ import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
+ import { billingLogic } from 'scenes/billing/billingLogic'
+ import { organizationLogic } from 'scenes/organizationLogic'
++import { projectLogic } from 'scenes/projectLogic'
+ import { inviteLogic } from 'scenes/settings/organization/inviteLogic'
+ import { isAuthenticatedTeam, teamLogic } from 'scenes/teamLogic'
+ import { urls } from 'scenes/urls'
+@@ -43,6 +44,7 @@ import { newAccountMenuLogic } from './newAccountMenuLogic'
+ import { OrgModal } from './OrgModal'
+ import { OrgSwitcher } from './OrgSwitcher'
+ import { pendingInvitesLogic } from './pendingInvitesLogic'
++import { ProjectLogo } from './ProjectLogo'
+ import { PendingInviteDot } from './ProjectMenu'
+ import { ProjectModal } from './ProjectModal'
+ import { ProjectSwitcher } from './ProjectSwitcher'
+@@ -68,6 +70,7 @@ export function NewAccountMenu({
+     const { reportInviteMembersButtonClicked } = useActions(eventUsageLogic)
+     const { logout } = useActions(userLogic)
+     const { currentTeam } = useValues(teamLogic)
++    const { currentProject } = useValues(projectLogic)
+     const { isAccountMenuOpen } = useValues(newAccountMenuLogic)
+     const { setAccountMenuOpen } = useActions(newAccountMenuLogic)
+     const { pendingInvites } = useValues(pendingInvitesLogic)
+@@ -189,11 +192,12 @@ export function NewAccountMenu({
+                                                     menuItem
+                                                     data-attr="new-account-menu-all-projects-button"
+                                                 >
+-                                                    <div className="Lettermark bg-[var(--color-bg-fill-button-tertiary-active)] size-4 dark:text-tertiary text-[8px]">
+-                                                        {String.fromCodePoint(
+-                                                            currentTeam.name.codePointAt(0)!
+-                                                        ).toLocaleUpperCase()}
+-                                                    </div>
++                                                    <ProjectLogo
++                                                        name={currentTeam.name}
++                                                        projectId={currentTeam.project_id}
++                                                        mediaId={currentProject?.logo_media_id}
++                                                        size="xsmall"
++                                                    />
+                                                     <span className="truncate font-semibold">
+                                                         {currentTeam ? projectNameWithoutFirstEmoji : 'Select project'}
+                                                     </span>
+diff --git a/frontend/src/lib/components/Account/ProjectLogo.tsx b/frontend/src/lib/components/Account/ProjectLogo.tsx
+new file mode 100644
+index 000000000000..bddcf44e1a1e
+--- /dev/null
++++ b/frontend/src/lib/components/Account/ProjectLogo.tsx
+@@ -0,0 +1,26 @@
++import { UploadedLogo } from 'lib/lemon-ui/UploadedLogo/UploadedLogo'
++import { cn } from 'lib/utils/css-classes'
++
++export interface ProjectLogoProps {
++    name: string
++    projectId: number
++    mediaId?: string | null
++    size: 'xsmall' | 'small'
++}
++
++export function ProjectLogo({ name, projectId, mediaId, size }: ProjectLogoProps): JSX.Element {
++    if (mediaId) {
++        return <UploadedLogo name={name} entityId={projectId} mediaId={mediaId} size={size} />
++    }
++
++    return (
++        <div
++            className={cn(
++                'Lettermark bg-[var(--color-bg-fill-button-tertiary-active)] dark:text-tertiary',
++                size === 'xsmall' ? 'size-4 text-[8px]' : 'size-5'
++            )}
++        >
++            {String.fromCodePoint(name.codePointAt(0)!).toLocaleUpperCase()}
++        </div>
++    )
++}
+diff --git a/frontend/src/lib/components/Account/ProjectMenu.tsx b/frontend/src/lib/components/Account/ProjectMenu.tsx
+index e2341f7df340..090769c9047e 100644
+--- a/frontend/src/lib/components/Account/ProjectMenu.tsx
++++ b/frontend/src/lib/components/Account/ProjectMenu.tsx
+@@ -11,12 +11,14 @@ import {
+     PopoverPrimitiveTrigger,
+ } from 'lib/ui/PopoverPrimitive/PopoverPrimitive'
+ import { cn } from 'lib/utils/css-classes'
++import { projectLogic } from 'scenes/projectLogic'
+ import { isAuthenticatedTeam, teamLogic } from 'scenes/teamLogic'
+ 
+ import { TeamBasicType } from '~/types'
+ 
+ import { pendingInvitesLogic } from './pendingInvitesLogic'
+ import { ProjectCombobox } from './ProjectCombobox'
++import { ProjectLogo } from './ProjectLogo'
+ 
+ export function ProjectName({ team, className }: { team: TeamBasicType; className?: string }): JSX.Element {
+     return (
+@@ -56,6 +58,7 @@ export function ProjectMenu({
+ }): JSX.Element | null {
+     const iconOnly = buttonProps?.iconOnly ?? false
+     const { currentTeam } = useValues(teamLogic)
++    const { currentProject } = useValues(projectLogic)
+     const { pendingInvites } = useValues(pendingInvitesLogic)
+     const hasPendingInvites = pendingInvites.length > 0
+ 
+@@ -74,9 +77,12 @@ export function ProjectMenu({
+                     )}
+                 >
+                     {iconOnly ? (
+-                        <div className="Lettermark bg-[var(--color-bg-fill-button-tertiary-active)] w-5 h-5 dark:text-tertiary">
+-                            {String.fromCodePoint(currentTeam.name.codePointAt(0)!).toLocaleUpperCase()}
+-                        </div>
++                        <ProjectLogo
++                            name={currentTeam.name}
++                            projectId={currentTeam.project_id}
++                            mediaId={currentProject?.logo_media_id}
++                            size="small"
++                        />
+                     ) : (
+                         <span className="truncate">{currentTeam.name ?? 'Project'}</span>
+                     )}
+diff --git a/frontend/src/scenes/projectLogic.ts b/frontend/src/scenes/projectLogic.ts
+index dcc0039f9d79..f5f8b3eca0c9 100644
+--- a/frontend/src/scenes/projectLogic.ts
++++ b/frontend/src/scenes/projectLogic.ts
+@@ -4,6 +4,7 @@ import { router } from 'kea-router'
+ import posthog from 'posthog-js'
+ 
+ import api, { ApiConfig } from 'lib/api'
++import { ApiError } from 'lib/api-error'
+ import { lemonToast } from 'lib/lemon-ui/LemonToast'
+ import { isUserLoggedIn } from 'lib/utils/getAppContext'
+ import { getAppContext } from 'lib/utils/getAppContext'
+@@ -345,6 +346,12 @@ export const projectLogic = kea<projectLogicType>([
+         locationChanged: ({ pathname }) => {
+             actions.guardPendingDeletion(pathname, values.currentProject?.is_pending_deletion)
+         },
++        updateCurrentProjectFailure: ({ error, errorObject }) => {
++            const apiError = errorObject as ApiError | undefined
++            if (apiError?.status === 409) {
++                lemonToast.error(apiError.detail || error)
++            }
++        },
+         guardPendingDeletion: ({ pathname, isPendingDeletion }) => {
+             const onLockoutScreen = pathname.endsWith(urls.projectPendingDeletion())
+             if (isPendingDeletion && !isPathOpenWhileProjectPendingDeletion(pathname)) {
+diff --git a/frontend/src/scenes/settings/SettingsMap.tsx b/frontend/src/scenes/settings/SettingsMap.tsx
+index 8a5c542c9aca..2556f12854f9 100644
+--- a/frontend/src/scenes/settings/SettingsMap.tsx
++++ b/frontend/src/scenes/settings/SettingsMap.tsx
+@@ -310,9 +310,10 @@ export const SETTINGS_MAP: SettingSection[] = [
+             {
+                 id: 'display-name',
+                 title: 'Project details',
+-                description: 'Name this project and label it so you can group and find it across your organization.',
++                description:
++                    'Name this project, add a logo and label it so you can group and find it across your organization.',
+                 component: <ProjectDetails />,
+-                keywords: ['name', 'rename', 'label', 'tag', 'tags'],
++                keywords: ['name', 'rename', 'logo', 'icon', 'image', 'label', 'tag', 'tags'],
+             },
+             {
+                 id: 'date-and-time',
+diff --git a/frontend/src/scenes/settings/environment/TeamSettings.tsx b/frontend/src/scenes/settings/environment/TeamSettings.tsx
+index 5f263a58671c..8339ef7a3cb9 100644
+--- a/frontend/src/scenes/settings/environment/TeamSettings.tsx
++++ b/frontend/src/scenes/settings/environment/TeamSettings.tsx
+@@ -1,5 +1,4 @@
+ import { useActions, useValues } from 'kea'
+-import { useState } from 'react'
+ 
+ import { IconRefresh } from '@posthog/icons'
+ import { LemonButton, LemonDialog, LemonInput, LemonLabel, LemonSkeleton } from '@posthog/lemon-ui'
+@@ -14,10 +13,7 @@ import { LemonField } from 'lib/lemon-ui/LemonField'
+ import { Link } from 'lib/lemon-ui/Link'
+ import { userHasAccess } from 'lib/utils/accessControlUtils'
+ import { inStorybook, inStorybookTestRunner } from 'lib/utils/dom'
+-import { organizationLogic } from 'scenes/organizationLogic'
+ import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
+-import { isProjectNameTaken } from 'scenes/project/isProjectNameTaken'
+-import { projectLogic } from 'scenes/projectLogic'
+ import { teamLogic } from 'scenes/teamLogic'
+ 
+ import { AccessControlLevel, AccessControlResourceType } from '~/types'
+@@ -26,51 +22,6 @@ import { BusinessModelConfig } from './BusinessModelConfig'
+ import { TimezoneConfig } from './TimezoneConfig'
+ import { WeekStartConfig } from './WeekStartConfig'
+ 
+-const NAME_TAKEN_REASON = 'There is already a project with this name in this organization. Choose a different name.'
+-
+-export function TeamDisplayName(): JSX.Element {
+-    const { currentTeamLoading } = useValues(teamLogic)
+-    const { updateCurrentTeam } = useActions(teamLogic)
+-    const { currentProject } = useValues(projectLogic)
+-    const { currentOrganization } = useValues(organizationLogic)
+-    const [name, setName] = useState(currentProject?.name || '')
+-    const restrictedReason = useRestrictedArea({
+-        scope: RestrictionScope.Project,
+-        minimumAccessLevel: TeamMembershipLevel.Admin,
+-    })
+-
+-    // A rename patches the project, so the uniqueness rule applies to the project's name. That can
+-    // differ from the environment's name, which is what `teamLogic` holds.
+-    const trimmedName = name.trim()
+-    const nameTaken = isProjectNameTaken(trimmedName, currentOrganization?.projects, {
+-        excludeProjectId: currentProject?.id,
+-        currentName: currentProject?.name,
+-    })
+-    const renameDisabledReason =
+-        restrictedReason ||
+-        (!trimmedName && 'Enter a name') ||
+-        (!currentProject && 'Loading the project') ||
+-        (trimmedName === currentProject?.name && "This is already the project's name") ||
+-        (nameTaken && NAME_TAKEN_REASON) ||
+-        null
+-
+-    return (
+-        <div className="deprecated-space-y-4 max-w-160">
+-            <LemonField.Pure error={nameTaken ? NAME_TAKEN_REASON : undefined}>
+-                <LemonInput value={name} onChange={setName} disabledReason={restrictedReason} />
+-            </LemonField.Pure>
+-            <LemonButton
+-                type="primary"
+-                onClick={() => updateCurrentTeam({ name: trimmedName })}
+-                disabledReason={renameDisabledReason}
+-                loading={currentTeamLoading}
+-            >
+-                Rename project
+-            </LemonButton>
+-        </div>
+-    )
+-}
+-
+ export function WebSnippet(): JSX.Element {
+     const { currentTeam, currentTeamLoading } = useValues(teamLogic)
+ 
+diff --git a/frontend/src/scenes/settings/project/ProjectDetails.tsx b/frontend/src/scenes/settings/project/ProjectDetails.tsx
+index 2a3cc27bc2c5..cf4fcf82613b 100644
+--- a/frontend/src/scenes/settings/project/ProjectDetails.tsx
++++ b/frontend/src/scenes/settings/project/ProjectDetails.tsx
+@@ -1,14 +1,14 @@
+ import { LemonLabel } from 'lib/lemon-ui/LemonLabel'
+-import { TeamDisplayName } from 'scenes/settings/environment/TeamSettings'
+ 
++import { ProjectNameAndLogo } from './ProjectNameAndLogo'
+ import { ProjectTags } from './ProjectTags'
+ 
+ export function ProjectDetails(): JSX.Element {
+     return (
+         <div className="flex flex-col gap-4 max-w-160">
+             <div className="flex flex-col gap-1">
+-                <LemonLabel>Display name</LemonLabel>
+-                <TeamDisplayName />
++                <LemonLabel>Name & logo</LemonLabel>
++                <ProjectNameAndLogo />
+             </div>
+             <div className="flex flex-col gap-1">
+                 <LemonLabel>Tags</LemonLabel>
+diff --git a/frontend/src/scenes/settings/project/ProjectNameAndLogo.tsx b/frontend/src/scenes/settings/project/ProjectNameAndLogo.tsx
+new file mode 100644
+index 000000000000..def107f218d2
+--- /dev/null
++++ b/frontend/src/scenes/settings/project/ProjectNameAndLogo.tsx
+@@ -0,0 +1,137 @@
++import { useActions, useValues } from 'kea'
++import { useEffect, useState } from 'react'
++
++import { IconUpload, IconX } from '@posthog/icons'
++import { LemonButton, LemonFileInput, LemonInput, lemonToast } from '@posthog/lemon-ui'
++
++import { RestrictionScope, useRestrictedArea } from 'lib/components/RestrictedArea'
++import { TeamMembershipLevel } from 'lib/constants'
++import { useUploadFiles } from 'lib/hooks/useUploadFiles'
++import { LemonField } from 'lib/lemon-ui/LemonField'
++import { UploadedLogo } from 'lib/lemon-ui/UploadedLogo/UploadedLogo'
++import { organizationLogic } from 'scenes/organizationLogic'
++import { isProjectNameTaken } from 'scenes/project/isProjectNameTaken'
++import { projectLogic } from 'scenes/projectLogic'
++
++const NAME_TAKEN_REASON = 'There is already a project with this name in this organization. Choose a different name.'
++
++export function ProjectNameAndLogo(): JSX.Element {
++    const { currentProject, currentProjectLoading } = useValues(projectLogic)
++    const { updateCurrentProject } = useActions(projectLogic)
++    const { currentOrganization } = useValues(organizationLogic)
++
++    const [name, setName] = useState(currentProject?.name || '')
++    const [logoMediaId, setLogoMediaId] = useState(currentProject?.logo_media_id ?? null)
++
++    useEffect(() => {
++        setName(currentProject?.name || '')
++        setLogoMediaId(currentProject?.logo_media_id ?? null)
++    }, [currentProject?.name, currentProject?.logo_media_id])
++
++    const { setFilesToUpload, filesToUpload, uploading } = useUploadFiles({
++        onUpload: (_, __, uploadedMediaId) => setLogoMediaId(uploadedMediaId),
++        onError: (detail) => lemonToast.error(`Couldn't upload the logo: ${detail}`),
++    })
++
++    const restrictionReason = useRestrictedArea({
++        scope: RestrictionScope.Project,
++        minimumAccessLevel: TeamMembershipLevel.Admin,
++    })
++
++    // A rename patches the project, so the uniqueness rule applies to the project's name. That can
++    // differ from the environment's name, which is what `teamLogic` holds.
++    const trimmedName = name.trim()
++    const nameTaken = isProjectNameTaken(trimmedName, currentOrganization?.projects, {
++        excludeProjectId: currentProject?.id,
++        currentName: currentProject?.name,
++    })
++    const nameChanged = trimmedName !== currentProject?.name
++    const logoChanged = logoMediaId !== (currentProject?.logo_media_id ?? null)
++
++    const saveDisabledReason =
++        restrictionReason ||
++        (!currentProject && 'Loading the project') ||
++        (!trimmedName && 'Enter a name') ||
++        (nameTaken && NAME_TAKEN_REASON) ||
++        (uploading && 'Wait for the logo to finish uploading') ||
++        (!nameChanged && !logoChanged && 'No changes to save') ||
++        null
++
++    return (
++        <div className="flex gap-6 items-start">
++            <LemonFileInput
++                accept="image/*"
++                multiple={false}
++                onChange={setFilesToUpload}
++                loading={uploading}
++                value={filesToUpload}
++                disabledReason={restrictionReason}
++                callToAction={
++                    <div className="relative flex flex-col items-center gap-1">
++                        <UploadedLogo
++                            name={currentProject?.name || '?'}
++                            entityId={currentProject?.id || 1}
++                            mediaId={logoMediaId}
++                            size="xlarge"
++                            outlinedLettermark
++                        />
++                        {logoMediaId && !restrictionReason && (
++                            <div className="absolute -inset-2 group">
++                                <LemonButton
++                                    icon={<IconX />}
++                                    onClick={(e) => {
++                                        e.preventDefault()
++                                        e.stopPropagation()
++                                        setLogoMediaId(null)
++                                    }}
++                                    size="small"
++                                    tooltip="Remove logo"
++                                    tooltipPlacement="right"
++                                    noPadding
++                                    className="absolute right-0 top-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
++                                    data-attr="project-logo-remove"
++                                />
++                            </div>
++                        )}
++                        <LemonButton
++                            type="tertiary"
++                            size="xsmall"
++                            icon={<IconUpload className="text-secondary" />}
++                            disabledReason={restrictionReason}
++                            data-attr="project-logo-upload"
++                        >
++                            <span className="text-secondary font-normal">Upload</span>
++                        </LemonButton>
++                    </div>
++                }
++            />
++            <div className="flex-1 max-w-120 flex flex-col gap-3">
++                <LemonField.Pure error={nameTaken ? NAME_TAKEN_REASON : undefined}>
++                    <LemonInput
++                        value={name}
++                        onChange={setName}
++                        disabledReason={restrictionReason}
++                        placeholder="Project name"
++                        data-attr="project-name-input-settings"
++                    />
++                </LemonField.Pure>
++                <div>
++                    <LemonButton
++                        type="primary"
++                        onClick={() =>
++                            updateCurrentProject({
++                                ...(nameChanged ? { name: trimmedName } : {}),
++                                ...(logoChanged ? { logo_media_id: logoMediaId } : {}),
++                            })
++                        }
++                        disabledReason={saveDisabledReason}
++                        loading={currentProjectLoading}
++                        data-attr="project-name-and-logo-save"
++                    >
++                        Save
++                    </LemonButton>
++                </div>
++            </div>
++        </div>
++    )
++}
+diff --git a/frontend/src/scenes/teamLogic.tsx b/frontend/src/scenes/teamLogic.tsx
+index 7ea6d3b57279..1e7a39c82a50 100644
+--- a/frontend/src/scenes/teamLogic.tsx
++++ b/frontend/src/scenes/teamLogic.tsx
+@@ -131,6 +131,13 @@ export interface teamLogicActions {
+         currentProject: ProjectType | null
+         payload?: any
+     } // projectLogic
++    updateCurrentProjectSuccess: (
++        currentProject: ProjectType,
++        payload?: Partial<ProjectType> | undefined
++    ) => {
++        currentProject: ProjectType
++        payload?: Partial<ProjectType>
++    } // projectLogic
+     loadUser: (resetOnFailure?: boolean | undefined) => {
+         resetOnFailure: boolean | undefined
+     } // userLogic
+@@ -350,7 +357,7 @@ export const teamLogic = kea<teamLogicType>([
+             organizationLogic,
+             ['loadCurrentOrganization'],
+             projectLogic,
+-            ['loadCurrentProjectSuccess'],
++            ['loadCurrentProjectSuccess', 'updateCurrentProjectSuccess'],
+         ],
+     })),
+     actions({
+@@ -647,12 +654,17 @@ export const teamLogic = kea<teamLogicType>([
+                 currentTeam?.customer_analytics_config ?? ({} as CustomerAnalyticsConfig),
+         ],
+     })),
+-    listeners(({ actions }) => ({
++    listeners(({ actions, values }) => ({
+         loadCurrentTeamSuccess: ({ currentTeam }) => {
+             if (currentTeam) {
+                 ApiConfig.setCurrentTeamId(currentTeam.id)
+             }
+         },
++        updateCurrentProjectSuccess: ({ currentProject, payload }) => {
++            if (payload && 'name' in payload && values.currentTeam?.project_id === currentProject.id) {
++                actions.loadCurrentTeamSuccess({ ...values.currentTeam, name: currentProject.name })
++            }
++        },
+         updateCurrentTeamSuccess: () => {
+             // Reload user after team update to keep user object in sync
+             actions.loadUser()
+diff --git a/frontend/src/types.ts b/frontend/src/types.ts
+index 93a8aac9fd81..6964b4492046 100644
+--- a/frontend/src/types.ts
++++ b/frontend/src/types.ts
+@@ -44,6 +44,7 @@ import type {
+     OrganizationMemberNoticeApi,
+     OrganizationTeamBasicApi,
+     OrganizationNotificationLockApi,
++    ProjectApi,
+ } from '~/generated/core/api.schemas'
+ import { RootAssistantMessage } from '~/queries/schema/schema-assistant-messages'
+ import type {
+@@ -755,7 +756,7 @@ export interface CorrelationConfigType {
+     excluded_event_names?: string[]
+ }
+ 
+-export interface ProjectType extends ProjectBasicType {
++export interface ProjectType extends ProjectBasicType, Pick<ProjectApi, 'logo_media_id'> {
+     created_at: string
+     is_pending_deletion: boolean
+     deletion_scheduled_at: string | null
+diff --git a/posthog/api/project.py b/posthog/api/project.py
+index 7f65fe6fa345..310c2f866fec 100644
+--- a/posthog/api/project.py
++++ b/posthog/api/project.py
+@@ -22,7 +22,7 @@
+ from posthog.api import project_tags
+ from posthog.api.project_secret_api_key import _enforce_caller_holds_scopes
+ from posthog.api.routing import TeamAndOrgViewSetMixin
+-from posthog.api.scoped_related_fields import TeamScopedPrimaryKeyRelatedField
++from posthog.api.scoped_related_fields import ProjectScopedPrimaryKeyRelatedField, TeamScopedPrimaryKeyRelatedField
+ from posthog.api.shared import ProjectBackwardCompatBasicSerializer
+ from posthog.api.tagged_item import TaggedItemSerializerMixin
+ 
+@@ -105,6 +105,7 @@
+ from posthog.models.team.team import CURRENCY_CODE_CHOICES, Team
+ from posthog.models.team.team_caching import set_team_in_cache
+ from posthog.models.team.util import actions_that_require_current_team
++from posthog.models.uploaded_media import UploadedMedia
+ from posthog.models.utils import UUIDT
+ from posthog.permissions import (
+     CREATE_ACTIONS,
+@@ -585,6 +586,11 @@ class ProjectSerializer(TaggedItemSerializerMixin, serializers.ModelSerializer):
+     """
+ 
+     tags = project_tags.tags_field()
++    logo_media_id = serializers.UUIDField(
++        read_only=True,
++        allow_null=True,
++        help_text="ID of the uploaded image shown as this project's logo. Null when the project has no logo.",
++    )
+ 
+     class Meta:
+         model = Project
+@@ -593,6 +599,7 @@ class Meta:
+             "id",
+             "organization_id",
+             "name",
++            "logo_media_id",
+             "product_description",
+             "created_at",
+             "is_pending_deletion",
+@@ -670,6 +677,15 @@ class ProjectBackwardCompatSerializer(
+             "ID of the dashboard shown on the product analytics Home tab. Null shows the built-in generic view."
+         ),
+     )  # Compat with TeamSerializer
++    logo_media_id = ProjectScopedPrimaryKeyRelatedField(
++        source="logo_media",
++        queryset=UploadedMedia.objects.all(),
++        pk_field=serializers.UUIDField(),
++        required=False,
++        allow_null=True,
++        error_messages={"does_not_exist": "This image was not uploaded to this project."},
++        help_text="ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead.",
++    )
+     # No `default` on purpose: a default value would be auto-injected into every create payload, which trips the
+     # admin-only-fields-on-creation gate in validate_team_attrs and blocks members allowed to create projects.
+     base_currency = serializers.ChoiceField(choices=CURRENCY_CODE_CHOICES, required=False)  # Compat with TeamSerializer
+@@ -709,6 +725,7 @@ class Meta:
+             "id",
+             "organization",
+             "name",
++            "logo_media_id",
+             "product_description",
+             "tags",
+             "created_at",
+@@ -1477,7 +1494,11 @@ def get_fields(self) -> dict[str, serializers.Field]:
+         return {name: field for name, field in super().get_fields().items() if not field.read_only}
+ 
+     class Meta(ProjectBackwardCompatSerializer.Meta):
+-        fields = tuple(field for field in ProjectBackwardCompatSerializer.Meta.fields if field != "home_tab_dashboard")
++        fields = tuple(
++            field
++            for field in ProjectBackwardCompatSerializer.Meta.fields
++            if field not in ("home_tab_dashboard", "logo_media_id")
++        )
+ 
+ 
+ @extend_schema(extensions={"x-product": "core"})
+diff --git a/posthog/api/scoped_related_fields.py b/posthog/api/scoped_related_fields.py
+index 99b467bba8bb..4a729e04023d 100644
+--- a/posthog/api/scoped_related_fields.py
++++ b/posthog/api/scoped_related_fields.py
+@@ -19,6 +19,10 @@ def get_queryset(self):
+         return qs.none()
+ 
+ 
++class ProjectScopedPrimaryKeyRelatedField(TeamScopedPrimaryKeyRelatedField):
++    scope_field = "team__project_id"
++
++
+ class OrgScopedPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
+     """Auto-filters queryset by organization from context. Fails safe to .none()."""
+ 
+diff --git a/posthog/api/team/team_config.py b/posthog/api/team/team_config.py
+index 285bacb1a4f1..0cf006545684 100644
+--- a/posthog/api/team/team_config.py
++++ b/posthog/api/team/team_config.py
+@@ -176,6 +176,7 @@ class Meta:
+     "is_demo",
+     "app_urls",
+     "access_control",
++    "logo_media",
+     # Renaming a project/environment is admin-only (the settings UI gates TeamDisplayName behind
+     # useRestrictedArea(Admin)). Excluded from the create-time gate below so members allowed to
+     # create projects can still name them.
+diff --git a/posthog/management/migration_analysis/hot_table_acknowledged_migrations.txt b/posthog/management/migration_analysis/hot_table_acknowledged_migrations.txt
+index d5c30210dd66..cfafc3e89afd 100644
+--- a/posthog/management/migration_analysis/hot_table_acknowledged_migrations.txt
++++ b/posthog/management/migration_analysis/hot_table_acknowledged_migrations.txt
+@@ -26,3 +26,4 @@ posthog.1341_organization_uses_most_specific_access_resolution
+ posthog.1348_drop_organization_is_hipaa_column
+ posthog.1366_project_deletion_scheduled_at
+ posthog.1392_organization_member_notice
++posthog.1402_project_logo_media
+diff --git a/posthog/migrations/1402_project_logo_media.py b/posthog/migrations/1402_project_logo_media.py
+new file mode 100644
+index 000000000000..31624b2cff66
+--- /dev/null
++++ b/posthog/migrations/1402_project_logo_media.py
+@@ -0,0 +1,24 @@
++import django.db.models.deletion
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    dependencies = [
++        ("posthog", "1401_drop_userproductlist_table"),
++    ]
++
++    operations = [
++        migrations.AddField(
++            model_name="project",
++            name="logo_media",
++            field=models.ForeignKey(
++                blank=True,
++                db_constraint=False,
++                db_index=False,
++                null=True,
++                on_delete=django.db.models.deletion.SET_NULL,
++                related_name="+",
++                to="posthog.uploadedmedia",
++            ),
++        ),
++    ]
+diff --git a/posthog/migrations/1403_project_logo_media_index.py b/posthog/migrations/1403_project_logo_media_index.py
+new file mode 100644
+index 000000000000..17ff267bd432
+--- /dev/null
++++ b/posthog/migrations/1403_project_logo_media_index.py
+@@ -0,0 +1,22 @@
++from django.db import migrations, models
++
++from posthog.migration_helpers import SafeAddIndexConcurrently
++
++
++class Migration(migrations.Migration):
++    atomic = False
++
++    dependencies = [
++        ("posthog", "1402_project_logo_media"),
++    ]
++
++    operations = [
++        SafeAddIndexConcurrently(
++            model_name="project",
++            index=models.Index(
++                condition=models.Q(("logo_media__isnull", False)),
++                fields=["logo_media"],
++                name="posthog_project_logo_media_idx",
++            ),
++        ),
++    ]
+diff --git a/posthog/migrations/max_migration.txt b/posthog/migrations/max_migration.txt
+index a7bdeb7b93c4..49bc233b06a4 100644
+--- a/posthog/migrations/max_migration.txt
++++ b/posthog/migrations/max_migration.txt
+@@ -1 +1 @@
+-1401_drop_userproductlist_table
++1403_project_logo_media_index
+diff --git a/posthog/models/project.py b/posthog/models/project.py
+index 698149d5204e..5d0c53ac9fe9 100644
+--- a/posthog/models/project.py
++++ b/posthog/models/project.py
+@@ -84,6 +84,15 @@ class Project(Taggable, UpdatedMetaFields):
+         default="Default project",
+         validators=[MinLengthValidator(1, "Project must have a name!")],
+     )
++    logo_media = models.ForeignKey(
++        "posthog.UploadedMedia",
++        on_delete=models.SET_NULL,
++        null=True,
++        blank=True,
++        db_constraint=False,
++        db_index=False,
++        related_name="+",
++    )
+     created_at = models.DateTimeField(auto_now_add=True)
+     # Deprecated in favor of CoreMemory
+     product_description = models.TextField(null=True, blank=True, max_length=1000)
+@@ -101,6 +110,15 @@ class Project(Taggable, UpdatedMetaFields):
+ 
+     objects: ProjectManager = ProjectManager()
+ 
++    class Meta:
++        indexes = [
++            models.Index(
++                fields=["logo_media"],
++                name="posthog_project_logo_media_idx",
++                condition=models.Q(logo_media__isnull=False),
++            ),
++        ]
++
+     def __str__(self):
+         if self.name:
+             return self.name
+diff --git a/products/dashboards/frontend/components/DashboardTemplates/DashboardTemplatesTable.stories.tsx b/products/dashboards/frontend/components/DashboardTemplates/DashboardTemplatesTable.stories.tsx
+index 3914c33d6d14..61f0c6e271b0 100644
+--- a/products/dashboards/frontend/components/DashboardTemplates/DashboardTemplatesTable.stories.tsx
++++ b/products/dashboards/frontend/components/DashboardTemplates/DashboardTemplatesTable.stories.tsx
+@@ -224,6 +224,7 @@ const storySecondProject: ProjectType = {
+     id: storySecondTeam.id,
+     name: storySecondTeam.name,
+     organization_id: MOCK_ORGANIZATION_ID,
++    logo_media_id: null,
+     created_at: MOCK_DEFAULT_PROJECT.created_at,
+     is_pending_deletion: false,
+     deletion_scheduled_at: null,
+diff --git a/products/desktop/packages/api-client/src/generated.ts b/products/desktop/packages/api-client/src/generated.ts
+index 23fdaae9a9bc..7e9fb29a4823 100644
+--- a/products/desktop/packages/api-client/src/generated.ts
++++ b/products/desktop/packages/api-client/src/generated.ts
+@@ -20026,6 +20026,13 @@ export namespace Schemas {
+          * onto /api/projects/ never loses a field.
+          */
+         name?: string | undefined;
++        /**
++         * A project and its settings, including the settings that live on its passthrough Team.
++         *
++         * This shape is a superset of TeamSerializer's, so a request rewritten from /api/environments/
++         * onto /api/projects/ never loses a field.
++         */
++        logo_media_id?: (string | null) | undefined;
+         /**
+          * A project and its settings, including the settings that live on its passthrough Team.
+          *
+diff --git a/services/mcp/src/api/generated.ts b/services/mcp/src/api/generated.ts
+index cc7ecd4ece20..6e69ff4823b5 100644
+--- a/services/mcp/src/api/generated.ts
++++ b/services/mcp/src/api/generated.ts
+@@ -84935,6 +84935,11 @@ export namespace Schemas {
+          * @maxLength 200
+          */
+       name?: string;
++      /**
++         * ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead.
++         * @nullable
++         */
++      logo_media_id?: string | null;
+       /**
+          * Short description of what the project is about. This is helpful to give our AI agents context about your project.
+          * @maxLength 1000
+@@ -90129,6 +90134,11 @@ export namespace Schemas {
+          * @maxLength 200
+          */
+       name?: string;
++      /**
++         * ID of the uploaded image shown as this project's logo. Null when the project has no logo.
++         * @nullable
++         */
++      readonly logo_media_id: string | null;
+       /**
+          * @maxLength 1000
+          * @nullable
+@@ -90187,6 +90197,11 @@ export namespace Schemas {
+          * @maxLength 200
+          */
+       name?: string;
++      /**
++         * ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead.
++         * @nullable
++         */
++      logo_media_id?: string | null;
+       /**
+          * Short description of what the project is about. This is helpful to give our AI agents context about your project.
+          * @maxLength 1000
+diff --git a/services/mcp/src/generated/core/api.ts b/services/mcp/src/generated/core/api.ts
+index fdb25fd466e3..a09d8e24cbe0 100644
+--- a/services/mcp/src/generated/core/api.ts
++++ b/services/mcp/src/generated/core/api.ts
+@@ -3138,6 +3138,12 @@ export const OrganizationsProjectsPartialUpdateBody = () => zod
+             .describe(
+                 'Project name. Must be unique within the organization (case-insensitive). If omitted on creation, a unique default name is generated.'
+             ),
++        logo_media_id: zod
++            .string()
++            .nullish()
++            .describe(
++                "ID of an image uploaded to this project, shown as the project's logo. Set to null to show a lettermark instead."
++            ),
+         product_description: zod
+             .string()
+             .max(organizationsProjectsPartialUpdateBodyProductDescriptionMax)
+diff --git a/services/mcp/src/tools/generated/core.ts b/services/mcp/src/tools/generated/core.ts
+index d757f98db914..6189c990b7fe 100644
+--- a/services/mcp/src/tools/generated/core.ts
++++ b/services/mcp/src/tools/generated/core.ts
+@@ -746,6 +746,9 @@ const projectSettingsUpdate = (): ToolBase<
+         if (params.name !== undefined) {
+             body['name'] = params.name
+         }
++        if (params.logo_media_id !== undefined) {
++            body['logo_media_id'] = params.logo_media_id
++        }
+         if (params.product_description !== undefined) {
+             body['product_description'] = params.product_description
+         }

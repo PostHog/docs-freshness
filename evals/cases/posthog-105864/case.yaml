@@ -1,0 +1,9 @@
+id: posthog-105864
+codePr: 105864
+mergeSha: 0298cb7450ac6480b26f1c170806ab048d5e0f34
+docsPr: 20437
+docsBaseSha: 3fe92aebb45bfbdd5b637b5c1a76f1930d94555b
+section: error-tracking
+referenceKind: carbon-unit
+pages:
+  - contents/docs/error-tracking/_snippets/cli/download.mdx

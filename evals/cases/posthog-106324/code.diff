@@ -1,0 +1,263 @@
+diff --git a/frontend/snapshots.yml b/frontend/snapshots.yml
+index fe03eb89603c..3981b5fd50c8 100644
+--- a/frontend/snapshots.yml
++++ b/frontend/snapshots.yml
+@@ -6221,9 +6221,9 @@ snapshots:
+     products-dashboards-templates-dashboard-template-item--all-versions--light:
+         hash: v1.k794b7964.58a4bbcdd839c5e177c8bccbf79bcdb62f614dba597d5034337683b0a84fd2aa.SYAyuyJdGZe1cb2h88RaMalIuEFo2g1dkuJNADOrbbA
+     products-dashboards-templates-dashboard-templates-table--default--dark:
+-        hash: v1.k794b7964.62d8d4204e20c8ad589c9b1291c7dca6b51a268b24ff9cdb28eed0e9fd39a185.qcb4vyYGW71hQl6_3ST7PV_5C8Z7r4lzpMWvJHrrQ9E
++        hash: v1.k794b7964.c3299d127a3141feb0668e1d37332e0ece55e90dbee0c7e1db562c23855db31b.dxn6lN-QvqzT6rjjGe6iMouM36QAUVeAc0sC-dFdNxk
+     products-dashboards-templates-dashboard-templates-table--default--light:
+-        hash: v1.k794b7964.16b0298d61b16c202cb582bbea923ba8d89893c4e03096a93a80f9db59e53b3e.Ksr_p0W36v4NMb2P0qsX2ezzOqdBQ5J-lO8XirUADCM
++        hash: v1.k794b7964.7b7b2b8d679f0d373f4433b79e4f9858359471b7ad3ff3b69942a3906321534f.PsGKdz-A5Qe5DV67w49rfJqSyjeNhMt7g-xc9BszWvQ
+     products-dashboards-templates-dashboardtemplatemodal--create--dark:
+         hash: v1.k794b7964.9a606fa34acff2efb269d60b9bbe3106c3e2031c5fcd2ac871f13c7f3e131a16.ryQ-EeL6jW95KP9CnQqQV-nRlMq1x6uZ_b2obz3v70w
+     products-dashboards-templates-dashboardtemplatemodal--create--light:
+diff --git a/frontend/src/scenes/dashboard/dashboardTemplateEditorLogic.ts b/frontend/src/scenes/dashboard/dashboardTemplateEditorLogic.ts
+index 68265c58167c..1fb1bfb5ffd8 100644
+--- a/frontend/src/scenes/dashboard/dashboardTemplateEditorLogic.ts
++++ b/frontend/src/scenes/dashboard/dashboardTemplateEditorLogic.ts
+@@ -12,17 +12,6 @@ import { DashboardTemplateEditorType, DashboardTemplateType, MonacoMarker, NonPo
+ import type { FeatureFlagsSet } from '../../lib/logic/featureFlagLogic'
+ import { dashboardTemplatesLogic } from './dashboards/templates/dashboardTemplatesLogic'
+ 
+-/**
+- * Refresh every mounted `dashboardTemplatesLogic` slice we use in-product:
+- * - templates tab: `default-all-templatesTab`
+- * - new dashboard chooser: `default-all` / `feature_flag-all`
+- * - dashboards page featured row: `default-featured`
+- *
+- * All four go through `findMounted` so we never dispatch into an unmounted instance.
+- * `connect.actions` did not reliably keep the templates-tab logic mounted across the
+- * editor/modal lifecycle, which surfaced as `[KEA] Can not find path … in the store.`
+- * when the post-save loader read its own reducers.
+- */
+ function refreshDashboardTemplateListsAfterMutation(): void {
+     dashboardTemplatesLogic.findMounted({ scope: 'default', templatesTabList: true })?.actions.getAllTemplates()
+     dashboardTemplatesLogic.findMounted({ scope: 'default' })?.actions.getAllTemplates()
+diff --git a/frontend/src/scenes/dashboard/dashboards/Dashboards.tsx b/frontend/src/scenes/dashboard/dashboards/Dashboards.tsx
+index b99bfc94875d..924e127b2478 100644
+--- a/frontend/src/scenes/dashboard/dashboards/Dashboards.tsx
++++ b/frontend/src/scenes/dashboard/dashboards/Dashboards.tsx
+@@ -1,6 +1,8 @@
+ import { useActions, useValues } from 'kea'
++import { router } from 'kea-router'
+ 
+-import { LemonButton } from '@posthog/lemon-ui'
++import { IconChevronDown } from '@posthog/icons'
++import { LemonButton, LemonModal } from '@posthog/lemon-ui'
+ 
+ import { AccessControlAction } from 'lib/components/AccessControlAction'
+ import { Shortcut } from 'lib/components/Shortcuts/Shortcut'
+@@ -16,6 +18,7 @@ import { newDashboardLogic } from 'scenes/dashboard/newDashboardLogic'
+ import { NewDashboardModal } from 'scenes/dashboard/NewDashboardModal'
+ import { sceneConfigurations } from 'scenes/scenes'
+ import { Scene, SceneExport } from 'scenes/sceneTypes'
++import { urls } from 'scenes/urls'
+ 
+ import { SceneContent } from '~/layout/scenes/components/SceneContent'
+ import { SceneTitleSection } from '~/layout/scenes/components/SceneTitleSection'
+@@ -36,20 +39,18 @@ export const scene: SceneExport = {
+ }
+ 
+ export function Dashboards(): JSX.Element {
++    const { searchParams } = useValues(router)
+     const { dashboardsLoading } = useValues(dashboardsModel)
+     const { setCurrentTab } = useActions(dashboardsLogic)
+     const { dashboards, currentTab, isFiltering } = useValues(dashboardsLogic)
+     const { showNewDashboardModal } = useActions(newDashboardLogic)
++    const templatesModalOpen = String(searchParams.templates) === '1'
+     const enabledTabs: LemonTab<DashboardsTab>[] = [
+         {
+             key: DashboardsTab.All,
+             label: 'All dashboards',
+         },
+         { key: DashboardsTab.Yours, label: 'My dashboards' },
+-        {
+-            key: DashboardsTab.Templates,
+-            label: 'Templates',
+-        },
+     ]
+ 
+     return (
+@@ -57,6 +58,21 @@ export function Dashboards(): JSX.Element {
+             <NewDashboardModal />
+             <DuplicateDashboardModal />
+             <DeleteDashboardModal />
++            <LemonModal
++                title="Dashboard templates"
++                isOpen={templatesModalOpen}
++                onClose={() =>
++                    router.actions.push(urls.dashboards(), {
++                        ...searchParams,
++                        templates: undefined,
++                        templateFilter: undefined,
++                    })
++                }
++                width="min(1200px, calc(100vw - 3rem))"
++                data-attr="dashboard-templates-modal"
++            >
++                {templatesModalOpen && <DashboardTemplatesTable />}
++            </LemonModal>
+             <DashboardTemplateEditor />
+             <DashboardTemplateModal />
+ 
+@@ -84,6 +100,14 @@ export function Dashboards(): JSX.Element {
+                                     data-attr="new-dashboard"
+                                     onClick={showNewDashboardModal}
+                                     type="primary"
++                                    sideAction={{
++                                        icon: <IconChevronDown />,
++                                        tooltip: 'View dashboard templates',
++                                        'aria-label': 'View dashboard templates',
++                                        'data-attr': 'view-dashboard-templates',
++                                        onClick: () =>
++                                            router.actions.push(urls.dashboards(), { ...searchParams, templates: '1' }),
++                                    }}
+                                 >
+                                     New dashboard
+                                 </LemonButton>
+@@ -103,13 +127,7 @@ export function Dashboards(): JSX.Element {
+                 rightSlotClassName="!static !justify-start !bg-transparent"
+             />
+ 
+-            <div>
+-                {currentTab === DashboardsTab.Templates ? (
+-                    <DashboardTemplatesTable />
+-                ) : dashboardsLoading || dashboards.length > 0 || isFiltering ? (
+-                    <DashboardsTableContainer />
+-                ) : null}
+-            </div>
++            <div>{dashboardsLoading || dashboards.length > 0 || isFiltering ? <DashboardsTableContainer /> : null}</div>
+         </SceneContent>
+     )
+ }
+diff --git a/frontend/src/scenes/dashboard/dashboards/DashboardsTable.tsx b/frontend/src/scenes/dashboard/dashboards/DashboardsTable.tsx
+index 62fd7f5a4107..446381540b8d 100644
+--- a/frontend/src/scenes/dashboard/dashboards/DashboardsTable.tsx
++++ b/frontend/src/scenes/dashboard/dashboards/DashboardsTable.tsx
+@@ -113,7 +113,7 @@ export function DashboardsTable({
+         {
+             title: 'Name',
+             dataIndex: 'name',
+-            width: 440,
++            width: 540,
+             render: function Render(_, { id, name, description, is_shared, user_access_level }) {
+                 const isPrimary = id === currentTeam?.primary_dashboard
+                 const canEditDashboard = accessLevelSatisfied(
+@@ -170,7 +170,7 @@ export function DashboardsTable({
+         {
+             title: 'Tags',
+             dataIndex: 'tags' as keyof DashboardType,
+-            width: 240,
++            width: 140,
+             render: function Render(tags: DashboardType['tags']) {
+                 return tags ? (
+                     <ObjectTags
+diff --git a/frontend/src/scenes/dashboard/dashboards/dashboardsLogic.ts b/frontend/src/scenes/dashboard/dashboards/dashboardsLogic.ts
+index 3d7df8383f6b..dd556ab5bed6 100644
+--- a/frontend/src/scenes/dashboard/dashboards/dashboardsLogic.ts
++++ b/frontend/src/scenes/dashboard/dashboards/dashboardsLogic.ts
+@@ -27,7 +27,6 @@ export enum DashboardsTab {
+     All = 'all',
+     Yours = 'yours',
+     Pinned = 'pinned',
+-    Templates = 'templates',
+ }
+ 
+ const DEFAULT_SORTING: Sorting = { columnKey: 'name', order: 1 }
+@@ -580,7 +579,7 @@ export const dashboardsLogic = kea<dashboardsLogicType>([
+     urlToAction(({ actions, values }) => ({
+         '/dashboard': (_, searchParams) => {
+             const requestedTab = (searchParams['tab'] as DashboardsTab | undefined) || DashboardsTab.All
+-            const tab = requestedTab === DashboardsTab.Pinned ? DashboardsTab.All : requestedTab
++            const tab = requestedTab === DashboardsTab.Yours ? DashboardsTab.Yours : DashboardsTab.All
+             if (values.currentTab !== tab) {
+                 actions.setCurrentTab(tab)
+             }
+diff --git a/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplateCopyScene.tsx b/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplateCopyScene.tsx
+index 781fae47473c..132107fbc01f 100644
+--- a/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplateCopyScene.tsx
++++ b/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplateCopyScene.tsx
+@@ -4,7 +4,6 @@ import { combineUrl, router } from 'kea-router'
+ import { LemonBanner, LemonButton, LemonSelect, LemonSkeleton, Link } from '@posthog/lemon-ui'
+ 
+ import { EmptyMessage } from 'lib/components/EmptyMessage/EmptyMessage'
+-import { DashboardsTab } from 'scenes/dashboard/dashboards/dashboardsLogic'
+ import { SceneExport } from 'scenes/sceneTypes'
+ import { urls } from 'scenes/urls'
+ 
+@@ -54,7 +53,7 @@ export function DashboardTemplateCopyScene(props: DashboardTemplateCopyLogicProp
+         ? `Copy "${sourceTemplate.template_name}" to another project`
+         : 'Copy template to another project'
+ 
+-    const templatesListUrl = combineUrl(urls.dashboards(), { tab: DashboardsTab.Templates }).url
++    const templatesListUrl = combineUrl(urls.dashboards(), { templates: '1' }).url
+     const loadFailed = sourceTemplateLoadFailed
+     const hasDestinationProjects = teamOptions.length > 0
+     const showNoDestinationsEmptyState = !sourceTemplateLoading && !loadFailed && !hasDestinationProjects
+diff --git a/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplatesTable.tsx b/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplatesTable.tsx
+index 4b48a09299fe..99e0db3e00c3 100644
+--- a/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplatesTable.tsx
++++ b/frontend/src/scenes/dashboard/dashboards/templates/DashboardTemplatesTable.tsx
+@@ -194,6 +194,7 @@ export const DashboardTemplatesTable = (): JSX.Element | null => {
+         {
+             title: 'Name',
+             dataIndex: 'template_name',
++            className: 'min-w-[220px]',
+             sorter: true,
+             render: (_, { template_name }) => {
+                 return <>{template_name}</>
+@@ -210,7 +211,7 @@ export const DashboardTemplatesTable = (): JSX.Element | null => {
+         {
+             title: 'Tags',
+             key: 'tags',
+-            className: 'min-w-48',
++            className: 'min-w-28',
+             render: (_, { tags }) => {
+                 const sortedTags = tags?.length ? [...tags].sort() : []
+                 if (sortedTags.length === 0) {
+diff --git a/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplateCopyLogic.ts b/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplateCopyLogic.ts
+index 4693c1e71426..d318d0f03a74 100644
+--- a/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplateCopyLogic.ts
++++ b/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplateCopyLogic.ts
+@@ -5,7 +5,6 @@ import { subscriptions } from 'kea-subscriptions'
+ 
+ import api from 'lib/api'
+ import { lemonToast } from 'lib/lemon-ui/LemonToast/LemonToast'
+-import { DashboardsTab } from 'scenes/dashboard/dashboards/dashboardsLogic'
+ import { organizationLogic } from 'scenes/organizationLogic'
+ import { teamLogic } from 'scenes/teamLogic'
+ import { urls } from 'scenes/urls'
+@@ -191,7 +190,7 @@ export const dashboardTemplateCopyLogic = kea<dashboardTemplateCopyLogicType>([
+                     : {}
+             )
+             dashboardTemplatesLogic.findMounted({ scope: 'default', templatesTabList: true })?.actions.getAllTemplates()
+-            router.actions.push(urls.dashboards(), { tab: DashboardsTab.Templates })
++            router.actions.push(urls.dashboards(), { templates: '1' })
+         },
+     })),
+     afterMount(({ actions, props, values }) => {
+diff --git a/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplatesLogic.tsx b/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplatesLogic.tsx
+index 0c62ed2cac93..62b97e6820b1 100644
+--- a/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplatesLogic.tsx
++++ b/frontend/src/scenes/dashboard/dashboards/templates/dashboardTemplatesLogic.tsx
+@@ -28,7 +28,7 @@ export interface DashboardTemplateProps {
+ 
+ export type DashboardTemplatesLogicProps = DashboardTemplateProps & {
+     listQuery?: Partial<Pick<DashboardTemplateListParams, 'is_featured'>>
+-    /** When true, this logic instance is scoped to the Dashboards → Templates tab (visibility filter + refresh after edits). */
++    /** When true, this logic instance is scoped to the dashboard templates modal (visibility filter + refresh after edits). */
+     templatesTabList?: boolean
+ }
+ 
+@@ -191,7 +191,7 @@ export const dashboardTemplatesLogic = kea<dashboardTemplatesLogicType>([
+                     const logicProps = props as DashboardTemplatesLogicProps
+                     const featuredOnly = logicProps.listQuery?.is_featured === true
+                     // Curated featured list (empty dashboards) must ignore `templateFilter` synced from the URL via
+-                    // `urlToAction` when the Templates tab or another surface leaves `?templateFilter=` on /dashboard.
++                    // `urlToAction` when the templates modal or another surface leaves `?templateFilter=` on /dashboard.
+                     const useSearch = !featuredOnly && values.templateFilter.length > 2
+ 
+                     let listScope: DashboardTemplateScope | undefined

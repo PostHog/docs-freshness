@@ -1,0 +1,9 @@
+id: posthog-121616
+codePr: 121616
+mergeSha: f5cfa36271f9510ccb74fc237344f18acab62e47
+docsPr: 21599
+docsBaseSha: cbd5ce0edcbf265c9bd7f0732edc8586dd5debb2
+section: product-analytics
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/product-analytics/trends/charts.mdx

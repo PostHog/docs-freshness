@@ -1,0 +1,9 @@
+id: posthog-107559
+codePr: 107559
+mergeSha: 3cecdbc72287fd3fde5497733f10a5b17c7f77e7
+docsPr: 21012
+docsBaseSha: 21d02a27a283d4bed0f4405a3d7bcdb4e54ffcca
+section: support
+referenceKind: carbon-unit
+pages:
+  - contents/docs/support/inbox.mdx

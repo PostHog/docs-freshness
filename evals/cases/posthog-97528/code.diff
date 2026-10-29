@@ -1,0 +1,616 @@
+diff --git a/products/metrics/agent/README.md b/products/metrics/agent/README.md
+index 0f008b487916..028fa334377e 100644
+--- a/products/metrics/agent/README.md
++++ b/products/metrics/agent/README.md
+@@ -1,10 +1,10 @@
+ # PostHog metrics agent
+ 
+-A small deployable image that scrapes the Prometheus `/metrics` endpoints you already expose and forwards them to PostHog as OTLP metrics.
++A small deployable image that scrapes the Prometheus `/metrics` endpoints you already expose, or pulls metrics from Google Cloud Monitoring, and forwards them to PostHog as OTLP metrics.
+ Use it when you want PostHog Metrics without touching application code: no PostHog SDK, no exporter changes.
+ 
+ Under the hood it is the OpenTelemetry Collector (contrib distribution, pinned) with a PostHog-rendered config:
+-prometheus receiver → memory_limiter + batch → otlphttp exporter pointed at PostHog ingestion.
++prometheus and/or googlecloudmonitoring receiver → memory_limiter + batch → otlphttp exporter pointed at PostHog ingestion.
+ Exemplars survive the trip: counters and histograms scraped with OpenMetrics exemplars (`trace_id`/`span_id`) become clickable trace links in the PostHog Metrics UI.
+ 
+ ## Quickstart (Docker)
+@@ -21,22 +21,91 @@ EU cloud: set `POSTHOG_HOST=https://eu.i.posthog.com`.
+ 
+ ## Environment variables
+ 
+-| Variable              | Required | Default                    | Meaning                                                                 |
+-| --------------------- | -------- | -------------------------- | ----------------------------------------------------------------------- |
+-| `POSTHOG_API_KEY`     | yes      | —                          | Project API key, sent as `Authorization: Bearer`                        |
+-| `POSTHOG_HOST`        | no       | `https://us.i.posthog.com` | PostHog ingestion origin                                                |
+-| `SCRAPE_TARGETS`      | yes\*    | —                          | Comma-separated `host:port` list to scrape                              |
+-| `SCRAPE_INTERVAL`     | no       | `15s`                      | Scrape interval                                                         |
+-| `SCRAPE_METRICS_PATH` | no       | `/metrics`                 | Metrics path on the targets                                             |
+-| `SCRAPE_JOB_NAME`     | no       | `posthog-metrics-agent`    | Prometheus job name; becomes `service_name` on every metric in PostHog  |
+-| `POSTHOG_DEBUG`       | no       | unset                      | `1`/`true`: also log exported batches to the container's stdout         |
+-| `POSTHOG_INGEST_PATH` | no       | `/i/v1/metrics`            | Advanced: override the ingest route (used by tests)                     |
+-| `SHARD_COUNT`         | no       | `1`                        | Size of an agent fleet; above 1 each instance scrapes only its share    |
+-| `SHARD_INDEX`         | no       | from hostname ordinal      | This instance's index in `0..SHARD_COUNT-1` (see Scaling out)           |
+-| `PERSIST_QUEUE`       | no       | unset                      | `1`/`true`: buffer undelivered batches to disk so restarts lose nothing |
+-| `QUEUE_DIR`           | no       | `/var/lib/posthog-agent`   | Where the persistent queue is stored                                    |
+-
+-\* not required when you mount your own scrape configs, see below.
++| Variable                         | Required | Default                    | Meaning                                                                          |
++| -------------------------------- | -------- | -------------------------- | -------------------------------------------------------------------------------- |
++| `POSTHOG_API_KEY`                | yes      | —                          | Project API key, sent as `Authorization: Bearer`                                 |
++| `POSTHOG_HOST`                   | no       | `https://us.i.posthog.com` | PostHog ingestion origin                                                         |
++| `SCRAPE_TARGETS`                 | yes\*    | —                          | Comma-separated `host:port` list to scrape                                       |
++| `SCRAPE_INTERVAL`                | no       | `15s`                      | Scrape interval                                                                  |
++| `SCRAPE_METRICS_PATH`            | no       | `/metrics`                 | Metrics path on the targets                                                      |
++| `SCRAPE_JOB_NAME`                | no       | `posthog-metrics-agent`    | Prometheus job name; becomes `service_name` on every metric in PostHog           |
++| `GCP_PROJECT_ID`                 | no       | unset                      | GCP project to pull Cloud Monitoring metrics from; setting it enables the source |
++| `GCP_METRICS`                    | yes\*\*  | —                          | Comma-separated metric types to pull                                             |
++| `GCP_METRIC_FILTERS`             | yes\*\*  | —                          | **Semicolon**-separated metric descriptor filters                                |
++| `GCP_COLLECTION_INTERVAL`        | no       | `60s`                      | Pull interval. The collector rejects values under `60s`                          |
++| `GCP_SERVICE_NAME`               | no       | `google-cloud-monitoring`  | `service_name` set on every pulled metric in PostHog                             |
++| `GOOGLE_APPLICATION_CREDENTIALS` | no       | unset                      | Path to a service account JSON key. Omit on GKE Workload Identity / GCE          |
++| `POSTHOG_DEBUG`                  | no       | unset                      | `1`/`true`: also log exported batches to the container's stdout                  |
++| `POSTHOG_INGEST_PATH`            | no       | `/i/v1/metrics`            | Advanced: override the ingest route (used by tests)                              |
++| `SHARD_COUNT`                    | no       | `1`                        | Size of an agent fleet; above 1 each instance scrapes only its share             |
++| `SHARD_INDEX`                    | no       | from hostname ordinal      | This instance's index in `0..SHARD_COUNT-1` (see Scaling out)                    |
++| `PERSIST_QUEUE`                  | no       | unset                      | `1`/`true`: buffer undeliverable batches to disk so restarts lose nothing        |
++| `QUEUE_DIR`                      | no       | `/var/lib/posthog-agent`   | Where the persistent queue is stored                                             |
++
++\* not required when you mount your own scrape configs (see Escape hatches) or set `GCP_PROJECT_ID`.
++\*\* with `GCP_PROJECT_ID`: at least one of `GCP_METRICS`, `GCP_METRIC_FILTERS`, or a mounted `gcp_metrics_list.yaml`. Filters are separated by `;`, **not** `,`, because filter expressions can contain commas (e.g. `one_of("a", "b")`).
++
++## Pull metrics from Google Cloud Monitoring
++
++Google Cloud Monitoring cannot push OTLP by itself, so the agent polls it: when `GCP_PROJECT_ID` is set, the agent calls the Cloud Monitoring `timeSeries.list` API for the metric types you list and forwards the points to PostHog, in the same pipeline as any Prometheus scrape.
++
++Use each path for what it is for:
++
++- **Prometheus scrape** — anything that exposes a `/metrics` endpoint (your apps, exporters).
++- **Direct OTLP** — application code you control (PostHog SDK `posthog.metrics`, or an OpenTelemetry exporter pointed at PostHog).
++- **Cloud Monitoring pull** — metrics only Google has: Cloud SQL, GKE, Cloud Run, load balancers, Pub/Sub, and the other managed services.
++
++```sh
++# The service account needs roles/monitoring.viewer (monitoring.timeSeries.list).
++# Keep a dedicated copy of the key readable only by the agent's uid 10001
++# (install -m 0600 -o 10001 sa.json /run/posthog-gcp/sa.json). Do not chmod 644
++# the original key: that makes the private key readable by every local user.
++docker run -d --name posthog-gcp-agent \
++  -e POSTHOG_API_KEY=<your project API key> \
++  -e GCP_PROJECT_ID=<gcp-project-id> \
++  -e GCP_METRICS=compute.googleapis.com/instance/cpu/utilization,cloudsql.googleapis.com/database/cpu/utilization \
++  -v /run/posthog-gcp/sa.json:/etc/gcp/sa.json:ro \
++  -e GOOGLE_APPLICATION_CREDENTIALS=/etc/gcp/sa.json \
++  posthog/metrics-agent:latest
++```
++
++For a prefix of metric types instead of an explicit list, use a filter:
++
++```sh
++-e GCP_METRIC_FILTERS='metric.type = starts_with("compute.googleapis.com/instance/cpu/")'
++```
++
++Both sources in one agent is fine — add `SCRAPE_TARGETS` as usual and the two receivers share the pipeline.
++
++On GKE, skip the key file and use Workload Identity instead. Create a GCP service account with `roles/monitoring.viewer`, let the agent's Kubernetes service account use it, and annotate:
++
++```sh
++gcloud iam service-accounts add-iam-policy-binding agent@<gcp-project-id>.iam.gserviceaccount.com \
++  --role roles/iam.workloadIdentityUser \
++  --member "serviceAccount:<gcp-project-id>.svc.id.goog[<namespace>/<k8s-service-account>]"
++```
++
++```yaml
++# helm values
++scrape:
++  annotationDiscovery: false
++gcp:
++  projectId: <gcp-project-id>
++  metrics:
++    - compute.googleapis.com/instance/cpu/utilization
++serviceAccount:
++  annotations:
++    iam.gke.io/gcp-service-account: agent@<gcp-project-id>.iam.gserviceaccount.com
++```
++
++(Outside Workload Identity, put the JSON key in a Secret and set `gcp.credentialsSecret.name`; the chart mounts it and sets `GOOGLE_APPLICATION_CREDENTIALS` for you.)
++
++Notes:
++
++- `GCP_COLLECTION_INTERVAL` defaults to `60s`, the collector's minimum (Cloud Sampling period for most metrics; lower values are rejected). Each `metrics_list` entry costs one `timeSeries.list` API call per interval — prefer a `metric_descriptor_filter` prefix over a long name list, and raise the interval for large lists (Cloud Monitoring API quota applies).
++- Not compatible with sharding (`SHARD_COUNT` > 1 / Helm `shards` > 1): every shard would pull the same series. Run a separate single-instance agent (or Helm release) for Cloud Monitoring.
++- The pulled metrics get `service_name = google-cloud-monitoring` (override with `GCP_SERVICE_NAME`) so they group cleanly in the Metrics UI.
++- The upstream receiver is alpha: metric naming and resource attributes can change across collector versions, and on restart there is no checkpoint, so a gap of up to one pull interval is possible.
+ 
+ ## Scaling out (sharding)
+ 
+@@ -59,7 +128,8 @@ Checked in this order:
+ 
+ 1. **Full config override**: mount a complete collector config at `/etc/posthog/config.yaml`. It is used verbatim (`${env:POSTHOG_API_KEY}`-style references still resolve). This is how the Helm chart drives the image.
+ 2. **Custom scrape configs**: mount a YAML list of Prometheus `scrape_configs` at `/etc/posthog/scrape_configs.yaml` to replace the env-generated job while keeping the PostHog exporter wiring. Tip: add `scrape_protocols: [OpenMetricsText1.0.0, OpenMetricsText0.0.1, PrometheusText0.0.4]` to each job so exemplars keep flowing.
+-3. Otherwise the scrape job is rendered from `SCRAPE_TARGETS`.
++3. **Custom Cloud Monitoring metric list**: mount a raw `metrics_list` YAML list at `/etc/posthog/gcp_metrics_list.yaml` to control exactly which metric types and filters the `googlecloudmonitoring` receiver pulls (requires `GCP_PROJECT_ID`).
++4. Otherwise the scrape job is rendered from `SCRAPE_TARGETS` and the Cloud Monitoring source from `GCP_PROJECT_ID` + `GCP_METRICS` / `GCP_METRIC_FILTERS`.
+ 
+ ## Exemplars (metric ↔ trace linking)
+ 
+@@ -70,7 +140,7 @@ Checked in this order:
+ ## Notes and limits
+ 
+ - One `service_name` per scrape job: Prometheus `job_name` maps to `service_name` in PostHog and target labels cannot override it. Run one agent (or one mounted scrape job) per logical service if you need distinct service names.
+-- Don't run bare replicas of one agent — they all scrape the same targets and double-count. To scale, use a sharded fleet (see Scaling out) so each instance takes a disjoint slice.
++- Don't run bare replicas of one agent — they all scrape the same targets (and pull the same Cloud Monitoring series) and double-count. To scale scraping, use a sharded fleet (see Scaling out) so each instance takes a disjoint slice. Cloud Monitoring is not shardable: run one puller.
+ - Metrics are rate limited server side per project; keep label cardinality sane (avoid user IDs, request IDs and the like as label values).
+ - Health endpoint for probes: `:13133`.
+ - The agent exposes its own metrics (scrape success, queue depth, points sent/dropped) at `:8888/metrics` — point your monitoring at it, or scrape it with the agent itself.
+@@ -85,7 +155,8 @@ tests/render/run.sh
+ # Helm chart render + behavior tests (needs helm):
+ tests/helm/run.sh
+ 
+-# Integration smoke test (builds the image; asserts exemplars survive scrape -> OTLP):
++# Integration smoke test (builds the image; asserts exemplars survive scrape -> OTLP,
++# and validates the rendered configs — including the GCP source — with the real collector):
+ tests/integration/run.sh
+ 
+ # Durability: scrape through a simulated outage, hard-kill, assert nothing lost:
+@@ -119,3 +190,5 @@ FROM posthog.metrics
+ WHERE service_name = 'agent-e2e'
+ GROUP BY 1, 2
+ ```
++
++The Google Cloud Monitoring source is covered by the render goldens and the offline collector `validate` step in the integration suite; a live pull needs real GCP credentials and cannot run in CI. To verify it end to end, run the agent with a service account (see above) and check for rows with `service_name = 'google-cloud-monitoring'` in the same query.
+diff --git a/products/metrics/agent/chart/posthog-metrics-agent/Chart.yaml b/products/metrics/agent/chart/posthog-metrics-agent/Chart.yaml
+index c574f5f4c770..17d9385bd21c 100644
+--- a/products/metrics/agent/chart/posthog-metrics-agent/Chart.yaml
++++ b/products/metrics/agent/chart/posthog-metrics-agent/Chart.yaml
+@@ -1,11 +1,11 @@
+ apiVersion: v2
+ name: posthog-metrics-agent
+-description: Scrapes Prometheus /metrics endpoints in your cluster and forwards them to PostHog
++description: Scrapes Prometheus /metrics endpoints in your cluster, or pulls Google Cloud Monitoring metrics, and forwards them to PostHog
+ type: application
+-version: 0.2.0
++version: 0.3.0
+ # The image tag installs pin to by default. CD publishes the image under this
+ # tag, so bump it together with `version` to release a new agent.
+-appVersion: 0.2.0
++appVersion: 0.3.0
+ home: https://posthog.com/docs/metrics
+ sources:
+     - https://github.com/PostHog/posthog/tree/master/products/metrics/agent
+diff --git a/products/metrics/agent/chart/posthog-metrics-agent/templates/_helpers.tpl b/products/metrics/agent/chart/posthog-metrics-agent/templates/_helpers.tpl
+index 8e0496fd5134..14200132bc3c 100644
+--- a/products/metrics/agent/chart/posthog-metrics-agent/templates/_helpers.tpl
++++ b/products/metrics/agent/chart/posthog-metrics-agent/templates/_helpers.tpl
+@@ -60,10 +60,19 @@ final __address__, after the annotation port rewrite.
+ {{- end }}
+ 
+ {{- define "posthog-metrics-agent.collectorConfig" -}}
+-{{- if and (not .Values.scrape.annotationDiscovery) (not .Values.scrape.staticTargets) (not .Values.scrape.extraScrapeConfigs) }}
+-{{- fail "at least one of scrape.annotationDiscovery, scrape.staticTargets or scrape.extraScrapeConfigs must be set" }}
++{{- $scrape := or .Values.scrape.annotationDiscovery .Values.scrape.staticTargets .Values.scrape.extraScrapeConfigs }}
++{{- $gcp := .Values.gcp.projectId }}
++{{- if and (not $scrape) (not $gcp) }}
++{{- fail "at least one of scrape.annotationDiscovery, scrape.staticTargets, scrape.extraScrapeConfigs or gcp.projectId must be set" }}
++{{- end }}
++{{- if and $gcp (gt (int .Values.shards) 1) }}
++{{- fail "gcp.projectId cannot be combined with shards > 1: every shard would pull the same Cloud Monitoring series. Run a separate release for Google Cloud Monitoring" }}
++{{- end }}
++{{- if and $gcp (not .Values.gcp.metrics) (not .Values.gcp.metricFilters) }}
++{{- fail "gcp.metrics or gcp.metricFilters is required when gcp.projectId is set" }}
+ {{- end }}
+ receivers:
++{{- if $scrape }}
+     prometheus:
+         config:
+             scrape_configs:
+@@ -112,6 +121,19 @@ receivers:
+ {{- with .Values.scrape.extraScrapeConfigs }}
+ {{ tpl . $ | indent 16 }}
+ {{- end }}
++{{- end }}
++{{- if $gcp }}
++    googlecloudmonitoring:
++        project_id: {{ .Values.gcp.projectId }}
++        collection_interval: {{ .Values.gcp.collectionInterval }}
++        metrics_list:
++{{- range .Values.gcp.metrics }}
++            - metric_name: '{{ . | replace "'" "''" }}'
++{{- end }}
++{{- range .Values.gcp.metricFilters }}
++            - metric_descriptor_filter: '{{ . | replace "'" "''" }}'
++{{- end }}
++{{- end }}
+ 
+ processors:
+     # Shed load instead of buffering unbounded memory when PostHog is unreachable.
+@@ -120,6 +142,15 @@ processors:
+         limit_mib: 512
+         spike_limit_mib: 128
+     batch:
++{{- if $gcp }}
++    # Cloud Monitoring resources carry no service.name; give them one so they
++    # group in the Metrics UI. `insert` never overrides a scraped job_name.
++    resource/gcp:
++        attributes:
++            - key: service.name
++              value: '{{ .Values.gcp.serviceName | default "google-cloud-monitoring" | replace "'" "''" }}'
++              action: insert
++{{- end }}
+ 
+ exporters:
+     otlphttp:
+@@ -161,7 +192,7 @@ service:
+     extensions: [health_check{{ if .Values.persistence.enabled }}, file_storage{{ end }}]
+     pipelines:
+         metrics:
+-            receivers: [prometheus]
+-            processors: [memory_limiter, batch]
++            receivers: [{{ if $scrape }}prometheus{{ end }}{{ if and $scrape $gcp }}, {{ end }}{{ if $gcp }}googlecloudmonitoring{{ end }}]
++            processors: [memory_limiter, {{ if $gcp }}resource/gcp, {{ end }}batch]
+             exporters: [otlphttp]
+ {{- end }}
+diff --git a/products/metrics/agent/chart/posthog-metrics-agent/templates/deployment.yaml b/products/metrics/agent/chart/posthog-metrics-agent/templates/deployment.yaml
+index df815655f96d..e26af21afe81 100644
+--- a/products/metrics/agent/chart/posthog-metrics-agent/templates/deployment.yaml
++++ b/products/metrics/agent/chart/posthog-metrics-agent/templates/deployment.yaml
+@@ -67,6 +67,10 @@ spec:
+                       - name: PERSIST_QUEUE
+                         value: '1'
+                       {{- end }}
++                      {{- if .Values.gcp.credentialsSecret.name }}
++                      - name: GOOGLE_APPLICATION_CREDENTIALS
++                        value: /var/run/secrets/gcp/{{ .Values.gcp.credentialsSecret.key }}
++                      {{- end }}
+                       {{- range $k, $v := .Values.podEnv }}
+                       - name: {{ $k }}
+                         value: {{ $v | quote }}
+@@ -80,6 +84,11 @@ spec:
+                       - name: queue
+                         mountPath: /var/lib/posthog-agent
+                       {{- end }}
++                      {{- if .Values.gcp.credentialsSecret.name }}
++                      - name: gcp-credentials
++                        mountPath: /var/run/secrets/gcp
++                        readOnly: true
++                      {{- end }}
+                   ports:
+                       - name: health
+                         containerPort: 13133
+@@ -104,6 +113,11 @@ spec:
+                   persistentVolumeClaim:
+                       claimName: {{ include "posthog-metrics-agent.fullname" . }}-queue
+                 {{- end }}
++                {{- if .Values.gcp.credentialsSecret.name }}
++                - name: gcp-credentials
++                  secret:
++                      secretName: {{ .Values.gcp.credentialsSecret.name }}
++                {{- end }}
+             {{- with .Values.nodeSelector }}
+             nodeSelector:
+                 {{- toYaml . | nindent 16 }}
+diff --git a/products/metrics/agent/chart/posthog-metrics-agent/templates/serviceaccount.yaml b/products/metrics/agent/chart/posthog-metrics-agent/templates/serviceaccount.yaml
+index 31c3eb0d1f22..3691606dc579 100644
+--- a/products/metrics/agent/chart/posthog-metrics-agent/templates/serviceaccount.yaml
++++ b/products/metrics/agent/chart/posthog-metrics-agent/templates/serviceaccount.yaml
+@@ -5,4 +5,8 @@ metadata:
+     name: {{ include "posthog-metrics-agent.serviceAccountName" . }}
+     labels:
+         {{- include "posthog-metrics-agent.labels" . | nindent 8 }}
++    {{- with .Values.serviceAccount.annotations }}
++    annotations:
++        {{- toYaml . | nindent 8 }}
++    {{- end }}
+ {{- end }}
+diff --git a/products/metrics/agent/chart/posthog-metrics-agent/values.yaml b/products/metrics/agent/chart/posthog-metrics-agent/values.yaml
+index fc35be85c086..03a7ce304965 100644
+--- a/products/metrics/agent/chart/posthog-metrics-agent/values.yaml
++++ b/products/metrics/agent/chart/posthog-metrics-agent/values.yaml
+@@ -39,6 +39,27 @@ scrape:
+ # the full env surface.
+ podEnv: {}
+ 
++# Pull metrics from Google Cloud Monitoring in addition to (or instead of)
++# Prometheus scraping. Set projectId to enable. Not compatible with shards > 1:
++# every shard would pull the same series. Run a separate release for Google
++# Cloud Monitoring instead. A GCP-only install sets
++# scrape.annotationDiscovery: false and may set rbac.create: false.
++gcp:
++    projectId: ''
++    # Metric types to pull, e.g. ['compute.googleapis.com/instance/cpu/utilization'].
++    metrics: []
++    # Metric descriptor filters, e.g. ['metric.type = starts_with("compute.googleapis.com/")'].
++    metricFilters: []
++    # Minimum 60s (rejected by the collector below that: Cloud Monitoring quota).
++    collectionInterval: 60s
++    # service_name set on every pulled metric in PostHog.
++    serviceName: google-cloud-monitoring
++    # Service account JSON key in an existing Secret. Leave name empty on GKE
++    # with Workload Identity (annotate the service account below instead).
++    credentialsSecret:
++        name: ''
++        key: credentials.json
++
+ # Disk-backed delivery queue: samples scraped while PostHog is unreachable
+ # survive pod restarts and deliver on recovery. Without it the queue is
+ # in-memory and a restart during an outage drops whatever was buffered.
+@@ -60,6 +81,9 @@ rbac:
+ serviceAccount:
+     create: true
+     name: ''
++    # e.g. GKE Workload Identity for Google Cloud Monitoring:
++    # iam.gke.io/gcp-service-account: agent@my-project.iam.gserviceaccount.com
++    annotations: {}
+ 
+ nodeSelector: {}
+ tolerations: []
+diff --git a/products/metrics/agent/config/config.yaml.tmpl b/products/metrics/agent/config/config.yaml.tmpl
+index aa59fed4c58f..3014bbd475a4 100644
+--- a/products/metrics/agent/config/config.yaml.tmpl
++++ b/products/metrics/agent/config/config.yaml.tmpl
+@@ -1,8 +1,6 @@
+ receivers:
+-    prometheus:
+-        config:
+-            scrape_configs:
+-#__SCRAPE_CONFIGS__
++#__PROMETHEUS_RECEIVER__
++#__GCP_RECEIVER__
+ 
+ processors:
+     # Shed load instead of buffering unbounded memory when PostHog is unreachable.
+@@ -11,6 +9,7 @@ processors:
+         limit_mib: 512
+         spike_limit_mib: 128
+     batch:
++#__GCP_RESOURCE_PROCESSOR__
+ 
+ exporters:
+ #__DEBUG_EXPORTER__
+@@ -44,6 +43,6 @@ service:
+     extensions: [__SERVICE_EXTENSIONS__]
+     pipelines:
+         metrics:
+-            receivers: [prometheus]
+-            processors: [memory_limiter, batch]
++            receivers: [__PIPELINE_RECEIVERS__]
++            processors: [__PIPELINE_PROCESSORS__]
+             exporters: [__PIPELINE_EXPORTERS__]
+diff --git a/products/metrics/agent/entrypoint.sh b/products/metrics/agent/entrypoint.sh
+index 3afedb9e3290..12d1cdad821a 100755
+--- a/products/metrics/agent/entrypoint.sh
++++ b/products/metrics/agent/entrypoint.sh
+@@ -2,15 +2,19 @@
+ # Renders the OpenTelemetry Collector config for the PostHog metrics agent,
+ # then execs the collector. See README.md for the env var surface.
+ #
+-# Config resolution order:
+-#   1. $CONFIG_DIR/config.yaml          - full config override, used verbatim
+-#   2. $CONFIG_DIR/scrape_configs.yaml  - custom scrape_configs spliced into the template
+-#   3. SCRAPE_TARGETS env var           - static scrape job rendered from env
++# Config resolution order. Sources are additive: prometheus scraping and
++# Google Cloud Monitoring can both feed the same pipeline.
++#   1. $CONFIG_DIR/config.yaml            - full config override, used verbatim
++#   2. $CONFIG_DIR/scrape_configs.yaml    - custom scrape_configs spliced into the template
++#   3. SCRAPE_TARGETS env var             - static scrape job rendered from env
++#   4. $CONFIG_DIR/gcp_metrics_list.yaml  - custom metrics_list for the GCM receiver
++#   5. GCP_PROJECT_ID + GCP_METRICS / GCP_METRIC_FILTERS - GCM receiver rendered from env
+ #
+ # Scalar values (API key, host, interval, ...) are left as ${env:VAR} references
+ # for the collector's native config substitution, so secrets never pass through
+-# this script. Only the scrape_configs block structure is rendered here, because
+-# env substitution cannot expand a comma-separated string into a YAML list.
++# this script. Only the scrape_configs and metrics_list block structures are
++# rendered here, because env substitution cannot expand a comma-separated
++# string into a YAML list.
+ #
+ # RENDER_ONLY=1 prints the resolved config and exits (used by tests/render).
+ set -eu
+@@ -73,28 +77,31 @@ if [ -z "${POSTHOG_API_KEY:-}" ]; then
+     exit 1
+ fi
+ 
+-SNIPPET=$(mktemp)
+-trap 'rm -f "$SNIPPET"' EXIT
++PROM_SNIPPET=$(mktemp)
++GCP_SNIPPET=$(mktemp)
++trap 'rm -f "$PROM_SNIPPET" "$GCP_SNIPPET"' EXIT
+ 
++# Double single quotes so a value stays valid inside YAML single quotes.
++yaml_squote() {
++    printf '%s' "$1" | sed "s/'/''/g"
++}
++
++# --- prometheus source ---
+ if [ -f "$CONFIG_DIR/scrape_configs.yaml" ]; then
+     # Re-indent the mounted scrape_configs list under the prometheus receiver.
+-    awk '{ if ($0 == "") print ""; else print "                " $0 }' \
+-        "$CONFIG_DIR/scrape_configs.yaml" >"$SNIPPET"
+-else
+-    if [ -z "${SCRAPE_TARGETS:-}" ]; then
+-        echo "error: SCRAPE_TARGETS is required (comma-separated host:port list)," \
+-            "unless you mount $CONFIG_DIR/scrape_configs.yaml or $CONFIG_DIR/config.yaml" >&2
+-        exit 1
+-    fi
+-
++    {
++        printf '%s\n' '    prometheus:' '        config:' '            scrape_configs:'
++        awk '{ if ($0 == "") print ""; else print "                " $0 }' \
++            "$CONFIG_DIR/scrape_configs.yaml"
++    } >"$PROM_SNIPPET"
++elif [ -n "${SCRAPE_TARGETS:-}" ]; then
+     TARGETS=""
+     OLDIFS=$IFS
+     IFS=,
+     for target in $SCRAPE_TARGETS; do
+         target=$(printf '%s' "$target" | sed 's/^ *//;s/ *$//')
+         [ -n "$target" ] || continue
+-        # Double single quotes so the target stays valid inside YAML quotes.
+-        target=$(printf '%s' "$target" | sed "s/'/''/g")
++        target=$(yaml_squote "$target")
+         if [ -n "$TARGETS" ]; then
+             TARGETS="$TARGETS, '$target'"
+         else
+@@ -108,7 +115,10 @@ else
+         exit 1
+     fi
+ 
+-    cat >"$SNIPPET" <<EOF
++    cat >"$PROM_SNIPPET" <<EOF
++    prometheus:
++        config:
++            scrape_configs:
+                 - job_name: '\${env:SCRAPE_JOB_NAME:-posthog-metrics-agent}'
+                   scrape_interval: '\${env:SCRAPE_INTERVAL:-15s}'
+                   metrics_path: '\${env:SCRAPE_METRICS_PATH:-/metrics}'
+@@ -119,7 +129,7 @@ else
+ EOF
+ 
+     if [ "$SHARD_COUNT" -gt 1 ]; then
+-        cat >>"$SNIPPET" <<EOF
++        cat >>"$PROM_SNIPPET" <<EOF
+                   # Shard $SHARD_INDEX of $SHARD_COUNT: keep only targets that hash to this shard.
+                   relabel_configs:
+                       - source_labels: [__address__]
+@@ -133,6 +143,82 @@ EOF
+     fi
+ fi
+ 
++PROM_ENABLED=0
++[ -s "$PROM_SNIPPET" ] && PROM_ENABLED=1
++
++# --- google cloud monitoring source ---
++GCP_ENABLED=0
++if [ -n "${GCP_PROJECT_ID:-}" ]; then
++    GCP_ENABLED=1
++fi
++if [ "$GCP_ENABLED" -eq 0 ] && {
++    [ -n "${GCP_METRICS:-}" ] || [ -n "${GCP_METRIC_FILTERS:-}" ] || [ -f "$CONFIG_DIR/gcp_metrics_list.yaml" ]
++}; then
++    echo "error: GCP_PROJECT_ID is required when GCP_METRICS or GCP_METRIC_FILTERS is set" \
++        "or $CONFIG_DIR/gcp_metrics_list.yaml is mounted" >&2
++    exit 1
++fi
++if [ "$GCP_ENABLED" -eq 1 ]; then
++    if [ "$SHARD_COUNT" -gt 1 ]; then
++        echo "error: GCP_PROJECT_ID cannot be combined with SHARD_COUNT > 1" \
++            "(every shard would pull the same Cloud Monitoring series);" \
++            "run a separate single-instance agent for Google Cloud Monitoring" >&2
++        exit 1
++    fi
++    if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ ! -r "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
++        echo "error: GOOGLE_APPLICATION_CREDENTIALS points to '$GOOGLE_APPLICATION_CREDENTIALS'" \
++            "which is missing or not readable by uid 10001" >&2
++        exit 1
++    fi
++
++    cat >"$GCP_SNIPPET" <<EOF
++    googlecloudmonitoring:
++        project_id: '\${env:GCP_PROJECT_ID}'
++        collection_interval: '\${env:GCP_COLLECTION_INTERVAL:-60s}'
++        metrics_list:
++EOF
++    if [ -f "$CONFIG_DIR/gcp_metrics_list.yaml" ]; then
++        # Re-indent the mounted metrics_list under the receiver.
++        awk '{ if ($0 == "") print ""; else print "            " $0 }' \
++            "$CONFIG_DIR/gcp_metrics_list.yaml" >>"$GCP_SNIPPET"
++    else
++        if [ -n "${GCP_METRICS:-}" ]; then
++            OLDIFS=$IFS
++            IFS=,
++            for metric in $GCP_METRICS; do
++                metric=$(printf '%s' "$metric" | sed 's/^ *//;s/ *$//')
++                [ -n "$metric" ] || continue
++                printf "            - metric_name: '%s'\n" "$(yaml_squote "$metric")" >>"$GCP_SNIPPET"
++            done
++            IFS=$OLDIFS
++        fi
++        if [ -n "${GCP_METRIC_FILTERS:-}" ]; then
++            # Filters can contain commas (one_of("a", "b")), so they split on
++            # semicolons, which never appear in the filter grammar.
++            OLDIFS=$IFS
++            IFS=';'
++            for filter in $GCP_METRIC_FILTERS; do
++                filter=$(printf '%s' "$filter" | sed 's/^ *//;s/ *$//')
++                [ -n "$filter" ] || continue
++                printf "            - metric_descriptor_filter: '%s'\n" "$(yaml_squote "$filter")" >>"$GCP_SNIPPET"
++            done
++            IFS=$OLDIFS
++        fi
++    fi
++    if ! grep -q 'metric_' "$GCP_SNIPPET"; then
++        echo "error: GCP_METRICS or GCP_METRIC_FILTERS is required with GCP_PROJECT_ID" \
++            "(or mount $CONFIG_DIR/gcp_metrics_list.yaml with at least one entry)" >&2
++        exit 1
++    fi
++fi
++
++if [ "$PROM_ENABLED" -eq 0 ] && [ "$GCP_ENABLED" -eq 0 ]; then
++    echo "error: SCRAPE_TARGETS is required (comma-separated host:port list)," \
++        "unless you mount $CONFIG_DIR/scrape_configs.yaml or $CONFIG_DIR/config.yaml," \
++        "or set GCP_PROJECT_ID to pull from Google Cloud Monitoring" >&2
++    exit 1
++fi
++
+ DEBUG_ENABLED=0
+ case "${POSTHOG_DEBUG:-}" in
+     1 | true | TRUE | yes) DEBUG_ENABLED=1 ;;
+@@ -143,10 +229,30 @@ case "${PERSIST_QUEUE:-}" in
+     1 | true | TRUE | yes) PERSIST_ENABLED=1 ;;
+ esac
+ 
+-awk -v snippet="$SNIPPET" -v debug="$DEBUG_ENABLED" -v persist="$PERSIST_ENABLED" '
+-    $0 == "#__SCRAPE_CONFIGS__" {
+-        while ((getline line < snippet) > 0) print line
+-        close(snippet)
++awk -v prom="$PROM_SNIPPET" -v gcp="$GCP_SNIPPET" -v prom_on="$PROM_ENABLED" -v gcp_on="$GCP_ENABLED" \
++    -v debug="$DEBUG_ENABLED" -v persist="$PERSIST_ENABLED" '
++    function splice(file) {
++        while ((getline line < file) > 0) print line
++        close(file)
++    }
++    $0 == "#__PROMETHEUS_RECEIVER__" {
++        if (prom_on == "1") splice(prom)
++        next
++    }
++    $0 == "#__GCP_RECEIVER__" {
++        if (gcp_on == "1") splice(gcp)
++        next
++    }
++    $0 == "#__GCP_RESOURCE_PROCESSOR__" {
++        if (gcp_on == "1") {
++            print "    # Cloud Monitoring resources carry no service.name; give them one so they"
++            print "    # group in the Metrics UI. `insert` never overrides a scraped job_name."
++            print "    resource/gcp:"
++            print "        attributes:"
++            print "            - key: service.name"
++            print "              value: \x27${env:GCP_SERVICE_NAME:-google-cloud-monitoring}\x27"
++            print "              action: insert"
++        }
+         next
+     }
+     $0 == "#__DEBUG_EXPORTER__" {
+@@ -173,6 +279,24 @@ awk -v snippet="$SNIPPET" -v debug="$DEBUG_ENABLED" -v persist="$PERSIST_ENABLED
+         }
+         next
+     }
++    index($0, "__PIPELINE_RECEIVERS__") {
++        if (prom_on == "1" && gcp_on == "1") {
++            receivers = "prometheus, googlecloudmonitoring"
++        } else if (gcp_on == "1") {
++            receivers = "googlecloudmonitoring"
++        } else {
++            receivers = "prometheus"
++        }
++        sub(/__PIPELINE_RECEIVERS__/, receivers)
++        print
++        next
++    }
++    index($0, "__PIPELINE_PROCESSORS__") {
++        processors = (gcp_on == "1") ? "memory_limiter, resource/gcp, batch" : "memory_limiter, batch"
++        sub(/__PIPELINE_PROCESSORS__/, processors)
++        print
++        next
++    }
+     index($0, "__SERVICE_EXTENSIONS__") {
+         extensions = (persist == "1") ? "health_check, file_storage" : "health_check"
+         sub(/__SERVICE_EXTENSIONS__/, extensions)

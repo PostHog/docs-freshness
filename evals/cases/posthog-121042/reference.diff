@@ -1,0 +1,27 @@
+diff --git a/contents/docs/self-driving/inbox/sources.mdx b/contents/docs/self-driving/inbox/sources.mdx
+index 2e752cdce4a8..769b17ad2554 100644
+--- a/contents/docs/self-driving/inbox/sources.mdx
++++ b/contents/docs/self-driving/inbox/sources.mdx
+@@ -209,14 +209,17 @@ Customer support tickets and conversations. The inbox turns actionable bug repor
+ 
+ Errors and exceptions from external error monitoring services. The inbox surfaces new errors and error patterns for investigation.
+ 
+-- Sentry
+-- Rollbar
+-- Bugsnag
+-- Honeybadger
+-- Raygun
+ - AppSignal
+ - Azure Application Insights
++- Bugsnag
++- Checkly
+ - Google Play Console
++- Honeybadger
++- Raygun
++- Roark
++- Rollbar
++- Sentry
++- Trigger.dev
+ 
+ ### Security scanners
+ 

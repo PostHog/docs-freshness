@@ -1,0 +1,15 @@
+id: posthog-112419
+codePr: 112419
+mergeSha: 5d56aa3a03786de96853dd4d090779fe740a45dc
+docsPr: 20821
+docsBaseSha: ed34f8439079aa9d191b8c9b51e3aada7307bba1
+section: cdp
+referenceKind: carbon-unit
+pages:
+  - contents/docs/cdp/batch-exports/bigquery.mdx
+  - contents/docs/cdp/batch-exports/databricks.mdx
+  - contents/docs/cdp/batch-exports/index.mdx
+  - contents/docs/cdp/batch-exports/postgres.mdx
+  - contents/docs/cdp/batch-exports/redshift.mdx
+  - contents/docs/cdp/batch-exports/s3.md
+  - contents/docs/cdp/batch-exports/snowflake.mdx

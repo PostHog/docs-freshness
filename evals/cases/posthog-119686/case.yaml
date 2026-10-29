@@ -1,0 +1,9 @@
+id: posthog-119686
+codePr: 119686
+mergeSha: 772fc9b1a7d1acd948068a5d69f5f3745c97f8a0
+docsPr: 21434
+docsBaseSha: 2ced4c13f43e22d01266d334d2d774059254efd4
+section: data
+referenceKind: unedited-inkeep
+pages:
+  - contents/docs/data/cohorts.mdx
