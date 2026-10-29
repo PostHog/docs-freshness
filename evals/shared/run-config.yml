@@ -1,0 +1,4 @@
+docsRepo: PostHog/posthog.com
+vale:
+    version: 3.13.1
+    configRef: 15653dd6bc3c4dc53400c958da94d99bbdf2d752

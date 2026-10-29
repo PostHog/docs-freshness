@@ -22,8 +22,9 @@ test('the committed snapshot is valid and every Inkeep draft belongs to a case',
     assert.deepEqual(orphanDrafts, [])
 })
 
-test('every unedited Inkeep draft matches its reference on pages and lines', () => {
-    const uneditedScores = scoreDrafts(inkeepDraftsDir).filter((score) => score.referenceKind === 'unedited-inkeep')
+test('every unedited Inkeep draft matches its reference on pages and lines', async () => {
+    const { scores } = await scoreDrafts(inkeepDraftsDir)
+    const uneditedScores = scores.filter((score) => score.referenceKind === 'unedited-inkeep')
     assert.ok(uneditedScores.length > 0, 'the snapshot holds no unedited Inkeep cases')
     for (const score of uneditedScores) {
         assert.deepEqual(

@@ -1,3 +1,4 @@
 node_modules/
 evals/results/
 evals/.build/
+evals/.cache/
