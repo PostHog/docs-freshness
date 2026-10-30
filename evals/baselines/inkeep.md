@@ -1,6 +1,6 @@
 # inkeep
 
-Merge-ready rate 0.16 ± 0.02 over 3 rep(s) (Inkeep historical 0.65).
+Merge-ready rate 0.16 ± 0.02 over 3 rep(s).
 
 | metric                                    | value |
 | ----------------------------------------- | ----- |

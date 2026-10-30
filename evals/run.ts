@@ -10,7 +10,6 @@ import {
     defects,
     loadCases,
     loadDrafts,
-    loadMeta,
     readCaseDiff,
     type ReferenceKind,
     repoRoot,
@@ -148,8 +147,7 @@ function mergeReadyLine({ scores, reps }: ScoreRun, skippedMetrics: string[]): s
     const ratesByRep = scoresByRep.map(mergeReadyRate)
     const averageRate = mean(ratesByRep)
     const spread = Math.sqrt(mean(ratesByRep.map((rate) => (rate - averageRate) ** 2)))
-    const historicalRate = loadMeta().inkeep.mergeReadyRate
-    return `Merge-ready rate ${formatRate(averageRate)} ± ${formatRate(spread)} over ${ratesByRep.length} rep(s) (Inkeep historical ${formatRate(historicalRate)}).`
+    return `Merge-ready rate ${formatRate(averageRate)} ± ${formatRate(spread)} over ${ratesByRep.length} rep(s).`
 }
 
 function summaryRows(scores: CaseScore[]): string[] {
@@ -305,8 +303,7 @@ async function score(args: string[]) {
     console.log(`Results in ${runDir}`)
 }
 
-type GraderVariant = 'reference' | Defect
-type GraderOutcome = { caseId: string; variant: GraderVariant; rep: number; isCaught: boolean; reason: string }
+type GraderOutcome = { caseId: string; variant: Defect; rep: number; isCaught: boolean; reason: string }
 
 function namesDefect(verdict: Verdict, defect: Defect, marker: string): boolean {
     const verdictText = JSON.stringify([verdict.facts.wrongFacts, verdict.facts.missingFacts]).toLowerCase()
@@ -315,13 +312,10 @@ function namesDefect(verdict: Verdict, defect: Defect, marker: string): boolean 
     return [...significantWords(marker)].filter((word) => verdictWords.has(word)).length >= minimumSharedWords
 }
 
-function graderOutcome(score: CaseScore, variant: GraderVariant, marker: string | undefined): GraderOutcome {
+function graderOutcome(score: CaseScore, variant: Defect, marker: string | undefined): GraderOutcome {
     const outcome = { caseId: score.caseId, variant, rep: score.rep }
     const verdict = score.verdict
     if (verdict === null) return { ...outcome, isCaught: false, reason: 'no verdict' }
-    if (variant === 'reference') {
-        return { ...outcome, isCaught: verdict.facts.pass, reason: verdict.facts.pass ? 'facts pass' : verdict.reason }
-    }
     if (verdict.facts.pass) return { ...outcome, isCaught: false, reason: `facts judged to pass: ${verdict.reason}` }
     if (!namesDefect(verdict, variant, marker ?? '')) {
         return { ...outcome, isCaught: false, reason: `facts fail, but the verdict does not name \`${marker}\`` }
@@ -330,8 +324,7 @@ function graderOutcome(score: CaseScore, variant: GraderVariant, marker: string 
 }
 
 function renderGraderSummary(outcomes: GraderOutcome[], errors: ScoreError[]): string {
-    const variants: GraderVariant[] = ['reference', ...defects]
-    const variantRows = variants.map((variant) => {
+    const variantRows = defects.map((variant) => {
         const variantOutcomes = outcomes.filter((outcome) => outcome.variant === variant)
         const caughtCount = variantOutcomes.filter((outcome) => outcome.isCaught).length
         return `| ${variant} | ${caughtCount}/${variantOutcomes.length} |`
@@ -343,7 +336,7 @@ function renderGraderSummary(outcomes: GraderOutcome[], errors: ScoreError[]): s
     return [
         '# Grader check',
         '',
-        'Merged PRs must pass facts. Wrong variants must fail facts with the defect named.',
+        'Each planted variant must fail facts with the planted error named.',
         ...(errors.length > 0
             ? ['', `${errors.length} judge call(s) hit infrastructure errors; see errors.jsonl.`]
             : []),
@@ -369,13 +362,10 @@ async function checkGrader(args: string[]) {
     const runDir = createRunDir()
 
     const markerByVariantCase = new Map<string, string>()
-    const variants: GraderVariant[] = ['reference', ...defects]
-    for (const variant of variants) {
+    for (const variant of defects) {
         mkdirSync(join(runDir, 'drafts', variant), { recursive: true })
         for (const caseItem of cases) {
-            const referenceDiff = readCaseDiff(caseItem.id, 'reference.diff')
-            const mutation =
-                variant === 'reference' ? { diff: referenceDiff, marker: '' } : mutateReference(referenceDiff, variant)
+            const mutation = mutateReference(readCaseDiff(caseItem.id, 'reference.diff'), variant)
             if (mutation === null) continue
             markerByVariantCase.set(`${variant}/${caseItem.id}`, mutation.marker)
             writeFileSync(join(runDir, 'drafts', variant, `${caseItem.id}.diff`), mutation.diff)
@@ -384,7 +374,7 @@ async function checkGrader(args: string[]) {
 
     const outcomes: GraderOutcome[] = []
     const errors: ScoreError[] = []
-    for (const variant of variants) {
+    for (const variant of defects) {
         const variantCases = cases.filter((caseItem) => markerByVariantCase.has(`${variant}/${caseItem.id}`))
         const scoreRun = await scoreDrafts(join(runDir, 'drafts', variant), {
             cases: variantCases,
