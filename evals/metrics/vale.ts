@@ -85,6 +85,12 @@ async function ensureCommit(docsRepo: string, sha: string) {
     if (!hasCommit) await git(['fetch', '--filter=blob:none', 'origin', sha])
 }
 
+export async function readDocsRepoFile(docsRepo: string, sha: string, path: string): Promise<string> {
+    await ensureCommit(docsRepo, sha)
+    const { stdout } = await git(['show', `${sha}:${path}`])
+    return stdout
+}
+
 async function extractPaths(sha: string, paths: string[], into: string) {
     const { stdout } = await git(['ls-tree', '-r', '--name-only', sha, '--', ...paths])
     const existingPaths = stdout.split('\n').filter((path) => path !== '')

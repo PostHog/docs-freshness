@@ -5,9 +5,15 @@ import { z } from 'zod'
 import type { Case } from '../load-cases.ts'
 
 export const VerdictSchema = z.object({
-    mergeReady: z.boolean(),
-    wrongFacts: z.array(z.object({ claim: z.string(), why: z.string() })),
-    missingFacts: z.array(z.string()),
+    facts: z.object({
+        pass: z.boolean(),
+        wrongFacts: z.array(z.object({ claim: z.string(), why: z.string() })),
+        missingFacts: z.array(z.string()),
+    }),
+    style: z.object({
+        pass: z.boolean(),
+        violations: z.array(z.object({ quote: z.string(), rule: z.string() })),
+    }),
     reason: z.string(),
 })
 export type Verdict = z.infer<typeof VerdictSchema>
@@ -17,20 +23,19 @@ export type JudgeConfig = {
     maxTokens: number
     criterion: string
 }
-export type JudgeInput = { case: Case; codeDiff: string; referenceDiff: string; draftDiff: string }
+export type JudgeInput = { case: Case; codeDiff: string; draftDiff: string }
 export type Judge = (input: JudgeInput) => Promise<Verdict>
 
 export class JudgeError extends Error {}
 
-const caseContext = ({ case: caseItem, codeDiff, referenceDiff }: JudgeInput) =>
+const caseContext = ({ case: caseItem, codeDiff }: JudgeInput) =>
     [
         `<case id="${caseItem.id}" section="${caseItem.section}">`,
         `<code_change pr="PostHog/posthog#${caseItem.codePr}">\n${codeDiff}\n</code_change>`,
-        `<reference_docs_change pr="PostHog/posthog.com#${caseItem.docsPr}">\n${referenceDiff}\n</reference_docs_change>`,
         '</case>',
     ].join('\n')
 
-export function createJudge(config: JudgeConfig, criteria: Record<string, string>): Judge {
+export function createJudge(config: JudgeConfig, criteria: Record<string, string>, styleGuide: string): Judge {
     const rubric = criteria[config.criterion]
     if (rubric === undefined) throw new Error(`criteria.yaml has no rubric named ${config.criterion}`)
     const client = new Anthropic()
@@ -41,7 +46,14 @@ export function createJudge(config: JudgeConfig, criteria: Record<string, string
             max_tokens: config.maxTokens,
             betas: ['server-side-fallback-2026-07-01'],
             fallbacks: 'default',
-            system: rubric,
+            system: [
+                { type: 'text', text: rubric },
+                {
+                    type: 'text',
+                    text: `<style_guide>\n${styleGuide}\n</style_guide>`,
+                    cache_control: { type: 'ephemeral' },
+                },
+            ],
             messages: [
                 {
                     role: 'user',

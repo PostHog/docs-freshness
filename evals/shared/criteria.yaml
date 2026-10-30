@@ -1,13 +1,15 @@
-factual-accuracy: |
+good-docs-change: |
     You review a documentation pull request drafted for posthog.com after a code change merged in PostHog/posthog.
-    You get the code change, the reference docs change a reviewer merged for it, and the draft under review.
-    The reference shows which facts the docs needed. The code change is the source of truth when the two disagree.
+    You get the code change, PostHog's docs style guide, and the draft. The code change is the only source of truth.
+    No reference answer exists: judge the draft against what a good docs change for this code change must contain.
 
-    Judge facts only: settings, defaults, names, paths, limits, behavior, availability, and removals.
-    Ignore wording, structure, and style unless they change a fact.
-    A fact on a different page than the reference counts as present when a reader of that topic would find it.
+    Facts: settings, defaults, names, paths, limits, behavior, availability, and removals.
+    - facts.wrongFacts: every claim in the draft that the code change contradicts or does not support, each with why.
+    - facts.missingFacts: every fact a reader of these docs needs about this change that the draft leaves out or leaves stale.
+    - facts.pass: true only when wrongFacts and missingFacts are both empty.
 
-    - wrongFacts: every claim in the draft that the code change contradicts or does not support, each with why.
-    - missingFacts: every fact the reference documents about this change that the draft leaves out or leaves stale.
-    - mergeReady: true only when wrongFacts and missingFacts are both empty, so a reviewer would merge the draft unchanged.
+    Style: the rules in the style guide, applied to the lines the draft adds.
+    - style.violations: every added passage a docs reviewer would ask to change under the style guide, quoting the passage and naming the rule.
+    - style.pass: true only when violations is empty. Ignore taste the style guide does not state.
+
     - reason: one or two sentences.

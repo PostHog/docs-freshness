@@ -16,7 +16,7 @@ import {
     repoRoot,
 } from './load-cases.ts'
 import { diffStats } from './metrics/diff-stats.ts'
-import { prepareVale, type ValeRunner, type ValeStats } from './metrics/vale.ts'
+import { prepareVale, readDocsRepoFile, type ValeRunner, type ValeStats } from './metrics/vale.ts'
 import { minimumSharedWords, mutateReference, significantWords } from './mutate.ts'
 
 export type CaseScore = {
@@ -39,7 +39,7 @@ type DeterministicScore = Omit<CaseScore, 'rep' | 'verdict' | 'isMergeReady'>
 type RunConfig = {
     docsRepo: string
     vale: { version: string; configRef: string }
-    judge: JudgeConfig & { reps: number; parallelRequests: number }
+    judge: JudgeConfig & { styleGuidePath: string; reps: number; parallelRequests: number }
 }
 
 const resultsDir = join(repoRoot, 'evals/results')
@@ -58,7 +58,7 @@ async function mapInParallel<T>(items: T[], limit: number, handleItem: (item: T)
 function mergeReadiness(score: Omit<CaseScore, 'isMergeReady'>, canScoreMergeReady: boolean): boolean | null {
     if (!canScoreMergeReady || !score.hasDraft) return null
     if (score.vale === null || score.verdict === null || !score.vale.draftApplies) return false
-    return score.verdict.mergeReady && score.vale.valeErrorsOnAddedLines === 0
+    return score.verdict.facts.pass && score.verdict.style.pass && score.vale.valeErrorsOnAddedLines === 0
 }
 
 export async function scoreDrafts(
@@ -107,7 +107,6 @@ export async function scoreDrafts(
                 const verdict = await judge({
                     case: caseItem,
                     codeDiff: readCaseDiff(caseItem.id, 'code.diff'),
-                    referenceDiff: readCaseDiff(caseItem.id, 'reference.diff'),
                     draftDiff: draftDiff ?? '',
                 })
                 verdictByCaseRep.set(caseRep, verdict)
@@ -137,6 +136,8 @@ const isScoredForMergeReady = (score: CaseScore) => score.isMergeReady !== null
 
 const mergeReadyRate = (scores: CaseScore[]) =>
     mean(scores.filter(isScoredForMergeReady).map((score) => (score.isMergeReady ? 1 : 0)))
+const passRate = (verdicts: Verdict[], passes: (verdict: Verdict) => boolean) =>
+    mean(verdicts.map((verdict) => (passes(verdict) ? 1 : 0)))
 
 function mergeReadyLine({ scores, reps }: ScoreRun, skippedMetrics: string[]): string {
     if (skippedMetrics.length > 0) return `Merge-ready rate not scored: ${skippedMetrics.join(' and ')} skipped.`
@@ -165,11 +166,20 @@ function summaryRows(scores: CaseScore[]): string[] {
     const mergeReadyRows = scores.some(isScoredForMergeReady)
         ? [`| merge-ready rate | ${formatRate(mergeReadyRate(scores))} |`]
         : []
+    const verdicts = scores.flatMap((score) => (score.verdict === null ? [] : [score.verdict]))
+    const judgeRows =
+        verdicts.length === 0
+            ? []
+            : [
+                  `| facts pass rate | ${formatRate(passRate(verdicts, (verdict) => verdict.facts.pass))} |`,
+                  `| style pass rate | ${formatRate(passRate(verdicts, (verdict) => verdict.style.pass))} |`,
+              ]
     return [
         ...mergeReadyRows,
+        ...judgeRows,
         `| drafts | ${oneScorePerCase.filter((score) => score.hasDraft).length}/${oneScorePerCase.length} |`,
-        `| mean page overlap | ${formatRate(mean(oneScorePerCase.map((score) => score.pageOverlap)))} |`,
-        `| mean edit size (lines) | ${mean(oneScorePerCase.map((score) => score.editSizeLines)).toFixed(1)} |`,
+        `| mean page overlap vs merged PR | ${formatRate(mean(oneScorePerCase.map((score) => score.pageOverlap)))} |`,
+        `| mean edit size vs merged PR (lines) | ${mean(oneScorePerCase.map((score) => score.editSizeLines)).toFixed(1)} |`,
         ...valeRows,
     ]
 }
@@ -183,11 +193,12 @@ function verdictCells(caseScores: CaseScore[]): string[] {
     const verdicts = caseScores.flatMap((score) => (score.verdict === null ? [] : [score.verdict]))
     const readyCount = caseScores.filter((score) => score.isMergeReady === true).length
     const ready = caseScores.some(isScoredForMergeReady) ? `${readyCount}/${caseScores.length}` : '-'
-    if (verdicts.length === 0) return [ready, '-', '-']
+    if (verdicts.length === 0) return [ready, '-', '-', '-']
     return [
         ready,
-        mean(verdicts.map((verdict) => verdict.wrongFacts.length)).toFixed(1),
-        mean(verdicts.map((verdict) => verdict.missingFacts.length)).toFixed(1),
+        mean(verdicts.map((verdict) => verdict.facts.wrongFacts.length)).toFixed(1),
+        mean(verdicts.map((verdict) => verdict.facts.missingFacts.length)).toFixed(1),
+        mean(verdicts.map((verdict) => verdict.style.violations.length)).toFixed(1),
     ]
 }
 
@@ -232,8 +243,8 @@ function renderSummary(scoreRun: ScoreRun, skippedMetrics: string[]): string {
         '',
         '## Cases',
         '',
-        '| case | kind | ready | wrong | missing | draft | pages | edit | vale errors | vale warnings |',
-        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+        '| case | kind | ready | wrong facts | missing facts | style violations | draft | pages vs merged PR | edit vs merged PR | vale errors | vale warnings |',
+        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ...caseRows.map((row) => `| ${row} |`),
         '',
     ].join('\n')
@@ -252,8 +263,11 @@ function createRunDir(): string {
     return runDir
 }
 
-const loadJudge = (runConfig: RunConfig) =>
-    createJudge(runConfig.judge, readYaml<Record<string, string>>('criteria.yaml'))
+async function loadJudge(runConfig: RunConfig): Promise<Judge> {
+    const { docsRepo, vale, judge } = runConfig
+    const styleGuide = await readDocsRepoFile(docsRepo, vale.configRef, judge.styleGuidePath)
+    return createJudge(judge, readYaml<Record<string, string>>('criteria.yaml'), styleGuide)
+}
 
 async function score(args: string[]) {
     const { values } = parseArgs({
@@ -273,7 +287,7 @@ async function score(args: string[]) {
     const vale = values['skip-vale']
         ? undefined
         : await prepareVale({ docsRepo: runConfig.docsRepo, ...runConfig.vale })
-    const judge = values['skip-judge'] ? undefined : loadJudge(runConfig)
+    const judge = values['skip-judge'] ? undefined : await loadJudge(runConfig)
     const scoreRun = await scoreDrafts(values.drafts, {
         cases,
         vale,
@@ -295,7 +309,7 @@ type GraderVariant = 'reference' | Defect
 type GraderOutcome = { caseId: string; variant: GraderVariant; rep: number; isCaught: boolean; reason: string }
 
 function namesDefect(verdict: Verdict, defect: Defect, marker: string): boolean {
-    const verdictText = JSON.stringify([verdict.wrongFacts, verdict.missingFacts]).toLowerCase()
+    const verdictText = JSON.stringify([verdict.facts.wrongFacts, verdict.facts.missingFacts]).toLowerCase()
     if (defect !== 'dropped-removal') return verdictText.includes(marker.toLowerCase())
     const verdictWords = significantWords(verdictText)
     return [...significantWords(marker)].filter((word) => verdictWords.has(word)).length >= minimumSharedWords
@@ -306,13 +320,13 @@ function graderOutcome(score: CaseScore, variant: GraderVariant, marker: string 
     const verdict = score.verdict
     if (verdict === null) return { ...outcome, isCaught: false, reason: 'no verdict' }
     if (variant === 'reference') {
-        return { ...outcome, isCaught: verdict.mergeReady, reason: verdict.mergeReady ? 'merge-ready' : verdict.reason }
+        return { ...outcome, isCaught: verdict.facts.pass, reason: verdict.facts.pass ? 'facts pass' : verdict.reason }
     }
-    if (verdict.mergeReady) return { ...outcome, isCaught: false, reason: `judged merge-ready: ${verdict.reason}` }
+    if (verdict.facts.pass) return { ...outcome, isCaught: false, reason: `facts judged to pass: ${verdict.reason}` }
     if (!namesDefect(verdict, variant, marker ?? '')) {
-        return { ...outcome, isCaught: false, reason: `not merge-ready, but the verdict does not name \`${marker}\`` }
+        return { ...outcome, isCaught: false, reason: `facts fail, but the verdict does not name \`${marker}\`` }
     }
-    return { ...outcome, isCaught: true, reason: 'not merge-ready, defect named' }
+    return { ...outcome, isCaught: true, reason: 'facts fail, defect named' }
 }
 
 function renderGraderSummary(outcomes: GraderOutcome[], errors: ScoreError[]): string {
@@ -329,7 +343,7 @@ function renderGraderSummary(outcomes: GraderOutcome[], errors: ScoreError[]): s
     return [
         '# Grader check',
         '',
-        'References must be judged merge-ready. Wrong variants must be judged not merge-ready with the defect named.',
+        'Merged PRs must pass facts. Wrong variants must fail facts with the defect named.',
         ...(errors.length > 0
             ? ['', `${errors.length} judge call(s) hit infrastructure errors; see errors.jsonl.`]
             : []),
@@ -351,7 +365,7 @@ async function checkGrader(args: string[]) {
     const { values } = parseArgs({ args, options: { cases: { type: 'string' }, reps: { type: 'string' } } })
     const runConfig = readYaml<RunConfig>('run-config.yml')
     const cases = selectCases(values.cases)
-    const judge = loadJudge(runConfig)
+    const judge = await loadJudge(runConfig)
     const runDir = createRunDir()
 
     const markerByVariantCase = new Map<string, string>()
